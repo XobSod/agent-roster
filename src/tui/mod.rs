@@ -1,8 +1,10 @@
-//! The TUI: projects and sessions on the left, the selected
+//! The TUI: sessions on shelves (or grouped by project) on the left, the selected
 //! agent's screen on the right. Enter hands the terminal to tmux; the back key
 //! returns here.
 
 mod app;
+mod list;
+mod theme;
 mod ui;
 
 use std::io::stdout;
@@ -17,12 +19,13 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::text::{Line, Text};
+use ratatui::text::Text;
 
 use crate::agent;
 use crate::engine::Roster;
-use crate::keys::{Action, Keymap};
-use app::{App, Op, Row, RowKey, View};
+use crate::keys::{Action, Keymap, Menu};
+use app::{App, Mode, Op};
+use list::{Entry, EntryKey, Group};
 
 /// How often states and the preview refresh.
 const TICK: Duration = Duration::from_secs(1);
@@ -51,11 +54,18 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
     let mut last_reload = Instant::now();
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
-        if event::poll(TICK.saturating_sub(last_reload.elapsed()))?
+        // Redraw often enough to move the spinners, refresh the data once a tick.
+        let until_reload = TICK.saturating_sub(last_reload.elapsed());
+        let wait = if ui::animating(app) {
+            until_reload.min(Duration::from_millis(theme::SPINNER_MS as u64))
+        } else {
+            until_reload
+        };
+        if event::poll(wait)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let (selected, view) = (app.selected_key(), app.view);
+            let (selected, mode) = (app.selected_key(), app.mode);
             match app.on_key(key) {
                 Some(Op::Quit) => return Ok(()),
                 Some(op) => {
@@ -63,7 +73,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                     reload(roster, app);
                     last_reload = Instant::now();
                 }
-                None if app.selected_key() != selected || app.view != view => {
+                None if app.selected_key() != selected || app.mode != mode => {
                     update_preview(roster, app)
                 }
                 None => {}
@@ -76,7 +86,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
     }
 }
 
-/// Folds hook events, checks the agents, and redraws the data from the database.
+/// Folds hook events, checks the agents, and reloads the data from the database.
 fn reload(roster: &mut Roster, app: &mut App) {
     if let Err(e) = roster.refresh() {
         app.fail(format!("{e:#}"));
@@ -89,32 +99,34 @@ fn reload(roster: &mut Roster, app: &mut App) {
 }
 
 fn update_preview(roster: &Roster, app: &mut App) {
-    let (title, text) = match app.selected_row().cloned() {
-        None => (Line::default(), app.empty_info()),
-        Some(Row::Project(p)) => (Line::from(p.name.clone()), app.project_info(&p)),
-        Some(Row::Session(s)) if s.deleted_at.is_some() => (
-            Line::from(format!("{} (deleted)", s.label())),
-            app.deleted_info(&s),
-        ),
-        Some(Row::Session(s)) => {
-            let title = Line::from(vec![format!("{} · ", s.label()).into(), ui::state_span(&s)]);
-            let text = match roster.screen(&s.id, true) {
-                Ok(screen) => screen_text(&screen),
-                Err(_) => {
-                    let key = app.keymap.label(Action::Start).unwrap_or("?");
-                    let then = if app.resumes(&s.agent) {
-                        "it resumes its conversation"
-                    } else {
-                        "it starts a new conversation"
-                    };
-                    Text::from(format!("Not running. Press {key} to start it; {then}."))
-                }
-            };
-            (title, text)
-        }
+    app.preview = match app.selected_entry().cloned() {
+        None => app.empty_info(),
+        Some(Entry::Heading {
+            group: Group::Project(id),
+            ..
+        }) => app
+            .project(id)
+            .cloned()
+            .map_or_else(Text::default, |p| app.project_info(&p)),
+        Some(Entry::Heading {
+            group: Group::Shelf(shelf),
+            count,
+            ..
+        }) => app.shelf_info(shelf, count),
+        Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => app.deleted_info(&s),
+        Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s.id, true) {
+            Ok(screen) => screen_text(&screen),
+            Err(_) => {
+                let key = app.chord(Menu::Session, Action::Start);
+                let then = if app.resumes(&s.agent) {
+                    "it resumes its conversation"
+                } else {
+                    "it starts a new conversation"
+                };
+                Text::from(format!("Not running. Press {key} to start it; {then}."))
+            }
+        },
     };
-    app.preview_title = title;
-    app.preview = text;
 }
 
 /// A captured screen as styled text, without the empty lines below the content.
@@ -165,14 +177,14 @@ fn perform(
         Op::Delete(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Deleting {label}…"))?;
-            let key = app.keymap.label(Action::Deleted).unwrap_or("?").to_string();
+            let chord = app.chord(Menu::View, Action::ShowDeleted);
             roster
                 .delete(&id)
-                .map(|()| format!("Deleted {label}; {key} shows deleted sessions"))
+                .map(|()| format!("Deleted {label}; {chord} shows deleted sessions"))
         }
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
-            app.set_view(View::Live);
-            app.select(RowKey::Session(s.id.clone()));
+            app.set_mode(Mode::Live);
+            app.select(EntryKey::Session(s.id.clone()));
             format!("Restored {} (stopped)", s.label())
         }),
         Op::SetUnread(id, unread) => roster.set_unread(&id, unread).map(|()| String::new()),
@@ -185,14 +197,14 @@ fn perform(
             roster
                 .new_session(&project, name.as_deref(), &agent)
                 .map(|s| {
-                    app.select(RowKey::Session(s.id.clone()));
-                    let key = app.keymap.label(Action::Attach).unwrap_or("?");
+                    app.select(EntryKey::Session(s.id.clone()));
+                    let key = app.keymap.label(Action::Confirm).unwrap_or("?");
                     format!("Started {}; {key} attaches", s.label())
                 })
         }
         Op::AddProject { name, path } => roster.add_project(&name, Path::new(&path)).map(|p| {
-            app.select(RowKey::Project(p.id));
-            format!("Added project {}", p.name)
+            let chord = app.chord(Menu::Session, Action::NewSession);
+            format!("Added project {}; {chord} starts a session in it", p.name)
         }),
         Op::RemoveProject(name) => roster
             .remove_project(&name)

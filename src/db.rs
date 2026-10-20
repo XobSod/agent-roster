@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{Event, Project, Session, State};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -18,7 +18,10 @@ CREATE TABLE projects (
     id         INTEGER PRIMARY KEY,
     name       TEXT NOT NULL UNIQUE,
     origin     TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    agent      TEXT,
+    model      TEXT,
+    effort     TEXT
 );
 CREATE TABLE sessions (
     id                TEXT PRIMARY KEY,
@@ -36,7 +39,12 @@ CREATE TABLE sessions (
     screen_changed_at INTEGER,
     created_at        INTEGER NOT NULL,
     deleted_at        INTEGER,
-    baseline_at       INTEGER
+    baseline_at       INTEGER,
+    title             TEXT,
+    model             TEXT,
+    effort            TEXT,
+    state_since       INTEGER,
+    pending_prompt    TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -51,7 +59,26 @@ CREATE TABLE events (
 const SESSION_COLUMNS: &str =
     "s.id, s.project_id, p.name, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
-    s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at";
+    s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
+    s.state_since, s.pending_prompt";
+
+const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
+
+/// What each schema version adds to the one before.
+const MIGRATIONS: &[(i64, &str)] = &[
+    (2, "ALTER TABLE sessions ADD COLUMN baseline_at INTEGER;"),
+    (
+        3,
+        "ALTER TABLE projects ADD COLUMN agent TEXT;
+         ALTER TABLE projects ADD COLUMN model TEXT;
+         ALTER TABLE projects ADD COLUMN effort TEXT;
+         ALTER TABLE sessions ADD COLUMN title TEXT;
+         ALTER TABLE sessions ADD COLUMN model TEXT;
+         ALTER TABLE sessions ADD COLUMN effort TEXT;
+         ALTER TABLE sessions ADD COLUMN state_since INTEGER;
+         ALTER TABLE sessions ADD COLUMN pending_prompt TEXT;",
+    ),
+];
 
 /// Applied events older than this are deleted.
 const EVENT_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
@@ -79,9 +106,14 @@ impl Db {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
             0 => conn.execute_batch(SCHEMA)?,
-            1 => conn.execute_batch("ALTER TABLE sessions ADD COLUMN baseline_at INTEGER")?,
-            SCHEMA_VERSION => {}
-            v => bail!("the database is from a newer roster (schema {v}); upgrade roster"),
+            v if v > SCHEMA_VERSION => {
+                bail!("the database is from a newer roster (schema {v}); upgrade roster")
+            }
+            v => {
+                for (_, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > v) {
+                    conn.execute_batch(sql)?;
+                }
+            }
         }
         if version != SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -91,12 +123,22 @@ impl Db {
 
     // Projects
 
-    pub fn add_project(&self, name: &str, origin: &Path, now: i64) -> Result<Project> {
-        let origin_str = origin.to_str().context("project path is not valid UTF-8")?;
+    /// Inserts `project` (its id is ignored) and returns it with its new id.
+    pub fn add_project(&self, project: &Project, now: i64) -> Result<Project> {
+        let name = &project.name;
+        let origin_str = path_str(&project.origin)?;
         self.conn
             .execute(
-                "INSERT INTO projects (name, origin, created_at) VALUES (?1, ?2, ?3)",
-                params![name, origin_str, now],
+                "INSERT INTO projects (name, origin, created_at, agent, model, effort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    name,
+                    origin_str,
+                    now,
+                    project.agent,
+                    project.model,
+                    project.effort
+                ],
             )
             .map_err(|e| match e {
                 rusqlite::Error::SqliteFailure(f, _)
@@ -108,15 +150,40 @@ impl Db {
             })?;
         Ok(Project {
             id: self.conn.last_insert_rowid(),
-            name: name.into(),
-            origin: origin.into(),
+            ..project.clone()
         })
     }
 
+    #[allow(dead_code)] // for editing projects (the forms, next)
+    pub fn save_project(&self, p: &Project) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE projects SET name = ?2, origin = ?3, agent = ?4, model = ?5, effort = ?6
+                 WHERE id = ?1",
+                params![
+                    p.id,
+                    p.name,
+                    path_str(&p.origin)?,
+                    p.agent,
+                    p.model,
+                    p.effort
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    anyhow::anyhow!("project {:?} already exists", p.name)
+                }
+                e => e.into(),
+            })?;
+        Ok(())
+    }
+
     pub fn projects(&self) -> Result<Vec<Project>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, origin FROM projects ORDER BY name")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name"
+        ))?;
         let rows = stmt.query_map([], project_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -125,7 +192,7 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, origin FROM projects WHERE name = ?1",
+                &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE name = ?1"),
                 [name],
                 project_from_row,
             )
@@ -328,7 +395,8 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET name = ?2, conversation_id = ?3, transcript_path = ?4, state = ?5, unread = ?6,
              exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
-             baseline_at = ?12
+             baseline_at = ?12, title = ?13, model = ?14, effort = ?15, state_since = ?16,
+             pending_prompt = ?17
          WHERE id = ?1",
         params![
             s.id,
@@ -343,6 +411,11 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             s.screen_changed_at,
             s.deleted_at,
             s.baseline_at,
+            s.title,
+            s.model,
+            s.effort,
+            s.state_since,
+            s.pending_prompt,
         ],
     )
     .map_err(|e| match e {
@@ -359,6 +432,9 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
         id: r.get(0)?,
         name: r.get(1)?,
         origin: r.get::<_, String>(2)?.into(),
+        agent: r.get(3)?,
+        model: r.get(4)?,
+        effort: r.get(5)?,
     })
 }
 
@@ -381,6 +457,11 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         created_at: r.get(14)?,
         deleted_at: r.get(15)?,
         baseline_at: r.get(16)?,
+        title: r.get(17)?,
+        model: r.get(18)?,
+        effort: r.get(19)?,
+        state_since: r.get(20)?,
+        pending_prompt: r.get(21)?,
     })
 }
 
@@ -394,9 +475,35 @@ mod tests {
     use super::*;
     use crate::model::tests::session;
 
+    fn project(name: &str) -> Project {
+        Project {
+            id: 0,
+            name: name.into(),
+            origin: "/tmp".into(),
+            agent: None,
+            model: None,
+            effort: None,
+        }
+    }
+
+    /// The schema as version 1 created it.
+    const V1_SCHEMA: &str = "
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+            origin TEXT NOT NULL, created_at INTEGER NOT NULL);
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+            name TEXT NOT NULL, agent TEXT NOT NULL, workdir TEXT NOT NULL, conversation_id TEXT,
+            transcript_path TEXT, state TEXT NOT NULL, unread INTEGER NOT NULL DEFAULT 0,
+            exit_status INTEGER, last_event_at INTEGER, screen_hash TEXT, screen_changed_at INTEGER,
+            created_at INTEGER NOT NULL, deleted_at INTEGER);
+        CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
+        CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+            kind TEXT NOT NULL, at INTEGER NOT NULL, payload TEXT);
+        PRAGMA user_version = 1;";
+
     fn db_with_session() -> (Db, Session) {
         let db = Db::open_in_memory().unwrap();
-        let project = db.add_project("demo", Path::new("/tmp"), 0).unwrap();
+        let project = db.add_project(&project("demo"), 0).unwrap();
         let mut s = session("a1");
         s.project_id = project.id;
         db.insert_session(&s).unwrap();
@@ -406,9 +513,7 @@ mod tests {
     #[test]
     fn migrates_a_version_1_database() {
         let conn = Connection::open_in_memory().unwrap();
-        let v1 = SCHEMA.replace(",\n    baseline_at       INTEGER", "");
-        conn.execute_batch(&v1).unwrap();
-        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
         conn.execute(
             "INSERT INTO projects (name, origin, created_at) VALUES ('p', '/p', 0)",
             [],
@@ -422,12 +527,32 @@ mod tests {
         .unwrap();
         let db = Db::init(conn).unwrap();
         let s = db.session("old").unwrap();
-        assert_eq!((s.state, s.baseline_at), (State::Idle, None));
+        assert_eq!((s.state, s.baseline_at, s.title), (State::Idle, None, None));
+        let p = db.project("p").unwrap().unwrap();
+        assert_eq!(p.model, None);
         let version: i64 = db
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn project_defaults_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let mut p = project("demo");
+        p.model = Some("opus".into());
+        p.effort = Some("high".into());
+        let mut p = db.add_project(&p, 0).unwrap();
+        assert_eq!(
+            db.project("demo").unwrap().unwrap().model.as_deref(),
+            Some("opus")
+        );
+        p.name = "renamed".into();
+        p.effort = None;
+        db.save_project(&p).unwrap();
+        let saved = db.project("renamed").unwrap().unwrap();
+        assert_eq!((saved.model.as_deref(), saved.effort), (Some("opus"), None));
     }
 
     #[test]

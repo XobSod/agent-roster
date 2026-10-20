@@ -20,18 +20,20 @@ your own tmux shows that pane's older output, not the agent's.
 
 ## Use
 
-Run `roster` for the TUI: projects and their sessions on the left, the selected
-agent's screen on the right.
+Run `roster` for the TUI: sessions on the left, the selected agent's screen on the right.
 
-| Key | |
+Navigate with `h j k l` (or arrows); `Enter` attaches (or folds a heading); `q` quits
+and `?` shows every key. Everything else is in three menus, which pop up their keys:
+
+| Menu | Keys |
 |---|---|
-| `j`/`k` | move |
-| `Enter` | go into the agent (Ctrl+Q comes back and marks it read); on a project, start a session |
-| `n` / `P` | new session / add project |
-| `s` / `d` / `R` | start / stop / restart (restarts resume the conversation) |
-| `D` | delete (asks); `X` shows deleted sessions, `Enter` there restores |
-| `u` | toggle unread (●) |
-| `q` | quit; the agents keep running |
+| `s` session | `n` new · `s` start · `x` stop · `r` restart · `u` read/unread · `d` delete |
+| `p` project | `n` new · `f` show only this project · `d` remove |
+| `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) |
+
+Sessions sit on shelves by attention: *Needs you* (questions, finished turns you
+haven't seen), *Idle*, *Working* (dimmed) and *Stopped*. In an agent, Ctrl+Q comes
+back and marks it read.
 
 Everything is also available from the CLI:
 

@@ -7,6 +7,8 @@
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
 //! down = ["j", "Down"]
+//! [keys.session]                  # a menu: `menu` opens it, the rest act inside
+//! menu = "s"
 //! delete = ""
 //!
 //! [agents.claude]
@@ -40,35 +42,101 @@ pub struct Keys {
     pub detach: String,
     pub up: KeyList,
     pub down: KeyList,
-    pub attach: KeyList,
+    /// Fold the selected shelf or project group (from a session: its group).
+    pub collapse: KeyList,
+    pub expand: KeyList,
+    /// Attach to the selected session, open or fold a heading, restore when deleted.
+    pub confirm: KeyList,
+    pub quit: KeyList,
+    pub help: KeyList,
+    pub session: SessionKeys,
+    pub project: ProjectKeys,
+    pub view: ViewKeys,
+}
+
+/// The session menu: `menu` opens it, the others act inside it.
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionKeys {
+    pub menu: KeyList,
     pub new: KeyList,
-    pub add_project: KeyList,
     pub start: KeyList,
     pub stop: KeyList,
     pub restart: KeyList,
     pub delete: KeyList,
     pub toggle_read: KeyList,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectKeys {
+    pub menu: KeyList,
+    pub new: KeyList,
+    pub remove: KeyList,
+    pub filter: KeyList,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ViewKeys {
+    pub menu: KeyList,
+    pub group: KeyList,
     pub deleted: KeyList,
-    pub quit: KeyList,
+}
+
+fn keys(names: &[&str]) -> KeyList {
+    KeyList(names.iter().map(|n| n.to_string()).collect())
 }
 
 impl Default for Keys {
     fn default() -> Self {
-        let keys = |names: &[&str]| KeyList(names.iter().map(|n| n.to_string()).collect());
         Keys {
             detach: "C-q".into(),
             up: keys(&["k", "Up"]),
             down: keys(&["j", "Down"]),
-            attach: keys(&["Enter"]),
-            new: keys(&["n"]),
-            add_project: keys(&["P"]),
-            start: keys(&["s"]),
-            stop: keys(&["d"]),
-            restart: keys(&["R"]),
-            delete: keys(&["D"]),
-            toggle_read: keys(&["u"]),
-            deleted: keys(&["X"]),
+            collapse: keys(&["h", "Left"]),
+            expand: keys(&["l", "Right"]),
+            confirm: keys(&["Enter"]),
             quit: keys(&["q", "C-c"]),
+            help: keys(&["?"]),
+            session: SessionKeys::default(),
+            project: ProjectKeys::default(),
+            view: ViewKeys::default(),
+        }
+    }
+}
+
+impl Default for SessionKeys {
+    fn default() -> Self {
+        SessionKeys {
+            menu: keys(&["s"]),
+            new: keys(&["n"]),
+            start: keys(&["s"]),
+            stop: keys(&["x"]),
+            restart: keys(&["r"]),
+            delete: keys(&["d"]),
+            toggle_read: keys(&["u"]),
+        }
+    }
+}
+
+impl Default for ProjectKeys {
+    fn default() -> Self {
+        ProjectKeys {
+            menu: keys(&["p"]),
+            new: keys(&["n"]),
+            remove: keys(&["d"]),
+            filter: keys(&["f"]),
+        }
+    }
+}
+
+impl Default for ViewKeys {
+    fn default() -> Self {
+        ViewKeys {
+            menu: keys(&["v"]),
+            group: keys(&["p"]),
+            deleted: keys(&["d"]),
         }
     }
 }
@@ -173,15 +241,19 @@ mod tests {
 
     #[test]
     fn tui_keys_take_one_several_or_none() {
-        let config =
-            Config::parse("[keys]\nstop = \"x\"\ndown = [\"j\", \"PageDown\"]\ndelete = \"\"")
-                .unwrap();
-        assert_eq!(config.keys.stop, KeyList(vec!["x".into()]));
+        let config = Config::parse(
+            "[keys]\ndown = [\"j\", \"PageDown\"]\n[keys.session]\nstop = \"k\"\ndelete = \"\"",
+        )
+        .unwrap();
+        // Menu keys may repeat top-level ones: they only act inside the menu.
+        assert_eq!(config.keys.session.stop, KeyList(vec!["k".into()]));
         assert_eq!(config.keys.down.0, ["j", "PageDown"]);
-        assert!(config.keys.delete.0.is_empty());
+        assert!(config.keys.session.delete.0.is_empty());
         assert_eq!(config.keys.quit.0, ["q", "C-c"]);
-        assert!(Config::parse("[keys]\nstop = \"Nope\"").is_err());
-        assert!(Config::parse("[keys]\nstop = \"q\"").is_err());
+        assert!(Config::parse("[keys.session]\nstop = \"Nope\"").is_err());
+        // Within one menu, or among top-level keys and menu openers, a key is unique.
+        assert!(Config::parse("[keys.session]\nstop = \"n\"").is_err());
+        assert!(Config::parse("[keys]\nhelp = \"s\"").is_err());
     }
 
     #[test]

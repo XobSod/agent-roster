@@ -1,5 +1,8 @@
-//! TUI key bindings: every action remappable or disabled in
-//! `[keys]` of config.toml, with key names like `j`, `D`, `Enter`, `C-c`, `M-x`.
+//! TUI key bindings: global keys plus three menus (session,
+//! project, view). A menu key opens a popup with that menu's keys, so the same
+//! letter can mean the same thing in each menu (`n` is new in all of them).
+//! Every key is remappable or disabled in `[keys]` of config.toml, with names like
+//! `j`, `D`, `Enter`, `C-c`, `M-x`.
 
 use std::collections::HashMap;
 
@@ -9,70 +12,69 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::{KeyList, Keys};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Menu {
+    Session,
+    Project,
+    View,
+}
+
+impl Menu {
+    pub const ALL: [Menu; 3] = [Menu::Session, Menu::Project, Menu::View];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Menu::Session => "session",
+            Menu::Project => "project",
+            Menu::View => "view",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Up,
     Down,
-    Attach,
-    New,
-    AddProject,
+    Collapse,
+    Expand,
+    Confirm,
+    Quit,
+    Help,
+    Open(Menu),
+    NewSession,
     Start,
     Stop,
     Restart,
     Delete,
     ToggleRead,
-    Deleted,
-    Quit,
+    NewProject,
+    RemoveProject,
+    FilterProject,
+    ToggleGroup,
+    ShowDeleted,
 }
 
 impl Action {
-    /// In the order the footer shows them.
-    pub const ALL: [Action; 12] = [
-        Action::Attach,
-        Action::New,
-        Action::AddProject,
-        Action::Start,
-        Action::Stop,
-        Action::Restart,
-        Action::Delete,
-        Action::ToggleRead,
-        Action::Deleted,
-        Action::Quit,
-        Action::Up,
-        Action::Down,
-    ];
-
-    /// The setting's name in `[keys]`.
-    pub fn setting(self) -> &'static str {
+    /// How the help and the menu popups describe it.
+    pub fn describe(self) -> &'static str {
         match self {
             Action::Up => "up",
             Action::Down => "down",
-            Action::Attach => "attach",
-            Action::New => "new",
-            Action::AddProject => "add_project",
+            Action::Collapse => "fold",
+            Action::Expand => "unfold",
+            Action::Confirm => "attach / open",
+            Action::Quit => "quit",
+            Action::Help => "help",
+            Action::Open(menu) => menu.name(),
+            Action::NewSession | Action::NewProject => "new",
             Action::Start => "start",
             Action::Stop => "stop",
             Action::Restart => "restart",
             Action::Delete => "delete",
-            Action::ToggleRead => "toggle_read",
-            Action::Deleted => "deleted",
-            Action::Quit => "quit",
-        }
-    }
-
-    fn keys(self, keys: &Keys) -> &KeyList {
-        match self {
-            Action::Up => &keys.up,
-            Action::Down => &keys.down,
-            Action::Attach => &keys.attach,
-            Action::New => &keys.new,
-            Action::AddProject => &keys.add_project,
-            Action::Start => &keys.start,
-            Action::Stop => &keys.stop,
-            Action::Restart => &keys.restart,
-            Action::Delete => &keys.delete,
-            Action::ToggleRead => &keys.toggle_read,
-            Action::Deleted => &keys.deleted,
-            Action::Quit => &keys.quit,
+            Action::ToggleRead => "read/unread",
+            Action::RemoveProject => "remove",
+            Action::FilterProject => "show only this",
+            Action::ToggleGroup => "group by project",
+            Action::ShowDeleted => "deleted sessions",
         }
     }
 }
@@ -146,7 +148,7 @@ impl Key {
         }
     }
 
-    /// How the footer shows the key.
+    /// How hints show the key.
     pub fn label(&self) -> String {
         let base = match self.code {
             KeyCode::Char(' ') => "Space".to_string(),
@@ -165,39 +167,150 @@ impl Key {
     }
 }
 
+/// One binding table: the top level or one menu, with keys in display order.
+#[derive(Default)]
+struct Table {
+    keys: HashMap<Key, Action>,
+    order: Vec<Action>,
+}
+
+impl Table {
+    fn bind(
+        &mut self,
+        table: &str,
+        setting: &str,
+        list: &KeyList,
+        action: Action,
+        labels: &mut HashMap<Action, String>,
+    ) -> Result<()> {
+        self.order.push(action);
+        for name in &list.0 {
+            let key = Key::parse(name).map_err(|e| anyhow::anyhow!("{table}.{setting}: {e}"))?;
+            if let Some(other) = self.keys.insert(key, action) {
+                bail!(
+                    "key {name:?} is bound twice in {table} ({} and {})",
+                    other.describe(),
+                    action.describe()
+                );
+            }
+            labels.entry(action).or_insert_with(|| key.label());
+        }
+        Ok(())
+    }
+}
+
 pub struct Keymap {
-    actions: HashMap<Key, Action>,
+    top: Table,
+    menus: HashMap<Menu, Table>,
     labels: HashMap<Action, String>,
+    /// The back key while attached (bound in roster's tmux), for the help.
+    pub detach: String,
 }
 
 impl Keymap {
     pub fn new(keys: &Keys) -> Result<Keymap> {
-        let mut actions = HashMap::new();
         let mut labels = HashMap::new();
-        for action in Action::ALL {
-            for name in &action.keys(keys).0 {
-                let key = Key::parse(name)
-                    .map_err(|e| anyhow::anyhow!("keys.{}: {e}", action.setting()))?;
-                if let Some(other) = actions.insert(key, action) {
-                    bail!(
-                        "key {name:?} is bound to both keys.{} and keys.{}",
-                        other.setting(),
-                        action.setting()
-                    );
-                }
-                labels.entry(action).or_insert_with(|| key.label());
-            }
-        }
-        Ok(Keymap { actions, labels })
+        let mut top = Table::default();
+        let t = "keys";
+        top.bind(t, "up", &keys.up, Action::Up, &mut labels)?;
+        top.bind(t, "down", &keys.down, Action::Down, &mut labels)?;
+        top.bind(t, "collapse", &keys.collapse, Action::Collapse, &mut labels)?;
+        top.bind(t, "expand", &keys.expand, Action::Expand, &mut labels)?;
+        top.bind(t, "confirm", &keys.confirm, Action::Confirm, &mut labels)?;
+        top.bind(
+            "keys.session",
+            "menu",
+            &keys.session.menu,
+            Action::Open(Menu::Session),
+            &mut labels,
+        )?;
+        top.bind(
+            "keys.project",
+            "menu",
+            &keys.project.menu,
+            Action::Open(Menu::Project),
+            &mut labels,
+        )?;
+        top.bind(
+            "keys.view",
+            "menu",
+            &keys.view.menu,
+            Action::Open(Menu::View),
+            &mut labels,
+        )?;
+        top.bind(t, "help", &keys.help, Action::Help, &mut labels)?;
+        top.bind(t, "quit", &keys.quit, Action::Quit, &mut labels)?;
+
+        let mut session = Table::default();
+        let (t, k) = ("keys.session", &keys.session);
+        session.bind(t, "new", &k.new, Action::NewSession, &mut labels)?;
+        session.bind(t, "start", &k.start, Action::Start, &mut labels)?;
+        session.bind(t, "stop", &k.stop, Action::Stop, &mut labels)?;
+        session.bind(t, "restart", &k.restart, Action::Restart, &mut labels)?;
+        session.bind(
+            t,
+            "toggle_read",
+            &k.toggle_read,
+            Action::ToggleRead,
+            &mut labels,
+        )?;
+        session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
+
+        let mut project = Table::default();
+        let (t, k) = ("keys.project", &keys.project);
+        project.bind(t, "new", &k.new, Action::NewProject, &mut labels)?;
+        project.bind(t, "filter", &k.filter, Action::FilterProject, &mut labels)?;
+        project.bind(t, "remove", &k.remove, Action::RemoveProject, &mut labels)?;
+
+        let mut view = Table::default();
+        let (t, k) = ("keys.view", &keys.view);
+        view.bind(t, "group", &k.group, Action::ToggleGroup, &mut labels)?;
+        view.bind(t, "deleted", &k.deleted, Action::ShowDeleted, &mut labels)?;
+
+        let menus = HashMap::from([
+            (Menu::Session, session),
+            (Menu::Project, project),
+            (Menu::View, view),
+        ]);
+        Ok(Keymap {
+            top,
+            menus,
+            labels,
+            detach: keys.detach.clone(),
+        })
     }
 
-    pub fn action(&self, e: &KeyEvent) -> Option<Action> {
-        self.actions.get(&Key::from_event(e)).copied()
+    /// The top-level action for a key press.
+    pub fn top(&self, e: &KeyEvent) -> Option<Action> {
+        self.top.keys.get(&Key::from_event(e)).copied()
+    }
+
+    /// The action for a key press inside an open menu.
+    pub fn menu(&self, menu: Menu, e: &KeyEvent) -> Option<Action> {
+        self.menus[&menu].keys.get(&Key::from_event(e)).copied()
     }
 
     /// The first key bound to `action`, if any.
     pub fn label(&self, action: Action) -> Option<&str> {
         self.labels.get(&action).map(String::as_str)
+    }
+
+    /// A menu's bound actions with their keys, in display order.
+    pub fn menu_items(&self, menu: Menu) -> Vec<(&str, Action)> {
+        self.menus[&menu]
+            .order
+            .iter()
+            .filter_map(|a| Some((self.label(*a)?, *a)))
+            .collect()
+    }
+
+    /// The top level's bound actions with their keys, in display order.
+    pub fn top_items(&self) -> Vec<(&str, Action)> {
+        self.top
+            .order
+            .iter()
+            .filter_map(|a| Some((self.label(*a)?, *a)))
+            .collect()
     }
 }
 
@@ -207,6 +320,15 @@ mod tests {
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    fn chr(c: char) -> KeyEvent {
+        let shift = if c.is_ascii_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        press(KeyCode::Char(c), shift)
     }
 
     #[test]
@@ -223,47 +345,50 @@ mod tests {
     }
 
     #[test]
-    fn matches_presses_like_terminals_send_them() {
+    fn top_level_keys_and_menus() {
         let map = Keymap::new(&Keys::default()).unwrap();
-        // Shift+d arrives as 'D' with SHIFT; the character already carries the case.
+        assert_eq!(map.top(&chr('j')), Some(Action::Down));
+        assert_eq!(map.top(&chr('h')), Some(Action::Collapse));
+        assert_eq!(map.top(&chr('s')), Some(Action::Open(Menu::Session)));
         assert_eq!(
-            map.action(&press(KeyCode::Char('D'), KeyModifiers::SHIFT)),
-            Some(Action::Delete)
-        );
-        assert_eq!(
-            map.action(&press(KeyCode::Char('d'), KeyModifiers::NONE)),
-            Some(Action::Stop)
-        );
-        assert_eq!(
-            map.action(&press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            map.top(&press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Action::Quit)
         );
+        assert_eq!(map.top(&chr('n')), None);
+        // The same letter means the same in each menu.
+        assert_eq!(map.menu(Menu::Session, &chr('n')), Some(Action::NewSession));
+        assert_eq!(map.menu(Menu::Project, &chr('n')), Some(Action::NewProject));
+        assert_eq!(map.menu(Menu::Session, &chr('d')), Some(Action::Delete));
         assert_eq!(
-            map.action(&press(KeyCode::Down, KeyModifiers::NONE)),
-            Some(Action::Down)
+            map.menu(Menu::Project, &chr('d')),
+            Some(Action::RemoveProject)
         );
-        assert_eq!(
-            map.action(&press(KeyCode::Char('a'), KeyModifiers::NONE)),
-            None
-        );
+        assert_eq!(map.menu(Menu::View, &chr('p')), Some(Action::ToggleGroup));
+        let items: Vec<&str> = map
+            .menu_items(Menu::Session)
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(items, ["n", "s", "x", "r", "u", "d"]);
     }
 
     #[test]
     fn rejects_conflicts_and_allows_disabling() {
-        let keys = Keys {
-            stop: KeyList(vec!["D".into()]),
-            ..Keys::default()
-        };
+        let mut keys = Keys::default();
+        keys.session.stop = KeyList(vec!["d".into()]);
         assert!(Keymap::new(&keys).is_err());
-        let keys = Keys {
-            delete: KeyList(vec![]),
-            ..Keys::default()
-        };
+        let mut keys = Keys::default();
+        keys.view.menu = KeyList(vec!["s".into()]);
+        assert!(Keymap::new(&keys).is_err());
+        let mut keys = Keys::default();
+        keys.session.delete = KeyList(vec![]);
         let map = Keymap::new(&keys).unwrap();
         assert_eq!(map.label(Action::Delete), None);
-        assert_eq!(
-            map.action(&press(KeyCode::Char('D'), KeyModifiers::SHIFT)),
-            None
+        assert_eq!(map.menu(Menu::Session, &chr('d')), None);
+        assert!(
+            !map.menu_items(Menu::Session)
+                .iter()
+                .any(|(_, a)| *a == Action::Delete)
         );
     }
 }

@@ -12,8 +12,10 @@ fn tui_walkthrough() {
     let term = Terminal::start(&t, &command, (120, 30));
     term.wait_for("the empty list", "No projects yet");
 
-    // Add a project: its name, then its directory (prefilled with the cwd).
-    term.keys(&["P"]);
+    // The project menu adds a project: its name, then its directory.
+    term.keys(&["p"]);
+    term.wait_for("the project menu", "n new");
+    term.keys(&["n"]);
     term.text("demo");
     term.keys(&["Enter"]);
     term.wait_for("the directory prompt", "Origin directory of demo");
@@ -22,11 +24,12 @@ fn tui_walkthrough() {
     term.keys(&["Enter"]);
     term.wait_for("the project", "Added project demo");
 
-    // A new session; its screen shows in the preview.
-    term.keys(&["n"]);
+    // The session menu starts a session; its screen shows in the preview.
+    term.keys(&["s", "n"]);
     term.text("one");
     term.keys(&["Enter"]);
     term.wait_for("the agent's screen in the preview", "fake agent:");
+    term.wait_for("the header", "demo / one");
 
     // Attach, type to the agent, come back with Ctrl+Q.
     term.keys(&["Enter"]);
@@ -36,17 +39,27 @@ fn tui_walkthrough() {
     term.wait_for("the list again", "Enter attach");
     term.wait_for("the agent's echo in the preview", "typed while attached");
 
-    // Stop doesn't ask; delete does; the deleted view restores.
-    term.keys(&["d"]);
+    // Stop it: it moves to the folded Stopped shelf, which gets the selection.
+    term.keys(&["s", "x"]);
     term.wait_for("the stop", "Stopped demo/one");
-    term.keys(&["D"]);
+    term.wait_for("the Stopped shelf", "Stopped (1)");
+    term.keys(&["l", "j"]);
+    term.keys(&["s", "d"]);
     term.wait_for("the confirmation", "Delete demo/one?");
     term.keys(&["y"]);
     term.wait_for("the delete", "Deleted demo/one");
-    term.keys(&["X"]);
+
+    // The view menu shows deleted sessions; Enter restores.
+    term.keys(&["v", "d"]);
     term.wait_for("the deleted view", "deleted sessions");
     term.keys(&["Enter"]);
     term.wait_for("the restore", "Restored demo/one");
+
+    // Help lists the menus; any key closes it.
+    term.keys(&["?"]);
+    term.wait_for("the help", "Session menu (s …)");
+    term.keys(&["Escape"]);
+    term.wait_for_gone("the help closed", "Session menu (s …)");
 
     term.keys(&["q"]);
     term.wait_for("the TUI to exit", "TUI-EXIT=0");

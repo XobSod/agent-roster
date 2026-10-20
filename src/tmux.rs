@@ -33,6 +33,8 @@ pub struct Pane {
     pub dead: bool,
     pub dead_status: Option<i32>,
     pub pid: Option<i32>,
+    /// The terminal title the program set (tmux's default is the host name).
+    pub title: String,
 }
 
 pub struct Tmux {
@@ -97,7 +99,7 @@ impl Tmux {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}",
+                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t#{pane_title}",
             ])
             .output()
             .context("can't run tmux (is it installed?)")?;
@@ -110,12 +112,14 @@ impl Tmux {
         }
         let mut panes = HashMap::new();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            if let [name, dead, status, pid] = fields[..] {
+            // The title comes last and may itself contain tabs.
+            let fields: Vec<&str> = line.splitn(5, '\t').collect();
+            if let [name, dead, status, pid, title] = fields[..] {
                 panes.entry(name.to_string()).or_insert(Pane {
                     dead: dead == "1",
                     dead_status: status.parse().ok(),
                     pid: pid.parse().ok(),
+                    title: title.to_string(),
                 });
             }
         }

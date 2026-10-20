@@ -1,42 +1,22 @@
 //! TUI state and key handling. No terminal or tmux calls here: keys become `Op`s
 //! that the run loop carries out, so this part is testable on its own.
 
+use std::cell::Cell;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::text::{Line, Text};
+use ratatui::text::Text;
 
-use crate::keys::{Action, Keymap};
+use super::list::{self, Entry, EntryKey, Group, Shelf};
+use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
 use crate::paths::PROJECT_ENV;
 
 const MESSAGE_TTL: Duration = Duration::from_secs(6);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RowKey {
-    Project(i64),
-    Session(String),
-}
-
-// A few dozen rows at most, so the size difference doesn't matter.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug)]
-pub enum Row {
-    Project(Project),
-    Session(Session),
-}
-
-impl Row {
-    pub fn key(&self) -> RowKey {
-        match self {
-            Row::Project(p) => RowKey::Project(p.id),
-            Row::Session(s) => RowKey::Session(s.id.clone()),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum View {
+pub enum Mode {
     Live,
     Deleted,
 }
@@ -97,17 +77,27 @@ pub struct Message {
 
 pub struct App {
     pub keymap: Keymap,
-    pub view: View,
-    pub rows: Vec<Row>,
+    pub mode: Mode,
+    /// Grouped by project instead of shelves.
+    pub grouped: bool,
+    /// Showing only this project's sessions.
+    pub filter: Option<i64>,
+    folded: HashSet<Group>,
+    pub entries: Vec<Entry>,
     pub selected: usize,
+    /// First visible list row; the drawing code keeps the selection in view.
+    pub scroll: Cell<usize>,
+    /// The menu whose popup is open.
+    pub menu: Option<Menu>,
+    pub help: bool,
     pub dialog: Option<Dialog>,
-    pub preview_title: Line<'static>,
+    /// The selected session's screen, or information about the selection.
     pub preview: Text<'static>,
     message: Option<Message>,
-    projects: Vec<Project>,
+    pub projects: Vec<Project>,
     /// Live and deleted.
-    sessions: Vec<Session>,
-    select_next: Option<RowKey>,
+    pub sessions: Vec<Session>,
+    select_next: Option<EntryKey>,
     /// Suggested origin for a new project.
     default_path: String,
     /// Agents that can be started, and whether each resumes its conversations.
@@ -118,11 +108,16 @@ impl App {
     pub fn new(keymap: Keymap, default_path: String, agents: Vec<(String, bool)>) -> App {
         App {
             keymap,
-            view: View::Live,
-            rows: Vec::new(),
+            mode: Mode::Live,
+            grouped: false,
+            filter: None,
+            folded: HashSet::from([Group::Shelf(Shelf::Stopped)]),
+            entries: Vec::new(),
             selected: 0,
+            scroll: Cell::new(0),
+            menu: None,
+            help: false,
             dialog: None,
-            preview_title: Line::default(),
             preview: Text::default(),
             message: None,
             projects: Vec::new(),
@@ -140,46 +135,72 @@ impl App {
             .any(|(name, resumes)| name == agent && *resumes)
     }
 
-    /// Replaces the data, keeping the selection on the same project or session.
+    /// Replaces the data, keeping the selection on the same entry.
     pub fn set_data(&mut self, projects: Vec<Project>, sessions: Vec<Session>) {
         self.projects = projects;
         self.sessions = sessions;
-        self.rebuild_rows();
+        if self
+            .filter
+            .is_some_and(|f| !self.projects.iter().any(|p| p.id == f))
+        {
+            self.filter = None;
+        }
+        self.rebuild();
     }
 
-    fn rebuild_rows(&mut self) {
+    fn rebuild(&mut self) {
         let keep = self.select_next.take().or_else(|| self.selected_key());
-        self.rows = match self.view {
-            View::Live => {
-                let mut rows = Vec::new();
-                for p in &self.projects {
-                    rows.push(Row::Project(p.clone()));
-                    rows.extend(
-                        self.sessions
-                            .iter()
-                            .filter(|s| s.project_id == p.id && s.deleted_at.is_none())
-                            .map(|s| Row::Session(s.clone())),
-                    );
-                }
-                rows
+        self.entries = match self.mode {
+            Mode::Live => {
+                let opts = list::Options {
+                    grouped: self.grouped,
+                    folded: &self.folded,
+                    filter: self.filter,
+                };
+                list::live(&self.projects, &self.sessions, &opts)
             }
-            View::Deleted => {
-                let mut deleted: Vec<&Session> = self
-                    .sessions
-                    .iter()
-                    .filter(|s| s.deleted_at.is_some())
-                    .collect();
-                deleted.sort_by_key(|s| std::cmp::Reverse(s.deleted_at));
-                deleted
-                    .into_iter()
-                    .map(|s| Row::Session(s.clone()))
-                    .collect()
-            }
+            Mode::Deleted => list::deleted(&self.sessions),
         };
-        let found = keep.and_then(|k| self.rows.iter().position(|r| r.key() == k));
+        let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
+        // A selected session that moved into a folded group: select that group.
+        let found = keep.as_ref().and_then(|k| {
+            position(k).or_else(|| match k {
+                EntryKey::Session(id) if self.mode == Mode::Live => {
+                    let s = self
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == *id && s.deleted_at.is_none())?;
+                    position(&EntryKey::Group(list::group_of(s, self.grouped)))
+                }
+                _ => None,
+            })
+        });
+        // At first, the first session rather than a heading.
+        let first_session = || self.entries.iter().position(|e| e.session().is_some());
+        let fallback = if keep.is_none() {
+            first_session().unwrap_or(0)
+        } else {
+            self.selected
+        };
         self.selected = found
-            .unwrap_or(self.selected)
-            .min(self.rows.len().saturating_sub(1));
+            .unwrap_or(fallback)
+            .min(self.entries.len().saturating_sub(1));
+    }
+
+    pub fn selected_entry(&self) -> Option<&Entry> {
+        self.entries.get(self.selected)
+    }
+
+    pub fn selected_key(&self) -> Option<EntryKey> {
+        self.selected_entry().map(Entry::key)
+    }
+
+    pub fn selected_session(&self) -> Option<&Session> {
+        self.selected_entry().and_then(Entry::session)
+    }
+
+    pub fn project(&self, id: i64) -> Option<&Project> {
+        self.projects.iter().find(|p| p.id == id)
     }
 
     /// `project/name` of a session, for messages.
@@ -190,24 +211,16 @@ impl App {
             .map_or_else(|| id.to_string(), Session::label)
     }
 
-    pub fn selected_row(&self) -> Option<&Row> {
-        self.rows.get(self.selected)
-    }
-
-    pub fn selected_key(&self) -> Option<RowKey> {
-        self.selected_row().map(Row::key)
-    }
-
     /// Selects `key` once it shows up (after the next reload).
-    pub fn select(&mut self, key: RowKey) {
+    pub fn select(&mut self, key: EntryKey) {
         self.select_next = Some(key);
     }
 
-    pub fn set_view(&mut self, view: View) {
-        if self.view != view {
-            self.view = view;
+    pub fn set_mode(&mut self, mode: Mode) {
+        if self.mode != mode {
+            self.mode = mode;
             self.selected = 0;
-            self.rebuild_rows();
+            self.rebuild();
         }
     }
 
@@ -234,93 +247,145 @@ impl App {
             .filter(|m| m.at.elapsed() < MESSAGE_TTL)
     }
 
-    /// Footer hints: the first key of each action available in this view.
+    /// Footer hints: keys that act here and now.
     pub fn hints(&self) -> Vec<(String, &'static str)> {
-        let actions: &[(Action, &str)] = match self.view {
-            View::Live => &[
-                (Action::Attach, "attach"),
-                (Action::New, "new"),
-                (Action::AddProject, "project"),
-                (Action::Start, "start"),
-                (Action::Stop, "stop"),
-                (Action::Restart, "restart"),
-                (Action::Delete, "delete"),
-                (Action::ToggleRead, "read"),
-                (Action::Deleted, "deleted"),
-                (Action::Quit, "quit"),
-            ],
-            View::Deleted => &[
-                (Action::Attach, "restore"),
-                (Action::Deleted, "back"),
-                (Action::Quit, "quit"),
-            ],
+        let actions: Vec<(Action, &'static str)> = match self.mode {
+            Mode::Live => {
+                let mut actions = vec![(Action::Confirm, "attach")];
+                actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
+                actions
+            }
+            Mode::Deleted => vec![(Action::Confirm, "restore")],
         };
-        actions
-            .iter()
-            .filter_map(|(a, what)| Some((self.keymap.label(*a)?.to_string(), *what)))
-            .collect()
+        let mut hints: Vec<(String, &'static str)> = actions
+            .into_iter()
+            .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
+            .collect();
+        if self.mode == Mode::Deleted {
+            hints.push(("Esc".into(), "back"));
+        }
+        for (a, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
+            if let Some(key) = self.keymap.label(a) {
+                hints.push((key.to_string(), what));
+            }
+        }
+        hints
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Option<Op> {
         if self.dialog.is_some() {
             return self.on_dialog_key(e);
         }
-        if self.view == View::Deleted && e.code == KeyCode::Esc {
-            self.set_view(View::Live);
+        if self.help {
+            self.help = false;
             return None;
         }
-        let action = self.keymap.action(&e)?;
+        if let Some(menu) = self.menu.take() {
+            // Anything that isn't one of the menu's keys just closes it.
+            return self.keymap.menu(menu, &e).and_then(|a| self.act(a));
+        }
+        if self.mode == Mode::Deleted && e.code == KeyCode::Esc {
+            self.set_mode(Mode::Live);
+            return None;
+        }
+        let action = self.keymap.top(&e)?;
+        self.act(action)
+    }
+
+    fn act(&mut self, action: Action) -> Option<Op> {
         match action {
-            Action::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                None
-            }
+            Action::Up => self.selected = self.selected.saturating_sub(1),
             Action::Down => {
-                if self.selected + 1 < self.rows.len() {
+                if self.selected + 1 < self.entries.len() {
                     self.selected += 1;
                 }
-                None
             }
-            Action::Quit => Some(Op::Quit),
-            Action::Deleted => {
-                self.set_view(if self.view == View::Live {
-                    View::Deleted
+            Action::Collapse => self.fold(true),
+            Action::Expand => self.fold(false),
+            Action::Confirm => return self.confirm_selected(),
+            Action::Quit => return Some(Op::Quit),
+            Action::Help => self.help = true,
+            Action::Open(menu) => self.menu = Some(menu),
+            Action::ToggleGroup => {
+                self.grouped = !self.grouped;
+                self.set_mode(Mode::Live);
+                self.rebuild();
+            }
+            Action::ShowDeleted => {
+                self.set_mode(if self.mode == Mode::Live {
+                    Mode::Deleted
                 } else {
-                    View::Live
+                    Mode::Live
                 });
-                None
             }
-            _ if self.view == View::Deleted => self.on_deleted_action(action),
-            _ => self.on_live_action(action),
+            _ if self.mode == Mode::Deleted => {
+                let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
+                self.fail(format!(
+                    "These are deleted sessions: {restore} restores one, Esc goes back"
+                ));
+            }
+            Action::NewProject => {
+                self.input("New project's name:", String::new(), Purpose::ProjectName)
+            }
+            Action::FilterProject => self.toggle_filter(),
+            Action::RemoveProject => self.remove_project(),
+            Action::NewSession => self.new_session(),
+            Action::Start
+            | Action::Stop
+            | Action::Restart
+            | Action::Delete
+            | Action::ToggleRead => {
+                return self.session_action(action);
+            }
+        }
+        None
+    }
+
+    /// Folds (or unfolds) the selected group; from a session, its group.
+    fn fold(&mut self, fold: bool) {
+        let group = match self.selected_entry() {
+            Some(Entry::Heading { group, .. }) => *group,
+            Some(Entry::Card(s) | Entry::Row(s)) if fold && self.mode == Mode::Live => {
+                list::group_of(s, self.grouped)
+            }
+            _ => return,
+        };
+        let changed = if fold {
+            self.folded.insert(group)
+        } else {
+            self.folded.remove(&group)
+        };
+        if changed {
+            self.select_next = Some(EntryKey::Group(group));
+            self.rebuild();
         }
     }
 
-    fn on_live_action(&mut self, action: Action) -> Option<Op> {
-        match (action, self.selected_row().cloned()) {
-            (Action::AddProject, _) => {
-                self.input("New project's name:", String::new(), Purpose::ProjectName);
+    fn confirm_selected(&mut self) -> Option<Op> {
+        match self.selected_entry().cloned()? {
+            Entry::Heading { open, .. } => {
+                self.fold(open);
                 None
             }
-            (Action::New, row) | (Action::Attach, row @ Some(Row::Project(_))) => {
-                match row {
-                    Some(
-                        Row::Project(Project { name, .. })
-                        | Row::Session(Session { project: name, .. }),
-                    ) => self.ask_new_session(name),
-                    None => self.fail("Add a project first"),
+            Entry::Card(s) | Entry::Row(s) if self.mode == Mode::Deleted => self.restore(s),
+            Entry::Card(s) | Entry::Row(s) => {
+                // Starting an agent that can't resume loses its conversation: ask.
+                if s.state == State::Stopped && !self.resumes(&s.agent) {
+                    self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
+                    return None;
                 }
-                None
+                Some(Op::Attach(s.id))
             }
-            (_, None) => None,
-            // Starting an agent that can't resume loses its conversation: ask.
-            (Action::Attach, Some(Row::Session(s)))
-                if s.state == State::Stopped && !self.resumes(&s.agent) =>
-            {
-                self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
-                None
-            }
-            (Action::Attach, Some(Row::Session(s))) => Some(Op::Attach(s.id)),
-            (Action::Start | Action::Restart, Some(Row::Session(s))) if !self.resumes(&s.agent) => {
+        }
+    }
+
+    fn session_action(&mut self, action: Action) -> Option<Op> {
+        let Some(s) = self.selected_session().cloned() else {
+            self.fail("Select a session first");
+            return None;
+        };
+        match action {
+            Action::Start | Action::Restart if !self.resumes(&s.agent) => {
                 let op = if action == Action::Start {
                     Op::Start(s.id.clone())
                 } else {
@@ -329,46 +394,113 @@ impl App {
                 self.confirm(self.new_conversation_question(&s), op);
                 None
             }
-            (Action::Start, Some(Row::Session(s))) => Some(Op::Start(s.id)),
-            (Action::Stop, Some(Row::Session(s))) => Some(Op::Stop(s.id)),
-            (Action::Restart, Some(Row::Session(s))) if s.state == State::Working => {
+            Action::Start => Some(Op::Start(s.id)),
+            Action::Stop => Some(Op::Stop(s.id)),
+            Action::Restart if s.state == State::Working => {
                 self.confirm(
                     format!("{} is working. Restart it?", s.label()),
                     Op::Restart(s.id),
                 );
                 None
             }
-            (Action::Restart, Some(Row::Session(s))) => Some(Op::Restart(s.id)),
-            (Action::Delete, Some(Row::Session(s))) => {
+            Action::Restart => Some(Op::Restart(s.id)),
+            Action::Delete => {
                 let question = format!(
-                    "Delete {}? It can be restored from the deleted view.",
+                    "Delete {}? It can be restored from the deleted sessions.",
                     s.label()
                 );
                 self.confirm(question, Op::Delete(s.id));
                 None
             }
-            (Action::Delete, Some(Row::Project(p))) => {
-                if self
-                    .sessions
-                    .iter()
-                    .any(|s| s.project_id == p.id && s.deleted_at.is_none())
-                {
-                    self.fail(format!("{} still has sessions; delete them first", p.name));
-                } else {
-                    self.confirm(
-                        format!("Remove project {}?", p.name),
-                        Op::RemoveProject(p.name),
-                    );
-                }
-                None
-            }
-            (Action::ToggleRead, Some(Row::Session(s))) => Some(Op::SetUnread(s.id, !s.unread)),
-            (_, Some(Row::Project(_))) => {
-                self.fail("Select a session for that");
-                None
-            }
+            Action::ToggleRead => Some(Op::SetUnread(s.id, !s.unread)),
             _ => None,
         }
+    }
+
+    /// The project the selection belongs to; with only one project, that one.
+    fn selected_project(&self) -> Option<Project> {
+        let id = match self.selected_entry() {
+            Some(Entry::Heading {
+                group: Group::Project(id),
+                ..
+            }) => Some(*id),
+            Some(Entry::Card(s) | Entry::Row(s)) => Some(s.project_id),
+            _ => self.filter,
+        };
+        match id {
+            Some(id) => self.project(id).cloned(),
+            None if self.projects.len() == 1 => self.projects.first().cloned(),
+            None => None,
+        }
+    }
+
+    fn new_session(&mut self) {
+        if self.projects.is_empty() {
+            let key = self.chord(Menu::Project, Action::NewProject);
+            self.fail(format!("Add a project first ({key})"));
+            return;
+        }
+        match self.selected_project() {
+            Some(p) => self.ask_new_session(p.name),
+            None => self.fail("Select a session or a project first"),
+        }
+    }
+
+    fn toggle_filter(&mut self) {
+        if self.filter.is_some() {
+            self.filter = None;
+        } else if let Some(p) = self.selected_project() {
+            self.filter = Some(p.id);
+        } else {
+            self.fail("Select a session or a project first");
+            return;
+        }
+        self.rebuild();
+    }
+
+    fn remove_project(&mut self) {
+        let Some(p) = self.selected_project() else {
+            self.fail("Select a project (group by project) or one of its sessions first");
+            return;
+        };
+        if self
+            .sessions
+            .iter()
+            .any(|s| s.project_id == p.id && s.deleted_at.is_none())
+        {
+            self.fail(format!("{} still has sessions; delete them first", p.name));
+        } else {
+            self.confirm(
+                format!("Remove project {}?", p.name),
+                Op::RemoveProject(p.name),
+            );
+        }
+    }
+
+    fn restore(&mut self, s: Session) -> Option<Op> {
+        let taken = self
+            .sessions
+            .iter()
+            .any(|o| o.deleted_at.is_none() && o.project_id == s.project_id && o.name == s.name);
+        if taken {
+            let prompt = format!(
+                "{} already has a session named {}. Restore as:",
+                s.project, s.name
+            );
+            self.input(&prompt, String::new(), Purpose::RestoreName { id: s.id });
+            return None;
+        }
+        Some(Op::Restore {
+            id: s.id,
+            name: None,
+        })
+    }
+
+    /// "s n"-style text for a menu key, for hints in messages.
+    pub fn chord(&self, menu: Menu, action: Action) -> String {
+        let open = self.keymap.label(Action::Open(menu)).unwrap_or("?");
+        let key = self.keymap.label(action).unwrap_or("?");
+        format!("{open} {key}")
     }
 
     /// Asks for the agent if there's a choice, then for the name.
@@ -408,32 +540,6 @@ impl App {
             s.label(),
             s.agent
         )
-    }
-
-    fn on_deleted_action(&mut self, action: Action) -> Option<Op> {
-        let Some(Row::Session(s)) = self.selected_row().cloned() else {
-            return None;
-        };
-        if action != Action::Attach {
-            self.fail("This is the deleted view: restore a session first");
-            return None;
-        }
-        let taken = self
-            .sessions
-            .iter()
-            .any(|o| o.deleted_at.is_none() && o.project_id == s.project_id && o.name == s.name);
-        if taken {
-            let prompt = format!(
-                "{} already has a session named {}. Restore as:",
-                s.project, s.name
-            );
-            self.input(&prompt, String::new(), Purpose::RestoreName { id: s.id });
-            return None;
-        }
-        Some(Op::Restore {
-            id: s.id,
-            name: None,
-        })
     }
 
     fn on_dialog_key(&mut self, e: KeyEvent) -> Option<Op> {
@@ -527,7 +633,7 @@ impl App {
         self.dialog = Some(Dialog::Confirm { question, op });
     }
 
-    /// Preview for a project row.
+    /// Preview for a project heading.
     pub fn project_info(&self, p: &Project) -> Text<'static> {
         let live = self
             .sessions
@@ -545,19 +651,45 @@ impl App {
         } else {
             "none"
         };
-        let new_key = self.keymap.label(Action::New).unwrap_or("?");
         Text::from(vec![
             format!("origin    {}", p.origin.display()).into(),
             format!("sessions  {live} (deleted: {deleted})").into(),
             format!("env file  {} ({env_state})", env.display()).into(),
             "".into(),
-            format!("Press {new_key} to start a session here.").into(),
+            format!(
+                "Press {} to start a session here.",
+                self.chord(Menu::Session, Action::NewSession)
+            )
+            .into(),
+        ])
+    }
+
+    /// Preview for a shelf heading.
+    pub fn shelf_info(&self, shelf: Shelf, count: usize) -> Text<'static> {
+        let what = match shelf {
+            Shelf::NeedsYou => {
+                "waiting for you: a question, a permission, or a finished turn you haven't seen"
+            }
+            Shelf::Idle => "idle, waiting for your next prompt",
+            Shelf::Working => "working; nothing to do until they finish",
+            Shelf::Stopped => "stopped; starting one resumes its conversation where the agent can",
+        };
+        let fold = self.keymap.label(Action::Collapse).unwrap_or("?");
+        let unfold = self.keymap.label(Action::Expand).unwrap_or("?");
+        Text::from(vec![
+            format!(
+                "{count} session{} {what}.",
+                if count == 1 { "" } else { "s" }
+            )
+            .into(),
+            "".into(),
+            format!("{fold} folds the shelf, {unfold} unfolds it.").into(),
         ])
     }
 
     /// Preview for a deleted session.
     pub fn deleted_info(&self, s: &Session) -> Text<'static> {
-        let restore = self.keymap.label(Action::Attach).unwrap_or("?");
+        let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
         Text::from(vec![
             format!(
                 "conversation  {}",
@@ -573,14 +705,16 @@ impl App {
 
     /// Preview when there's nothing to select.
     pub fn empty_info(&self) -> Text<'static> {
-        match self.view {
-            View::Live => {
-                let key = self.keymap.label(Action::AddProject).unwrap_or("?");
-                Text::from(format!(
-                    "No projects yet. Press {key} to add one: a name and its directory."
-                ))
-            }
-            View::Deleted => Text::from("No deleted sessions."),
+        match self.mode {
+            Mode::Live if self.projects.is_empty() => Text::from(format!(
+                "No projects yet. Press {} to add one: a name and its directory.",
+                self.chord(Menu::Project, Action::NewProject)
+            )),
+            Mode::Live => Text::from(format!(
+                "No sessions yet. Press {} to start one.",
+                self.chord(Menu::Session, Action::NewSession)
+            )),
+            Mode::Deleted => Text::from("No deleted sessions."),
         }
     }
 }
@@ -600,6 +734,28 @@ mod tests {
     use crate::config::Keys;
     use crate::model::tests::session;
 
+    fn project(id: i64, name: &str) -> Project {
+        Project {
+            id,
+            name: name.into(),
+            origin: format!("/{name}").into(),
+            agent: None,
+            model: None,
+            effort: None,
+        }
+    }
+
+    fn with(id: &str, project: (i64, &str), state: State, unread: bool, since: i64) -> Session {
+        let mut s = session(id);
+        s.project_id = project.0;
+        s.project = project.1.into();
+        s.state = state;
+        s.unread = unread;
+        s.state_since = Some(since);
+        s
+    }
+
+    /// alpha: an idle session; beta: an unread one and a working one; one deleted.
     fn app() -> App {
         let agents = vec![("claude".to_string(), true)];
         let mut app = App::new(
@@ -607,26 +763,17 @@ mod tests {
             "/work".into(),
             agents,
         );
-        let projects = vec![
-            Project {
-                id: 1,
-                name: "alpha".into(),
-                origin: "/a".into(),
-            },
-            Project {
-                id: 2,
-                name: "beta".into(),
-                origin: "/b".into(),
-            },
-        ];
-        let mut one = session("s1");
-        one.state = State::Idle;
-        let mut two = session("s2");
-        two.project_id = 2;
-        two.project = "beta".into();
-        let mut gone = session("s3");
+        let mut gone = with("s3", (1, "alpha"), State::Stopped, false, 1);
         gone.deleted_at = Some(5);
-        app.set_data(projects, vec![one, two, gone]);
+        app.set_data(
+            vec![project(1, "alpha"), project(2, "beta")],
+            vec![
+                with("s1", (1, "alpha"), State::Idle, false, 10),
+                with("s2", (2, "beta"), State::Idle, true, 20),
+                with("s4", (2, "beta"), State::Working, false, 30),
+                gone,
+            ],
+        );
         app
     }
 
@@ -643,128 +790,146 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), shift)
     }
 
-    fn type_text(app: &mut App, text: &str) {
-        for c in text.chars() {
-            assert_eq!(app.on_key(chr(c)), None);
+    fn keys(app: &mut App, keys: &str) -> Option<Op> {
+        let mut op = None;
+        for c in keys.chars() {
+            op = app.on_key(chr(c));
         }
+        op
+    }
+
+    fn select(app: &mut App, id: &str) {
+        app.selected = app
+            .entries
+            .iter()
+            .position(|e| e.key() == EntryKey::Session(id.into()))
+            .unwrap();
+    }
+
+    fn shown(app: &App) -> Vec<EntryKey> {
+        app.entries.iter().map(Entry::key).collect()
     }
 
     #[test]
-    fn lists_projects_with_their_live_sessions() {
+    fn starts_on_shelves_with_stopped_folded() {
         let app = app();
-        let keys: Vec<RowKey> = app.rows.iter().map(Row::key).collect();
         assert_eq!(
-            keys,
+            shown(&app),
             [
-                RowKey::Project(1),
-                RowKey::Session("s1".into()),
-                RowKey::Project(2),
-                RowKey::Session("s2".into())
+                EntryKey::Group(Group::Shelf(Shelf::NeedsYou)),
+                EntryKey::Session("s2".into()),
+                EntryKey::Group(Group::Shelf(Shelf::Idle)),
+                EntryKey::Session("s1".into()),
+                EntryKey::Group(Group::Shelf(Shelf::Working)),
+                EntryKey::Session("s4".into()),
             ]
         );
     }
 
     #[test]
-    fn selection_follows_its_row_across_reloads() {
+    fn enter_attaches_and_h_l_fold() {
         let mut app = app();
-        app.on_key(chr('j'));
-        app.on_key(chr('j'));
-        assert_eq!(app.selected_key(), Some(RowKey::Project(2)));
-        // A new session in alpha shifts beta down; the selection stays on beta.
-        let mut extra = session("s0");
-        extra.name = "extra".into();
-        let mut sessions = app.sessions.clone();
-        sessions.insert(0, extra);
-        app.set_data(app.projects.clone(), sessions);
-        assert_eq!(app.selected_key(), Some(RowKey::Project(2)));
+        // The first session is selected at first, not the heading above it.
+        assert_eq!(app.selected_session().unwrap().id, "s2");
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Some(Op::Attach("s2".into()))
+        );
+        // h on a session folds its shelf and selects the heading; l unfolds.
+        keys(&mut app, "h");
+        assert_eq!(
+            app.selected_key(),
+            Some(EntryKey::Group(Group::Shelf(Shelf::NeedsYou)))
+        );
+        assert!(!shown(&app).contains(&EntryKey::Session("s2".into())));
+        keys(&mut app, "l");
+        assert!(shown(&app).contains(&EntryKey::Session("s2".into())));
+        // Enter on a heading folds or unfolds it too.
+        app.on_key(key(KeyCode::Enter));
+        assert!(!shown(&app).contains(&EntryKey::Session("s2".into())));
     }
 
     #[test]
-    fn enter_attaches_sessions_and_opens_new_session_on_projects() {
+    fn selection_follows_a_session_to_its_new_shelf() {
         let mut app = app();
-        app.on_key(chr('j'));
+        select(&mut app, "s4");
+        // s4 finishes its turn: it moves to "Needs you" and stays selected.
+        let mut sessions = app.sessions.clone();
+        let s4 = sessions.iter_mut().find(|s| s.id == "s4").unwrap();
+        s4.state = State::Idle;
+        s4.unread = true;
+        s4.state_since = Some(40);
+        app.set_data(app.projects.clone(), sessions);
+        assert_eq!(app.selected_session().unwrap().id, "s4");
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn a_session_moving_into_a_folded_shelf_selects_that_shelf() {
+        let mut app = app();
+        select(&mut app, "s1");
+        let mut sessions = app.sessions.clone();
+        sessions.iter_mut().find(|s| s.id == "s1").unwrap().state = State::Stopped;
+        app.set_data(app.projects.clone(), sessions);
         assert_eq!(
-            app.on_key(key(KeyCode::Enter)),
-            Some(Op::Attach("s1".into()))
+            app.selected_key(),
+            Some(EntryKey::Group(Group::Shelf(Shelf::Stopped)))
         );
-        app.on_key(chr('k'));
-        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-        type_text(&mut app, "api");
-        assert_eq!(
-            app.on_key(key(KeyCode::Enter)),
-            Some(Op::NewSession {
-                project: "alpha".into(),
-                agent: "claude".into(),
-                name: Some("api".into())
+        keys(&mut app, "lj");
+        assert_eq!(app.selected_session().unwrap().id, "s1");
+    }
+
+    #[test]
+    fn menus_open_with_their_key_and_reuse_letters() {
+        let mut app = app();
+        select(&mut app, "s1");
+        assert_eq!(keys(&mut app, "s"), None);
+        assert_eq!(app.menu, Some(Menu::Session));
+        assert_eq!(keys(&mut app, "x"), Some(Op::Stop("s1".into())));
+        assert_eq!(app.menu, None);
+        assert_eq!(keys(&mut app, "su"), Some(Op::SetUnread("s1".into(), true)));
+        // An unbound key closes the menu without doing anything.
+        assert_eq!(keys(&mut app, "sz"), None);
+        assert_eq!((app.menu, app.dialog.is_none()), (None, true));
+        // s n opens the new-session prompt for the selected session's project.
+        keys(&mut app, "sn");
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Input { prompt, .. }) if prompt.contains("alpha"))
+        );
+        app.on_key(key(KeyCode::Esc));
+        // p n starts a new project.
+        keys(&mut app, "pn");
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Input {
+                purpose: Purpose::ProjectName,
+                ..
             })
-        );
+        ));
     }
 
     #[test]
     fn delete_and_working_restart_ask_first() {
         let mut app = app();
-        app.on_key(chr('j'));
-        assert_eq!(app.on_key(chr('D')), None);
+        select(&mut app, "s1");
+        assert_eq!(keys(&mut app, "sd"), None);
         assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
-        assert_eq!(app.on_key(chr('n')), None);
-        assert!(app.dialog.is_none());
-        app.on_key(chr('D'));
-        assert_eq!(app.on_key(chr('y')), Some(Op::Delete("s1".into())));
-
-        // s1 is idle: restart right away. s2 is working: confirm.
-        assert_eq!(app.on_key(chr('R')), Some(Op::Restart("s1".into())));
-        app.on_key(chr('j'));
-        app.on_key(chr('j'));
-        assert_eq!(app.on_key(chr('R')), None);
-        assert_eq!(app.on_key(chr('y')), Some(Op::Restart("s2".into())));
+        assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s1".into())));
+        assert_eq!(keys(&mut app, "sr"), Some(Op::Restart("s1".into())));
+        select(&mut app, "s4");
+        assert_eq!(keys(&mut app, "sr"), None);
+        assert_eq!(keys(&mut app, "y"), Some(Op::Restart("s4".into())));
     }
 
     #[test]
-    fn projects_with_sessions_cant_be_removed() {
+    fn view_menu_groups_by_project_and_shows_deleted() {
         let mut app = app();
-        assert_eq!(app.on_key(chr('D')), None);
-        assert!(app.dialog.is_none());
-        assert!(app.message().unwrap().error);
-    }
-
-    #[test]
-    fn adding_a_project_asks_name_then_path() {
-        let mut app = app();
-        app.on_key(chr('P'));
-        type_text(&mut app, "gamma");
-        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-        // The path is prefilled with the current directory.
-        for _ in 0.."/work".len() {
-            app.on_key(key(KeyCode::Backspace));
-        }
-        type_text(&mut app, "~/src/gamma");
-        let op = app.on_key(key(KeyCode::Enter)).unwrap();
-        let Op::AddProject { name, path } = op else {
-            panic!("{op:?}")
-        };
-        assert_eq!(name, "gamma");
-        assert_eq!(
-            path,
-            format!("{}/src/gamma", dirs::home_dir().unwrap().display())
-        );
-    }
-
-    #[test]
-    fn escape_cancels_dialogs() {
-        let mut app = app();
-        app.on_key(chr('n'));
-        type_text(&mut app, "x");
-        assert_eq!(app.on_key(key(KeyCode::Esc)), None);
-        assert!(app.dialog.is_none());
-    }
-
-    #[test]
-    fn deleted_view_restores_and_asks_for_a_name_on_conflict() {
-        let mut app = app();
-        app.on_key(chr('X'));
-        assert_eq!(app.view, View::Deleted);
-        assert_eq!(app.selected_key(), Some(RowKey::Session("s3".into())));
-        // s3 has the default name "s-s3", which is free.
+        keys(&mut app, "vp");
+        assert!(app.grouped);
+        assert_eq!(shown(&app)[0], EntryKey::Group(Group::Project(1)));
+        keys(&mut app, "vd");
+        assert_eq!(app.mode, Mode::Deleted);
+        assert_eq!(shown(&app), [EntryKey::Session("s3".into())]);
         assert_eq!(
             app.on_key(key(KeyCode::Enter)),
             Some(Op::Restore {
@@ -772,60 +937,23 @@ mod tests {
                 name: None
             })
         );
-        assert_eq!(app.on_key(chr('d')), None);
+        keys(&mut app, "sx");
         assert!(app.message().unwrap().error);
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.view, View::Live);
+        assert_eq!(app.mode, Mode::Live);
     }
 
     #[test]
-    fn restoring_onto_a_taken_name_prompts() {
+    fn project_filter_and_removal() {
         let mut app = app();
-        let mut gone = session("s4");
-        gone.name = "s-s1".into();
-        gone.deleted_at = Some(9);
-        let mut sessions = app.sessions.clone();
-        sessions.push(gone);
-        app.set_data(app.projects.clone(), sessions);
-        app.on_key(chr('X'));
-        assert_eq!(app.selected_key(), Some(RowKey::Session("s4".into())));
-        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-        type_text(&mut app, "again");
-        assert_eq!(
-            app.on_key(key(KeyCode::Enter)),
-            Some(Op::Restore {
-                id: "s4".into(),
-                name: Some("again".into())
-            })
-        );
-    }
-
-    #[test]
-    fn with_several_agents_new_asks_which_first() {
-        let mut app = app();
-        app.agents.push(("aider".into(), false));
-        app.on_key(chr('n'));
-        // Prefilled with the first agent (claude); replace it.
-        for _ in 0.."claude".len() {
-            app.on_key(key(KeyCode::Backspace));
-        }
-        type_text(&mut app, "aider");
-        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-        assert!(
-            matches!(&app.dialog, Some(Dialog::Input { prompt, .. }) if prompt.starts_with("New aider session"))
-        );
-        assert_eq!(
-            app.on_key(key(KeyCode::Enter)),
-            Some(Op::NewSession {
-                project: "alpha".into(),
-                agent: "aider".into(),
-                name: None
-            })
-        );
-        // An unknown agent is an error, not a session.
-        app.on_key(chr('n'));
-        type_text(&mut app, "x");
-        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        select(&mut app, "s4");
+        keys(&mut app, "pf");
+        assert_eq!(app.filter, Some(2));
+        assert!(!shown(&app).contains(&EntryKey::Session("s1".into())));
+        keys(&mut app, "pf");
+        assert_eq!(app.filter, None);
+        // beta still has sessions.
+        keys(&mut app, "pd");
         assert!(app.dialog.is_none() && app.message().unwrap().error);
     }
 
@@ -833,28 +961,36 @@ mod tests {
     fn agents_that_cant_resume_ask_before_a_new_conversation() {
         let mut app = app();
         app.agents.push(("aider".into(), false));
-        let mut generic = session("g1");
+        let mut generic = with("g1", (1, "alpha"), State::Stopped, false, 1);
         generic.agent = "aider".into();
-        generic.name = "g".into();
-        generic.state = State::Stopped;
         let mut sessions = app.sessions.clone();
         sessions.push(generic);
+        app.folded.clear();
         app.set_data(app.projects.clone(), sessions);
-        app.select(RowKey::Session("g1".into()));
-        app.rebuild_rows();
-        for (press, op) in [
-            ('s', Op::Start("g1".into())),
-            ('R', Op::Restart("g1".into())),
+        select(&mut app, "g1");
+        for (chord, op) in [
+            ("ss", Op::Start("g1".into())),
+            ("sr", Op::Restart("g1".into())),
         ] {
-            assert_eq!(app.on_key(chr(press)), None);
+            assert_eq!(keys(&mut app, chord), None);
             let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
                 panic!("no confirmation")
             };
             assert!(question.contains("can't resume"), "{question}");
-            assert_eq!(app.on_key(chr('y')), Some(op));
+            assert_eq!(keys(&mut app, "y"), Some(op));
         }
         assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-        assert_eq!(app.on_key(chr('y')), Some(Op::Attach("g1".into())));
+        assert_eq!(keys(&mut app, "y"), Some(Op::Attach("g1".into())));
+    }
+
+    #[test]
+    fn help_opens_and_any_key_closes_it() {
+        let mut app = app();
+        keys(&mut app, "?");
+        assert!(app.help);
+        assert_eq!(keys(&mut app, "q"), None);
+        assert!(!app.help);
+        assert_eq!(keys(&mut app, "q"), Some(Op::Quit));
     }
 
     #[test]
@@ -862,6 +998,7 @@ mod tests {
         let app = app();
         let hints = app.hints();
         assert_eq!(hints[0], ("Enter".to_string(), "attach"));
-        assert!(hints.contains(&("X".to_string(), "deleted")));
+        assert!(hints.contains(&("s".to_string(), "session")));
+        assert!(hints.contains(&("?".to_string(), "help")));
     }
 }

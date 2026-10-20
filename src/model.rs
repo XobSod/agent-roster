@@ -42,6 +42,10 @@ pub struct Project {
     pub id: i64,
     pub name: String,
     pub origin: PathBuf,
+    /// Defaults for new sessions; None means the agent's own default.
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +71,15 @@ pub struct Session {
     /// Screen activity up to this time has been seen by the user (or is the agent
     /// starting up); only later activity can make a session unread.
     pub baseline_at: Option<i64>,
+    /// What the agent says it's working on (Claude's terminal title).
+    pub title: Option<String>,
+    /// Passed to the agent on every start; None means its own default.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// When `state` last changed.
+    pub state_since: Option<i64>,
+    /// A first prompt to type into the agent once it's ready.
+    pub pending_prompt: Option<String>,
 }
 
 /// A status change reported by an agent hook through `roster report <kind>`.
@@ -90,6 +103,19 @@ impl Session {
         format!("{}/{}", self.project, self.name)
     }
 
+    /// Changes the state, noting when it changed.
+    pub fn set_state(&mut self, state: State, at: i64) {
+        if self.state != state {
+            self.state = state;
+            self.state_since = Some(at);
+        }
+    }
+
+    /// The title if the agent has set one, else the session's name.
+    pub fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
+    }
+
     /// Applies a reported event.
     pub fn apply(&mut self, e: &Event) {
         if self.deleted_at.is_some() {
@@ -108,19 +134,23 @@ impl Session {
             if let Some(path) = payload.get("transcript_path").and_then(|v| v.as_str()) {
                 self.transcript_path = Some(path.to_string());
             }
+            // A cleared conversation is a new task.
+            if payload.get("source").and_then(|v| v.as_str()) == Some("clear") {
+                self.title = None;
+            }
         }
         match e.kind.as_str() {
-            "working" => self.state = State::Working,
+            "working" => self.set_state(State::Working, e.at),
             "idle" => {
-                self.state = State::Idle;
+                self.set_state(State::Idle, e.at);
                 self.unread = true;
             }
             "needs-input" => {
-                self.state = State::NeedsInput;
+                self.set_state(State::NeedsInput, e.at);
                 self.unread = true;
             }
             // The agent (re)started or cleared its conversation and waits for a prompt.
-            "session" => self.state = State::Idle,
+            "session" => self.set_state(State::Idle, e.at),
             _ => return,
         }
         self.last_event_at = Some(e.at);
@@ -146,7 +176,7 @@ impl Session {
     pub fn correct_stale_working(&mut self, now: i64) -> bool {
         let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
         if self.needs_screen_check(now) && still {
-            self.state = State::Idle;
+            self.set_state(State::Idle, now);
             return true;
         }
         false
@@ -165,14 +195,14 @@ impl Session {
                 if self.baseline_at.is_none_or(|b| now > b) {
                     self.last_event_at = Some(now);
                 }
-                self.state = State::Working;
+                self.set_state(State::Working, now);
             }
         } else if self.state == State::Working
             && self
                 .screen_changed_at
                 .is_some_and(|t| now - t >= idle_after)
         {
-            self.state = State::Idle;
+            self.set_state(State::Idle, now);
             if self
                 .last_event_at
                 .is_some_and(|t| self.baseline_at.is_none_or(|b| t > b))
@@ -217,6 +247,11 @@ pub mod tests {
             created_at: 0,
             deleted_at: None,
             baseline_at: None,
+            title: None,
+            model: None,
+            effort: None,
+            state_since: None,
+            pending_prompt: None,
         }
     }
 
@@ -263,12 +298,14 @@ pub mod tests {
     fn clear_switches_the_conversation() {
         let mut s = session("a");
         s.conversation_id = Some("c-1".into());
+        s.title = Some("old task".into());
         s.apply(&event(
             "session",
             10,
             Some(r#"{"session_id":"c-2","source":"clear"}"#),
         ));
         assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
+        assert_eq!(s.title, None);
     }
 
     #[test]

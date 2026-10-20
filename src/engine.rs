@@ -62,22 +62,25 @@ impl Roster {
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
             match panes.get(&s.tmux_name()) {
-                None => s.state = State::Stopped,
+                None => s.set_state(State::Stopped, now),
                 Some(pane) if pane.dead => {
                     // Record the exit code when it stops, not on every pass, so
                     // `stop` can clear it.
                     if s.state != State::Stopped {
-                        s.state = State::Stopped;
+                        s.set_state(State::Stopped, now);
                         s.exit_status = pane.dead_status;
                     }
                 }
-                Some(_) => {
+                Some(pane) => {
                     // Running although recorded as stopped: idle until hooks say otherwise.
                     if s.state == State::Stopped {
-                        s.state = State::Idle;
+                        s.set_state(State::Idle, now);
                     }
                     match self.kind(&s) {
                         Kind::Claude => {
+                            if let Some(title) = claude_title(&pane.title) {
+                                s.title = Some(title);
+                            }
                             if s.needs_screen_check(now)
                                 && let Some(hash) = self.screen_hash(&s)
                             {
@@ -140,7 +143,15 @@ impl Roster {
         if !origin.is_dir() {
             bail!("{} is not a directory", origin.display());
         }
-        self.db.add_project(name, &origin, now_ms())
+        let project = Project {
+            id: 0,
+            name: name.to_string(),
+            origin,
+            agent: None,
+            model: None,
+            effort: None,
+        };
+        self.db.add_project(&project, now_ms())
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -250,6 +261,11 @@ impl Roster {
             created_at: now_ms(),
             deleted_at: None,
             baseline_at: None,
+            title: None,
+            model: None,
+            effort: None,
+            state_since: Some(now_ms()),
+            pending_prompt: None,
         };
         self.db.insert_session(&s)?;
         self.start(&s.id)?;
@@ -297,7 +313,7 @@ impl Roster {
         if launch.conversation_id.is_some() {
             s.conversation_id = launch.conversation_id;
         }
-        s.state = State::Working;
+        s.set_state(State::Working, now);
         s.unread = false;
         s.exit_status = None;
         s.screen_hash = None;
@@ -353,7 +369,7 @@ impl Roster {
         let mut s = self.db.session(id)?;
         self.tmux.kill_session(&s.tmux_name())?;
         s.deleted_at = Some(now_ms());
-        s.state = State::Stopped;
+        s.set_state(State::Stopped, now_ms());
         self.db.save_session(&s)
     }
 
@@ -381,7 +397,7 @@ impl Roster {
             );
         }
         s.deleted_at = None;
-        s.state = State::Stopped;
+        s.set_state(State::Stopped, now_ms());
         s.unread = false;
         self.db.save_session(&s)?;
         Ok(s)
@@ -460,6 +476,19 @@ impl Roster {
     }
 }
 
+/// The task Claude names in its terminal title ("✳ Fix the parser" → "Fix the
+/// parser"), or None while it shows its default title. Claude's titles start with
+/// a glyph; anything else is tmux's default (the host name).
+fn claude_title(pane_title: &str) -> Option<String> {
+    if pane_title.chars().next().is_none_or(char::is_alphanumeric) {
+        return None;
+    }
+    let title = pane_title
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim();
+    (!title.is_empty() && title != "Claude Code").then(|| title.to_string())
+}
+
 fn signal(pid: i32, sig: libc::c_int) {
     // SAFETY: kill(2) has no memory effects; a stale pid just fails.
     unsafe {
@@ -482,6 +511,21 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_claudes_task_title() {
+        assert_eq!(
+            claude_title("✳ tmux pane explanation").as_deref(),
+            Some("tmux pane explanation")
+        );
+        assert_eq!(
+            claude_title("⠐ Fix the parser").as_deref(),
+            Some("Fix the parser")
+        );
+        assert_eq!(claude_title("✳ Claude Code"), None);
+        assert_eq!(claude_title(""), None);
+        assert_eq!(claude_title("computer"), None);
+    }
 
     #[test]
     fn names_are_simple() {

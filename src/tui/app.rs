@@ -335,6 +335,9 @@ impl App {
 
     /// Footer hints: keys that act here and now.
     pub fn hints(&self) -> Vec<(String, &'static str)> {
+        if self.mode == Mode::Projects {
+            return self.projects_view_hints();
+        }
         let actions: Vec<(Action, &'static str)> = match self.mode {
             Mode::Live => {
                 let archived = self
@@ -345,12 +348,7 @@ impl App {
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
                 actions
             }
-            Mode::Projects => vec![
-                (Action::Confirm, "show its sessions"),
-                (Action::Open(Menu::Project), "project"),
-                (Action::Open(Menu::Session), "session"),
-                (Action::Open(Menu::View), "view"),
-            ],
+            Mode::Projects => Vec::new(),
             Mode::Server if self.orphans > 0 => {
                 vec![(Action::Confirm, "kill orphans"), (Action::Down, "scroll")]
             }
@@ -371,6 +369,40 @@ impl App {
         hints
     }
 
+    /// The projects view's hints: its project keys work without `p`.
+    fn projects_view_hints(&self) -> Vec<(String, &'static str)> {
+        let mut hints = Vec::new();
+        let mut push = |key: Option<String>, what| {
+            if let Some(key) = key {
+                hints.push((key, what));
+            }
+        };
+        let km = &self.keymap;
+        push(
+            km.label(Action::Confirm).map(String::from),
+            "show its sessions",
+        );
+        for (action, what) in [
+            (Action::NewProject, "new"),
+            (Action::EditProject, "edit"),
+            (Action::RemoveProject, "remove"),
+        ] {
+            let key = km.direct_label(Menu::Project, action).or_else(|| {
+                km.menu_label(Menu::Project, action)
+                    .map(|_| self.chord(Menu::Project, action))
+            });
+            push(key, what);
+        }
+        for menu in [Menu::Session, Menu::View] {
+            push(km.label(Action::Open(menu)).map(String::from), menu.name());
+        }
+        push(Some("Esc".into()), "back");
+        for (action, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
+            push(km.label(action).map(String::from), what);
+        }
+        hints
+    }
+
     pub fn on_key(&mut self, e: KeyEvent) -> Option<Op> {
         if self.dialog.is_some() {
             return self.on_dialog_key(e);
@@ -387,7 +419,13 @@ impl App {
             self.set_mode(Mode::Live);
             return None;
         }
-        let action = self.keymap.top(&e)?;
+        // The projects view is about projects: the project menu's keys work
+        // without opening it (top-level keys win).
+        let action = if self.mode == Mode::Projects {
+            self.keymap.in_view(Menu::Project, &e)?
+        } else {
+            self.keymap.top(&e)?
+        };
         self.act(action)
     }
 
@@ -1192,13 +1230,23 @@ mod tests {
         keys(&mut app, "pl");
         assert_eq!((app.mode, app.project_row), (Mode::Projects, 1));
         assert_eq!(app.hints()[0], ("Enter".to_string(), "show its sessions"));
+        assert_eq!(app.hints()[1], ("n".to_string(), "new"));
         keys(&mut app, "k");
         assert_eq!(app.project_row, 0);
-        // The project menu acts on the row.
-        keys(&mut app, "pe");
-        assert!(matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "Edit project alpha"));
+        // The project menu acts on the row, without opening it too.
+        for chord in ["pe", "e"] {
+            keys(&mut app, chord);
+            assert!(
+                matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "Edit project alpha"),
+                "{chord}"
+            );
+            app.on_key(key(KeyCode::Esc));
+        }
+        keys(&mut app, "n");
+        assert!(matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "New project"));
         app.on_key(key(KeyCode::Esc));
-        keys(&mut app, "pd");
+        // alpha has a live session.
+        keys(&mut app, "d");
         assert!(app.dialog.is_none() && app.message().unwrap().error);
         // Session actions don't work here.
         keys(&mut app, "sx");
@@ -1222,6 +1270,9 @@ mod tests {
         assert_eq!(app.project_row, 2);
         app.on_key(key(KeyCode::Esc));
         assert_eq!(app.mode, Mode::Live);
+        // On the session list, the same keys don't act on projects.
+        assert_eq!(keys(&mut app, "e"), None);
+        assert!(app.dialog.is_none());
     }
 
     #[test]

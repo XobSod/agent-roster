@@ -336,6 +336,31 @@ impl Keymap {
         self.menus[&menu].labels.get(&action).map(String::as_str)
     }
 
+    /// The action for a key press in a view about `menu`'s domain (the project
+    /// menu in the projects view): top-level keys first, then the menu's, as if
+    /// it were open.
+    pub fn in_view(&self, menu: Menu, e: &KeyEvent) -> Option<Action> {
+        self.top(e).or_else(|| self.menu(menu, e))
+    }
+
+    /// A key for `action` in `menu` that works without opening it there (see
+    /// `in_view`): one the top level doesn't take, the menu's own first if it
+    /// can.
+    pub fn direct_label(&self, menu: Menu, action: Action) -> Option<String> {
+        let mut free: Vec<String> = self.menus[&menu]
+            .keys
+            .iter()
+            .filter(|(key, a)| **a == action && !self.top.keys.contains_key(key))
+            .map(|(key, _)| key.label())
+            .collect();
+        free.sort();
+        let first = self.menu_label(menu, action);
+        match free.iter().position(|k| Some(k.as_str()) == first) {
+            Some(i) => Some(free.swap_remove(i)),
+            None => free.into_iter().next(),
+        }
+    }
+
     /// A menu's bound actions with their keys, in display order.
     pub fn menu_items(&self, menu: Menu) -> Vec<(&str, Action)> {
         self.menus[&menu].items()
@@ -419,6 +444,34 @@ mod tests {
             .map(|(k, _)| *k)
             .collect();
         assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "a", "d", "D"]);
+    }
+
+    #[test]
+    fn a_views_menu_works_without_opening_it_unless_a_top_key_wins() {
+        let map = Keymap::new(&Keys::default()).unwrap();
+        assert_eq!(
+            map.in_view(Menu::Project, &chr('e')),
+            Some(Action::EditProject)
+        );
+        assert_eq!(map.in_view(Menu::Project, &chr('j')), Some(Action::Down));
+        // "l" is unfold at the top level.
+        assert_eq!(map.in_view(Menu::Project, &chr('l')), Some(Action::Expand));
+        assert_eq!(
+            map.direct_label(Menu::Project, Action::NewProject)
+                .as_deref(),
+            Some("n")
+        );
+        assert_eq!(map.direct_label(Menu::Project, Action::ShowProjects), None);
+        // A project key rebound onto a top-level one: only through the menu.
+        let mut keys = Keys::default();
+        keys.project.edit = KeyList(vec!["j".into(), "E".into()]);
+        let map = Keymap::new(&keys).unwrap();
+        assert_eq!(map.in_view(Menu::Project, &chr('j')), Some(Action::Down));
+        assert_eq!(
+            map.direct_label(Menu::Project, Action::EditProject)
+                .as_deref(),
+            Some("E")
+        );
     }
 
     #[test]

@@ -743,6 +743,12 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             "{} menu ({open} …)",
             capitalize(menu.name())
         ))];
+        if menu == Menu::Project {
+            section.push(Line::styled(
+                format!("         in the projects view, without {open}"),
+                Style::new().fg(MUTED),
+            ));
+        }
         for (k, action) in keymap.menu_items(menu) {
             section.push(Line::from(vec![
                 key(format!("{open} {k}")),
@@ -1324,7 +1330,11 @@ mod tests {
         assert!(screen.contains("none"), "{screen}");
         // The selected one's details, and the keys that act here.
         assert!(screen.contains("origin    /r"), "{screen}");
-        assert!(screen.contains("Enter show its sessions"), "{screen}");
+        // Its project keys work without "p".
+        assert!(
+            screen.contains("Enter show its sessions   n new   e edit   d remove   s session"),
+            "{screen}"
+        );
         assert!(screen.contains("Esc back"), "{screen}");
     }
 
@@ -1405,6 +1415,10 @@ mod tests {
             assert!(screen.contains("s n  new"), "{screen}");
             assert!(screen.contains("v p  projects"), "{screen}");
             assert!(screen.contains("p l  projects"), "{screen}");
+            assert!(
+                screen.contains("in the projects view, without p"),
+                "{screen}"
+            );
             assert!(screen.contains("C-q  back to roster"), "{screen}");
         }
     }

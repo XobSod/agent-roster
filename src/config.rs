@@ -4,8 +4,10 @@
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
 //!
-//! [keys]
-//! detach = "C-q"                  # back to roster while attached
+//! [keys]                          # TUI keys: one, a list, or "" to disable
+//! detach = "C-q"                  # back to roster while attached (a tmux key)
+//! down = ["j", "Down"]
+//! delete = ""
 //!
 //! [agents.claude]
 //! command = "claude"              # default: found on PATH
@@ -18,7 +20,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -31,14 +33,62 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Keys {
+    /// Back to roster while attached; bound in roster's tmux, so a tmux key name.
     pub detach: String,
+    pub up: KeyList,
+    pub down: KeyList,
+    pub attach: KeyList,
+    pub new: KeyList,
+    pub add_project: KeyList,
+    pub start: KeyList,
+    pub stop: KeyList,
+    pub restart: KeyList,
+    pub delete: KeyList,
+    pub toggle_read: KeyList,
+    pub deleted: KeyList,
+    pub quit: KeyList,
 }
 
 impl Default for Keys {
     fn default() -> Self {
+        let keys = |names: &[&str]| KeyList(names.iter().map(|n| n.to_string()).collect());
         Keys {
             detach: "C-q".into(),
+            up: keys(&["k", "Up"]),
+            down: keys(&["j", "Down"]),
+            attach: keys(&["Enter"]),
+            new: keys(&["n"]),
+            add_project: keys(&["P"]),
+            start: keys(&["s"]),
+            stop: keys(&["d"]),
+            restart: keys(&["R"]),
+            delete: keys(&["D"]),
+            toggle_read: keys(&["u"]),
+            deleted: keys(&["X"]),
+            quit: keys(&["q", "C-c"]),
         }
+    }
+}
+
+/// The keys of one TUI action: `"x"`, `["x", "Down"]`, or `""` / `[]` for none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyList(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for KeyList {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            One(String),
+            Many(Vec<String>),
+        }
+        let names = match Raw::deserialize(d)? {
+            Raw::One(name) => vec![name],
+            Raw::Many(names) => names,
+        };
+        Ok(KeyList(
+            names.into_iter().filter(|n| !n.is_empty()).collect(),
+        ))
     }
 }
 
@@ -69,6 +119,7 @@ impl Config {
         if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             bail!("keys.detach must be a tmux key name such as \"C-q\", not {key:?}");
         }
+        crate::keys::Keymap::new(&config.keys)?;
         Ok(config)
     }
 
@@ -108,6 +159,19 @@ mod tests {
             Some("/opt/claude")
         );
         assert_eq!(config.agent("claude").args, ["--model", "haiku"]);
+    }
+
+    #[test]
+    fn tui_keys_take_one_several_or_none() {
+        let config =
+            Config::parse("[keys]\nstop = \"x\"\ndown = [\"j\", \"PageDown\"]\ndelete = \"\"")
+                .unwrap();
+        assert_eq!(config.keys.stop, KeyList(vec!["x".into()]));
+        assert_eq!(config.keys.down.0, ["j", "PageDown"]);
+        assert!(config.keys.delete.0.is_empty());
+        assert_eq!(config.keys.quit.0, ["q", "C-c"]);
+        assert!(Config::parse("[keys]\nstop = \"Nope\"").is_err());
+        assert!(Config::parse("[keys]\nstop = \"q\"").is_err());
     }
 
     #[test]

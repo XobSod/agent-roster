@@ -4,11 +4,13 @@ mod agent;
 mod config;
 mod db;
 mod engine;
+mod keys;
 mod launch;
 mod model;
 mod paths;
 mod report;
 mod tmux;
+mod tui;
 mod util;
 
 use std::collections::HashMap;
@@ -129,11 +131,13 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let Some(command) = cli.command else {
-        println!("The TUI arrives in M2; until then use the CLI (roster --help).");
-        return Ok(());
-    };
     let mut r = Roster::open()?;
+    let Some(command) = cli.command else {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("the TUI needs a terminal; see `roster --help` for the CLI");
+        }
+        return tui::run(&mut r);
+    };
     match command {
         Cmd::Project(ProjectCmd::Add { name, path }) => {
             let p = r.add_project(&name, &path)?;

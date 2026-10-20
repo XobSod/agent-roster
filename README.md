@@ -4,7 +4,7 @@ A keyboard-first terminal manager for AI coding agent sessions (Claude Code for 
 Agents run in roster's own private tmux server; roster tracks whether each one is
 working, needs input, is idle or stopped, and whether you've seen its latest turn.
 
-Status: M1, the engine and CLI. The TUI (list + preview) arrives in M2.
+Status: MVP in progress: the CLI and the TUI work (M1, M2); fallback detection for other agents and recovery polish come in M3.
 
 ## Install
 
@@ -15,6 +15,21 @@ cargo install --path .     # installs `roster` into ~/.cargo/bin
 ```
 
 ## Use
+
+Run `roster` for the TUI: projects and their sessions on the left, the selected
+agent's screen on the right.
+
+| Key | |
+|---|---|
+| `j`/`k` | move |
+| `Enter` | go into the agent (Ctrl+Q comes back and marks it read); on a project, start a session |
+| `n` / `P` | new session / add project |
+| `s` / `d` / `R` | start / stop / restart (restarts resume the conversation) |
+| `D` | delete (asks); `X` shows deleted sessions, `Enter` there restores |
+| `u` | toggle unread (●) |
+| `q` | quit; the agents keep running |
+
+Everything is also available from the CLI:
 
 ```sh
 roster project add myproj ~/src/myproj
@@ -34,7 +49,8 @@ lists every command.
 
 All files are optional and live in `~/.config/agent-roster/`:
 
-- `config.toml`: `shell`, `[keys] detach`, `[agents.claude] command`/`args`.
+- `config.toml`: `shell`, `[keys]` (every TUI key, plus `detach` for Ctrl+Q),
+  `[agents.claude] command`/`args`.
 - `env`: sourced before every agent start, so `TOKEN="$(token-cmd)"` gets a fresh
   value each time. A `.agent-roster.env` in a project's directory is sourced after it.
 - `tmux.conf`: additions to roster's tmux. By default every key except Ctrl+Q goes to

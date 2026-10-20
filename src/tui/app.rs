@@ -20,7 +20,6 @@ const MESSAGE_TTL: Duration = Duration::from_secs(6);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Live,
-    Deleted,
     /// The tmux server and database report.
     Server,
 }
@@ -52,6 +51,8 @@ pub enum Op {
     Start(String),
     Stop(String),
     Restart(String),
+    Archive(String),
+    /// An archived session, for good.
     Delete(String),
     Restore {
         id: String,
@@ -160,7 +161,7 @@ impl App {
             mode: Mode::Live,
             grouped: false,
             filter: None,
-            folded: HashSet::from([Group::Shelf(Shelf::Stopped)]),
+            folded: HashSet::from([Group::Shelf(Shelf::Archived)]),
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
@@ -206,35 +207,19 @@ impl App {
 
     fn rebuild(&mut self) {
         let keep = self.select_next.take().or_else(|| self.selected_key());
-        self.entries = match self.mode {
-            Mode::Live => {
-                let opts = list::Options {
-                    grouped: self.grouped,
-                    folded: &self.folded,
-                    filter: self.filter,
-                };
-                list::live(&self.projects, &self.sessions, &opts)
-            }
-            Mode::Deleted => list::deleted(&self.sessions),
-            // The list isn't shown; keep the live one for coming back.
-            Mode::Server => {
-                let opts = list::Options {
-                    grouped: self.grouped,
-                    folded: &self.folded,
-                    filter: self.filter,
-                };
-                list::live(&self.projects, &self.sessions, &opts)
-            }
+        // In the server view the list isn't shown, but kept for coming back.
+        let opts = list::Options {
+            grouped: self.grouped,
+            folded: &self.folded,
+            filter: self.filter,
         };
+        self.entries = list::live(&self.projects, &self.sessions, &opts);
         let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
         // A selected session that moved into a folded group: select that group.
         let found = keep.as_ref().and_then(|k| {
             position(k).or_else(|| match k {
-                EntryKey::Session(id) if self.mode == Mode::Live => {
-                    let s = self
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == *id && s.deleted_at.is_none())?;
+                EntryKey::Session(id) => {
+                    let s = self.sessions.iter().find(|s| s.id == *id)?;
                     position(&EntryKey::Group(list::group_of(s, self.grouped)))
                 }
                 _ => None,
@@ -286,9 +271,7 @@ impl App {
             let keep = self.selected_key();
             self.mode = mode;
             self.report_scroll = 0;
-            if mode == Mode::Deleted {
-                self.selected = 0;
-            } else if self.select_next.is_none() {
+            if self.select_next.is_none() {
                 // Back from another view: where we were.
                 self.select_next = keep;
             }
@@ -329,11 +312,14 @@ impl App {
     pub fn hints(&self) -> Vec<(String, &'static str)> {
         let actions: Vec<(Action, &'static str)> = match self.mode {
             Mode::Live => {
-                let mut actions = vec![(Action::Confirm, "attach")];
+                let archived = self
+                    .selected_session()
+                    .is_some_and(|s| s.deleted_at.is_some());
+                let enter = if archived { "restore" } else { "attach" };
+                let mut actions = vec![(Action::Confirm, enter)];
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
                 actions
             }
-            Mode::Deleted => vec![(Action::Confirm, "restore")],
             Mode::Server if self.orphans > 0 => {
                 vec![(Action::Confirm, "kill orphans"), (Action::Down, "scroll")]
             }
@@ -396,20 +382,7 @@ impl App {
                 self.set_mode(Mode::Live);
                 self.rebuild();
             }
-            Action::ShowDeleted => {
-                self.set_mode(if self.mode == Mode::Live {
-                    Mode::Deleted
-                } else {
-                    Mode::Live
-                });
-            }
             Action::ShowServer => self.set_mode(Mode::Server),
-            _ if self.mode == Mode::Deleted => {
-                let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
-                self.fail(format!(
-                    "These are deleted sessions: {restore} restores one, Esc goes back"
-                ));
-            }
             Action::NewProject => {
                 let agents = self.agent_names();
                 self.dialog = Some(Dialog::Form(
@@ -428,14 +401,7 @@ impl App {
                     self.fail("Select a project (group by project) or one of its sessions first")
                 }
             },
-            Action::EditSession => match self.selected_session().cloned() {
-                Some(s) => {
-                    self.dialog = Some(Dialog::Form(
-                        Form::edit_session(&s).with_model_names(&self.model_names),
-                    ))
-                }
-                None => self.fail("Select a session first"),
-            },
+            Action::EditSession => return self.session_action(action),
             Action::FilterProject => self.toggle_filter(),
             Action::RemoveProject => self.remove_project(),
             Action::NewSession => self.new_session(),
@@ -443,6 +409,7 @@ impl App {
             Action::Start
             | Action::Stop
             | Action::Restart
+            | Action::Archive
             | Action::Delete
             | Action::ToggleRead
             | Action::Retitle => {
@@ -472,7 +439,6 @@ impl App {
             Action::Help => self.help = true,
             Action::Open(menu) => self.menu = Some(menu),
             Action::ShowServer => self.set_mode(Mode::Live),
-            Action::ShowDeleted => self.set_mode(Mode::Deleted),
             Action::ToggleGroup => {
                 self.grouped = !self.grouped;
                 self.set_mode(Mode::Live);
@@ -508,7 +474,7 @@ impl App {
                 self.fold(open);
                 None
             }
-            Entry::Card(s) | Entry::Row(s) if self.mode == Mode::Deleted => self.restore(s),
+            Entry::Card(s) | Entry::Row(s) if s.deleted_at.is_some() => self.restore(s),
             Entry::Card(s) | Entry::Row(s) => {
                 // Starting an agent that can't resume loses its conversation: ask.
                 if s.state == State::Stopped && !self.resumes(&s.agent) {
@@ -525,7 +491,38 @@ impl App {
             self.fail("Select a session first");
             return None;
         };
+        let archive = self.chord(Menu::Session, Action::Archive);
+        if s.deleted_at.is_some() {
+            return match action {
+                Action::Archive => self.restore(s),
+                Action::Delete => {
+                    let kept = if s.agent == crate::agent::CLAUDE {
+                        format!(
+                            "; its Claude conversation stays and can be adopted again ({})",
+                            self.chord(Menu::Session, Action::Adopt)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    self.confirm(
+                        format!("Delete {} for good? Roster forgets it{kept}.", s.label()),
+                        Op::Delete(s.id),
+                    );
+                    None
+                }
+                _ => {
+                    self.fail(format!("{} is archived; {archive} restores it", s.label()));
+                    None
+                }
+            };
+        }
         match action {
+            Action::EditSession => {
+                self.dialog = Some(Dialog::Form(
+                    Form::edit_session(&s).with_model_names(&self.model_names),
+                ));
+                None
+            }
             Action::Start | Action::Restart if !self.resumes(&s.agent) => {
                 let op = if action == Action::Start {
                     Op::Start(s.id.clone())
@@ -545,12 +542,19 @@ impl App {
                 None
             }
             Action::Restart => Some(Op::Restart(s.id)),
-            Action::Delete => {
+            Action::Archive => {
                 let question = format!(
-                    "Delete {}? It can be restored from the deleted sessions.",
+                    "Archive {}? Its agent stops; {archive} on it under Archived restores it.",
                     s.label()
                 );
-                self.confirm(question, Op::Delete(s.id));
+                self.confirm(question, Op::Archive(s.id));
+                None
+            }
+            Action::Delete => {
+                self.fail(format!(
+                    "Only archived sessions can be deleted; {archive} archives {}",
+                    s.label()
+                ));
                 None
             }
             Action::ToggleRead => Some(Op::SetUnread(s.id, !s.unread)),
@@ -597,12 +601,12 @@ impl App {
         self.dialog = Some(Dialog::Picker(Picker::new(found)));
     }
 
-    /// The form for adopting `a`, or for a deleted session's conversation, restoring it.
+    /// The form for adopting `a`, or for an archived session's conversation, restoring it.
     fn adopt(&mut self, a: crate::engine::Adoptable) {
-        match a.deleted {
+        match a.archived {
             Some(s) => self.confirm(
                 format!(
-                    "That conversation is the deleted session {}. Restore it?",
+                    "That conversation is the archived session {}. Restore it?",
                     s.label()
                 ),
                 Op::Restore {
@@ -789,7 +793,7 @@ impl App {
             .iter()
             .filter(|s| s.project_id == p.id && s.deleted_at.is_none())
             .count();
-        let deleted = self
+        let archived = self
             .sessions
             .iter()
             .filter(|s| s.project_id == p.id && s.deleted_at.is_some())
@@ -802,7 +806,7 @@ impl App {
         };
         Text::from(vec![
             format!("origin    {}", p.origin.display()).into(),
-            format!("sessions  {live} (deleted: {deleted})").into(),
+            format!("sessions  {live} (archived: {archived})").into(),
             format!("env file  {} ({env_state})", env.display()).into(),
             "".into(),
             format!(
@@ -816,12 +820,15 @@ impl App {
     /// Preview for a shelf heading.
     pub fn shelf_info(&self, shelf: Shelf, count: usize) -> Text<'static> {
         let what = match shelf {
-            Shelf::NeedsYou => {
-                "waiting for you: a question, a permission, or a finished turn you haven't seen"
+            Shelf::NeedsInput => {
+                "waiting for your input: a question, a permission, or a finished turn you haven't seen"
             }
             Shelf::Idle => "idle, waiting for your next prompt",
+            Shelf::Stopped => {
+                "stopped: idle without a running agent; starting one resumes its conversation where the agent can"
+            }
             Shelf::Working => "working; nothing to do until they finish",
-            Shelf::Stopped => "stopped; starting one resumes its conversation where the agent can",
+            Shelf::Archived => "archived: finished, put away with their conversations",
         };
         let fold = self.keymap.label(Action::Collapse).unwrap_or("?");
         let unfold = self.keymap.label(Action::Expand).unwrap_or("?");
@@ -836,9 +843,10 @@ impl App {
         ])
     }
 
-    /// Preview for a deleted session.
-    pub fn deleted_info(&self, s: &Session) -> Text<'static> {
+    /// Preview for an archived session.
+    pub fn archived_info(&self, s: &Session) -> Text<'static> {
         let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
+        let delete = self.chord(Menu::Session, Action::Delete);
         Text::from(vec![
             format!(
                 "conversation  {}",
@@ -849,6 +857,7 @@ impl App {
             "".into(),
             format!("Press {restore} to restore it; starting it then resumes the conversation.")
                 .into(),
+            format!("{delete} deletes it for good.").into(),
         ])
     }
 
@@ -863,7 +872,6 @@ impl App {
                 "No sessions yet. Press {} to start one.",
                 self.chord(Menu::Session, Action::NewSession)
             )),
-            Mode::Deleted => Text::from("No deleted sessions."),
             Mode::Server => Text::default(),
         }
     }
@@ -952,17 +960,18 @@ mod tests {
     }
 
     #[test]
-    fn starts_on_shelves_with_stopped_folded() {
+    fn starts_on_shelves_with_archived_folded() {
         let app = app();
         assert_eq!(
             shown(&app),
             [
-                EntryKey::Group(Group::Shelf(Shelf::NeedsYou)),
+                EntryKey::Group(Group::Shelf(Shelf::NeedsInput)),
                 EntryKey::Session("s2".into()),
                 EntryKey::Group(Group::Shelf(Shelf::Idle)),
                 EntryKey::Session("s1".into()),
                 EntryKey::Group(Group::Shelf(Shelf::Working)),
                 EntryKey::Session("s4".into()),
+                EntryKey::Group(Group::Shelf(Shelf::Archived)),
             ]
         );
     }
@@ -980,7 +989,7 @@ mod tests {
         keys(&mut app, "h");
         assert_eq!(
             app.selected_key(),
-            Some(EntryKey::Group(Group::Shelf(Shelf::NeedsYou)))
+            Some(EntryKey::Group(Group::Shelf(Shelf::NeedsInput)))
         );
         assert!(!shown(&app).contains(&EntryKey::Session("s2".into())));
         keys(&mut app, "l");
@@ -1009,13 +1018,17 @@ mod tests {
     fn a_session_moving_into_a_folded_shelf_selects_that_shelf() {
         let mut app = app();
         select(&mut app, "s1");
+        // Archived: onto the folded Archived shelf.
         let mut sessions = app.sessions.clone();
-        sessions.iter_mut().find(|s| s.id == "s1").unwrap().state = State::Stopped;
+        let s1 = sessions.iter_mut().find(|s| s.id == "s1").unwrap();
+        s1.state = State::Stopped;
+        s1.deleted_at = Some(50);
         app.set_data(app.projects.clone(), sessions);
         assert_eq!(
             app.selected_key(),
-            Some(EntryKey::Group(Group::Shelf(Shelf::Stopped)))
+            Some(EntryKey::Group(Group::Shelf(Shelf::Archived)))
         );
+        // Newest first.
         keys(&mut app, "lj");
         assert_eq!(app.selected_session().unwrap().id, "s1");
     }
@@ -1055,12 +1068,15 @@ mod tests {
     }
 
     #[test]
-    fn delete_and_working_restart_ask_first() {
+    fn archive_and_working_restart_ask_first() {
         let mut app = app();
         select(&mut app, "s1");
         assert_eq!(keys(&mut app, "sd"), None);
         assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
-        assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s1".into())));
+        assert_eq!(keys(&mut app, "y"), Some(Op::Archive("s1".into())));
+        // Only archived sessions can be deleted for good.
+        assert_eq!(keys(&mut app, "sD"), None);
+        assert!(app.dialog.is_none() && app.message().unwrap().error);
         assert_eq!(keys(&mut app, "sr"), Some(Op::Restart("s1".into())));
         select(&mut app, "s4");
         assert_eq!(keys(&mut app, "sr"), None);
@@ -1068,25 +1084,34 @@ mod tests {
     }
 
     #[test]
-    fn view_menu_groups_by_project_and_shows_deleted() {
+    fn archived_sessions_restore_or_go_for_good() {
         let mut app = app();
+        // Grouped by project, the archived ones still come last, on their shelf.
         keys(&mut app, "vp");
         assert!(app.grouped);
         assert_eq!(shown(&app)[0], EntryKey::Group(Group::Project(1)));
-        keys(&mut app, "vd");
-        assert_eq!(app.mode, Mode::Deleted);
-        assert_eq!(shown(&app), [EntryKey::Session("s3".into())]);
-        assert_eq!(
-            app.on_key(key(KeyCode::Enter)),
-            Some(Op::Restore {
-                id: "s3".into(),
-                name: None
-            })
-        );
+        let archived = EntryKey::Group(Group::Shelf(Shelf::Archived));
+        assert_eq!(shown(&app).last(), Some(&archived));
+        app.selected = app.entries.len() - 1;
+        keys(&mut app, "l");
+        select(&mut app, "s3");
+        let restore = Some(Op::Restore {
+            id: "s3".into(),
+            name: None,
+        });
+        assert_eq!(app.hints()[0], ("Enter".to_string(), "restore"));
+        assert_eq!(app.on_key(key(KeyCode::Enter)), restore);
+        assert_eq!(keys(&mut app, "sd"), restore);
+        // Nothing else works on it.
         keys(&mut app, "sx");
         assert!(app.message().unwrap().error);
-        app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.mode, Mode::Live);
+        // Deleting for good asks first.
+        assert_eq!(keys(&mut app, "sD"), None);
+        let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+            panic!("no confirmation")
+        };
+        assert!(question.contains("for good"), "{question}");
+        assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s3".into())));
     }
 
     #[test]
@@ -1166,7 +1191,7 @@ mod tests {
         let mut open = adoptable("c2", "Busy elsewhere", Some("alpha"));
         open.conversation.open_in = Some(42);
         let mut deleted = adoptable("c3", "Old one", Some("alpha"));
-        deleted.deleted = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
+        deleted.archived = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
         app.pick_conversation(vec![adoptable("c1", "Fix the parser", None), open, deleted]);
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if !p.all));
 
@@ -1213,7 +1238,7 @@ mod tests {
 
         // A deleted session's: restore it instead.
         let mut deleted = adoptable("c3", "Old one", Some("alpha"));
-        deleted.deleted = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
+        deleted.archived = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
         app.pick_conversation(vec![deleted]);
         app.on_key(key(KeyCode::Enter));
         assert_eq!(

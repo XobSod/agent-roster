@@ -27,12 +27,14 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` delete |
+| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
-| `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) · `t` tmux server and database |
+| `v` view | `p` group by project · `t` tmux server and database |
 
-Sessions sit on shelves by attention: *Needs you* (questions, finished turns you
-haven't seen), *Idle*, *Working* (dimmed) and *Stopped*. In an agent, Ctrl+Q comes
+Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
+(questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
+what you've handed off or finished: *Working* (dimmed) and *Archived* (folded;
+`Enter` restores one, `s D` deletes it for good). In an agent, Ctrl+Q comes
 back and marks it read.
 
 New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits). Projects
@@ -62,7 +64,8 @@ roster ls --project myproj --sort attention   # like the TUI's shelves
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
-roster rm api && roster restore api     # deleted sessions keep their conversation
+roster archive api && roster restore api   # archived sessions keep their conversation
+roster rm api                           # delete an archived session for good (a Claude conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
 ```

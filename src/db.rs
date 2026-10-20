@@ -217,7 +217,7 @@ impl Db {
             .optional()?)
     }
 
-    /// Removes a project and its deleted sessions. Returns the purged sessions.
+    /// Removes a project and its archived sessions. Returns the purged sessions.
     pub fn remove_project(&mut self, project: &Project) -> Result<Vec<Session>> {
         let sessions: Vec<Session> = self
             .sessions(true)?
@@ -226,7 +226,7 @@ impl Db {
             .collect();
         if let Some(live) = sessions.iter().find(|s| s.deleted_at.is_none()) {
             bail!(
-                "project {:?} still has session {:?}; delete its sessions first",
+                "project {:?} still has session {:?}; archive its sessions first",
                 project.name,
                 live.name
             );
@@ -257,9 +257,25 @@ impl Db {
         save_session(&self.conn, s)
     }
 
-    /// All sessions, oldest first within each project; deleted ones only if asked.
-    pub fn sessions(&self, include_deleted: bool) -> Result<Vec<Session>> {
-        let filter = if include_deleted {
+    /// Removes an archived session and its events for good.
+    pub fn delete_session(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM events WHERE session_id = ?1", [id])?;
+        let n = tx.execute(
+            "DELETE FROM sessions WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+        )?;
+        if n == 0 {
+            bail!("no archived session {id}");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// All sessions, oldest first within each project; archived ones (`deleted_at`
+    /// set: the column keeps its first name) only if asked.
+    pub fn sessions(&self, include_archived: bool) -> Result<Vec<Session>> {
+        let filter = if include_archived {
             ""
         } else {
             "WHERE s.deleted_at IS NULL"

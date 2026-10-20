@@ -181,7 +181,7 @@ impl Roster {
             let owner = by_tmux.get(&p.session).filter(|s| s.deleted_at.is_none());
             let label = match (owner, by_tmux.get(&p.session)) {
                 (Some(s), _) => s.label(),
-                (None, Some(s)) => format!("{} (deleted)", s.label()),
+                (None, Some(s)) => format!("{} (archived)", s.label()),
                 (None, None) => "-".to_string(),
             };
             let pane = if p.dead {
@@ -219,7 +219,7 @@ impl Roster {
         }
         for name in &orphans {
             let why = match by_tmux.get(name) {
-                Some(s) => format!("belongs to deleted session {}", s.label()),
+                Some(s) => format!("belongs to archived session {}", s.label()),
                 None if name.starts_with("r-") => "belongs to no roster session".to_string(),
                 None => "wasn't created by roster".to_string(),
             };

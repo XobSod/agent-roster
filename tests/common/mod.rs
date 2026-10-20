@@ -97,6 +97,17 @@ impl TestEnv {
         let sessions = self.claude_dir().join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         let pid = child.id();
+        // Until it has exec'd, its command line is still the test's.
+        let deadline = Instant::now() + TIMEOUT;
+        while !fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|c| c.contains("claude"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in Claude didn't start"
+            );
+            sleep(Duration::from_millis(10));
+        }
         fs::write(
             sessions.join(format!("{pid}.json")),
             format!(r#"{{"pid":{pid},"sessionId":"{id}"}}"#),
@@ -172,7 +183,7 @@ impl TestEnv {
 
     pub fn session(&self, name: &str, deleted: bool) -> Option<Value> {
         let args: &[&str] = if deleted {
-            &["ls", "--json", "--deleted"]
+            &["ls", "--json", "--archived"]
         } else {
             &["ls", "--json"]
         };

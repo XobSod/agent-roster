@@ -80,13 +80,15 @@ fn session_lifecycle() {
             .contains("fake agent: --resume conv-1")
     });
 
-    // Delete needs confirmation; deleted sessions can be restored.
-    let out = t.run(&["rm", "one"]);
+    // Archiving needs confirmation; archived sessions can be restored.
+    let out = t.run(&["archive", "one"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("--yes"));
-    t.ok(&["rm", "--yes", "one"]);
+    t.ok(&["archive", "--yes", "one"]);
     assert!(t.session("one", false).is_none());
-    assert_eq!(t.session("one", true).unwrap()["conversation_id"], "conv-1");
+    let archived = t.session("one", true).unwrap();
+    assert_eq!(archived["conversation_id"], "conv-1");
+    assert!(archived["archived_at"].is_i64());
     t.ok(&["restore", "one"]);
     let s = t.session("one", false).unwrap();
     assert_eq!(
@@ -97,6 +99,16 @@ fn session_lifecycle() {
         !t.run(&["project", "rm", "demo"]).status.success(),
         "project with a live session was removed"
     );
+
+    // Deleting for good: only archived sessions, and it asks first.
+    let out = t.run(&["rm", "--yes", "one"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't archived"));
+    t.ok(&["archive", "--yes", "one"]);
+    assert!(!t.run(&["rm", "one"]).status.success());
+    let out = t.ok(&["rm", "--yes", "one"]);
+    assert!(out.contains("for good"), "{out}");
+    assert!(t.session("one", false).is_none() && t.session("one", true).is_none());
+    t.ok(&["project", "rm", "demo"]);
 }
 
 #[test]
@@ -680,12 +692,19 @@ fn conversations_started_elsewhere_can_be_adopted() {
         (Some("other"), other.to_str())
     );
 
-    // A deleted session's conversation is restored, not adopted again.
-    t.ok(&["rm", "--yes", "one"]);
+    // An archived session's conversation is restored, not adopted again.
+    t.ok(&["archive", "--yes", "one"]);
     assert!(
         t.ok(&["adopt", "--list"])
-            .contains("deleted in roster as demo/one")
+            .contains("archived in roster as demo/one")
     );
     let out = t.run(&["adopt", "1111"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("restore it instead"));
+    // Deleted for good, it can be adopted again.
+    t.ok(&["rm", "--yes", "one"]);
+    let list = t.ok(&["adopt", "--list"]);
+    assert!(
+        list.contains("11111111") && !list.contains("archived"),
+        "{list}"
+    );
 }

@@ -197,7 +197,7 @@ impl Roster {
         self.db.projects()
     }
 
-    /// Removes a project that has no live sessions; returns the deleted sessions
+    /// Removes a project that has no live sessions; returns the archived sessions
     /// purged with it.
     pub fn remove_project(&mut self, name: &str) -> Result<Vec<Session>> {
         let project = self
@@ -209,18 +209,18 @@ impl Roster {
 
     // Sessions
 
-    pub fn sessions(&self, include_deleted: bool) -> Result<Vec<Session>> {
-        self.db.sessions(include_deleted)
+    pub fn sessions(&self, include_archived: bool) -> Result<Vec<Session>> {
+        self.db.sessions(include_archived)
     }
 
-    /// Finds a live (or, with `deleted`, a deleted) session by id, `project/name`,
-    /// name, or id prefix of at least 4 characters.
-    pub fn resolve(&self, addr: &str, deleted: bool) -> Result<Session> {
+    /// Finds a live (or, with `archived`, an archived) session by id,
+    /// `project/name`, name, or id prefix of at least 4 characters.
+    pub fn resolve(&self, addr: &str, archived: bool) -> Result<Session> {
         let pool: Vec<Session> = self
             .db
             .sessions(true)?
             .into_iter()
-            .filter(|s| s.deleted_at.is_some() == deleted)
+            .filter(|s| s.deleted_at.is_some() == archived)
             .collect();
         let rules: [&dyn Fn(&Session) -> bool; 4] = [
             &|s| s.id == addr,
@@ -244,7 +244,7 @@ impl Roster {
         }
         bail!(
             "no {}session {addr:?}",
-            if deleted { "deleted " } else { "" }
+            if archived { "archived " } else { "" }
         )
     }
 
@@ -349,7 +349,7 @@ impl Roster {
         self.refresh()?;
         let mut s = self.db.session(id)?;
         if s.deleted_at.is_some() {
-            bail!("{} is deleted; restore it first", s.label());
+            bail!("{} is archived; restore it first", s.label());
         }
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
@@ -433,9 +433,9 @@ impl Roster {
         self.start(id)
     }
 
-    /// Deletes a session: stops it and hides it, keeping its conversation ID so
-    /// `restore` can bring it back.
-    pub fn delete(&mut self, id: &str) -> Result<()> {
+    /// Archives a session: stops it and puts it away, keeping its conversation ID
+    /// so `restore` can bring it back.
+    pub fn archive(&mut self, id: &str) -> Result<()> {
         self.stop(id)?;
         let mut s = self.db.session(id)?;
         self.tmux.kill_session(&s.tmux_name())?;
@@ -444,12 +444,26 @@ impl Roster {
         self.db.save_session(&s)
     }
 
-    /// Brings back a deleted session (stopped), optionally under a new name.
+    /// Deletes an archived session for good: roster forgets it and its events.
+    /// The conversation stays where the agent keeps it (a Claude one can be
+    /// adopted again).
+    pub fn delete(&mut self, id: &str) -> Result<Session> {
+        self.db.fold_events(now_ms())?;
+        let s = self.db.session(id)?;
+        if s.deleted_at.is_none() {
+            bail!("{} isn't archived; archive it first", s.label());
+        }
+        self.tmux.kill_session(&s.tmux_name())?;
+        self.db.delete_session(id)?;
+        Ok(s)
+    }
+
+    /// Brings back an archived session (stopped), optionally under a new name.
     pub fn restore(&mut self, id: &str, new_name: Option<&str>) -> Result<Session> {
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
         if s.deleted_at.is_none() {
-            bail!("{} isn't deleted", s.label());
+            bail!("{} isn't archived", s.label());
         }
         if let Some(name) = new_name {
             validate_name("session", name)?;
@@ -480,7 +494,7 @@ impl Roster {
         self.refresh()?;
         let s = self.db.session(id)?;
         if s.deleted_at.is_some() {
-            bail!("{} is deleted; restore it first", s.label());
+            bail!("{} is archived; restore it first", s.label());
         }
         if s.state == State::Stopped {
             self.start(id)?;
@@ -597,7 +611,7 @@ impl Roster {
 
     /// Claude conversations roster could take over: not already one of its live
     /// sessions, each with the project whose directory holds it (the deepest
-    /// one), if any, and a deleted roster session it belongs to, if any. With
+    /// one), if any, and an archived roster session it belongs to, if any. With
     /// `all` false, only those in a project's directory.
     pub fn adoptable(&self, all: bool) -> Result<Vec<Adoptable>> {
         let Some(dir) = crate::adopt::claude_dir() else {
@@ -627,7 +641,7 @@ impl Roster {
                 conversation,
                 project,
                 new_project,
-                deleted: known.cloned(),
+                archived: known.cloned(),
             });
         }
         Ok(found)
@@ -658,9 +672,9 @@ impl Roster {
                 req.conversation
             ),
         };
-        if let Some(s) = &found.deleted {
+        if let Some(s) = &found.archived {
             bail!(
-                "that conversation is the deleted session {}; restore it instead (`roster restore {}`)",
+                "that conversation is the archived session {}; restore it instead (`roster restore {}`)",
                 s.label(),
                 s.id
             );
@@ -889,8 +903,8 @@ pub struct Adoptable {
     pub project: Option<Project>,
     /// Otherwise, the name a new project for its directory gets.
     pub new_project: String,
-    /// A deleted roster session it belongs to: restore that instead.
-    pub deleted: Option<Session>,
+    /// An archived roster session it belongs to: restore that instead.
+    pub archived: Option<Session>,
 }
 
 /// What to adopt, and how.

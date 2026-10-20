@@ -140,14 +140,15 @@ impl Session {
         self.worked_ms + current.max(0)
     }
 
-    /// Attention order: blocked on the user, then unread, idle, working, stopped.
+    /// Attention order: blocked on the user, then unread, idle, stopped (idle
+    /// without a running agent), and working last: handed off.
     pub fn attention(&self) -> u8 {
         match (self.state, self.unread) {
             (State::NeedsInput, _) => 0,
             (State::Idle, true) => 1,
             (State::Idle, false) => 2,
-            (State::Working, _) => 3,
-            (State::Stopped, _) => 4,
+            (State::Stopped, _) => 3,
+            (State::Working, _) => 4,
         }
     }
 

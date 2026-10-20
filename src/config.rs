@@ -9,7 +9,7 @@
 //! down = ["j", "Down"]
 //! [keys.session]                  # a menu: `menu` opens it, the rest act inside
 //! menu = "s"
-//! delete = ""
+//! delete = ""                     # no key for deleting archived sessions for good
 //!
 //! [agents.claude]
 //! command = "claude"              # default: the agent's name, found on PATH
@@ -45,7 +45,7 @@ pub struct Keys {
     /// Fold the selected shelf or project group (from a session: its group).
     pub collapse: KeyList,
     pub expand: KeyList,
-    /// Attach to the selected session, open or fold a heading, restore when deleted.
+    /// Attach to the selected session, open or fold a heading, restore when archived.
     pub confirm: KeyList,
     pub quit: KeyList,
     pub help: KeyList,
@@ -64,6 +64,9 @@ pub struct SessionKeys {
     pub start: KeyList,
     pub stop: KeyList,
     pub restart: KeyList,
+    /// Archive a session, or restore an archived one.
+    pub archive: KeyList,
+    /// Delete an archived session for good.
     pub delete: KeyList,
     pub toggle_read: KeyList,
     pub retitle: KeyList,
@@ -85,7 +88,6 @@ pub struct ProjectKeys {
 pub struct ViewKeys {
     pub menu: KeyList,
     pub group: KeyList,
-    pub deleted: KeyList,
     pub server: KeyList,
 }
 
@@ -120,7 +122,8 @@ impl Default for SessionKeys {
             start: keys(&["s"]),
             stop: keys(&["x"]),
             restart: keys(&["r"]),
-            delete: keys(&["d"]),
+            archive: keys(&["d"]),
+            delete: keys(&["D"]),
             toggle_read: keys(&["u"]),
             retitle: keys(&["t"]),
             adopt: keys(&["a"]),
@@ -145,7 +148,6 @@ impl Default for ViewKeys {
         ViewKeys {
             menu: keys(&["v"]),
             group: keys(&["p"]),
-            deleted: keys(&["d"]),
             server: keys(&["t"]),
         }
     }

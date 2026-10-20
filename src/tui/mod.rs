@@ -123,7 +123,7 @@ fn update_preview(roster: &Roster, app: &mut App) {
             count,
             ..
         }) => app.shelf_info(shelf, count),
-        Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => app.deleted_info(&s),
+        Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => app.archived_info(&s),
         Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s.id, true) {
             Ok(screen) => screen_text(&screen),
             Err(_) => {
@@ -207,16 +207,17 @@ fn perform(
             busy(terminal, app, format!("Restarting {label}…"))?;
             roster.restart(&id).map(|()| format!("Restarted {label}"))
         }
-        Op::Delete(id) => {
+        Op::Archive(id) => {
             let label = app.session_label(&id);
-            busy(terminal, app, format!("Deleting {label}…"))?;
-            let chord = app.chord(Menu::View, Action::ShowDeleted);
+            busy(terminal, app, format!("Archiving {label}…"))?;
             roster
-                .delete(&id)
-                .map(|()| format!("Deleted {label}; {chord} shows deleted sessions"))
+                .archive(&id)
+                .map(|()| format!("Archived {label}; it's under Archived"))
         }
+        Op::Delete(id) => roster
+            .delete(&id)
+            .map(|s| format!("Deleted {} for good", s.label())),
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
-            app.set_mode(Mode::Live);
             app.select(EntryKey::Session(s.id.clone()));
             format!("Restored {} (stopped)", s.label())
         }),

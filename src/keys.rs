@@ -45,6 +45,9 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+    /// Archive, or restore when archived.
+    Archive,
+    /// Delete an archived session for good.
     Delete,
     ToggleRead,
     Retitle,
@@ -54,7 +57,6 @@ pub enum Action {
     RemoveProject,
     FilterProject,
     ToggleGroup,
-    ShowDeleted,
     ShowServer,
 }
 
@@ -75,14 +77,14 @@ impl Action {
             Action::Start => "start",
             Action::Stop => "stop",
             Action::Restart => "restart",
-            Action::Delete => "delete",
+            Action::Archive => "archive / restore",
+            Action::Delete => "delete for good",
             Action::ToggleRead => "read/unread",
             Action::Retitle => "new title",
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
             Action::ToggleGroup => "group by project",
-            Action::ShowDeleted => "deleted sessions",
             Action::ShowServer => "tmux server",
         }
     }
@@ -266,6 +268,7 @@ impl Keymap {
         )?;
         session.bind(t, "retitle", &k.retitle, Action::Retitle, &mut labels)?;
         session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
+        session.bind(t, "archive", &k.archive, Action::Archive, &mut labels)?;
         session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
 
         let mut project = Table::default();
@@ -278,7 +281,6 @@ impl Keymap {
         let mut view = Table::default();
         let (t, k) = ("keys.view", &keys.view);
         view.bind(t, "group", &k.group, Action::ToggleGroup, &mut labels)?;
-        view.bind(t, "deleted", &k.deleted, Action::ShowDeleted, &mut labels)?;
         view.bind(t, "server", &k.server, Action::ShowServer, &mut labels)?;
 
         let menus = HashMap::from([
@@ -372,7 +374,8 @@ mod tests {
         // The same letter means the same in each menu.
         assert_eq!(map.menu(Menu::Session, &chr('n')), Some(Action::NewSession));
         assert_eq!(map.menu(Menu::Project, &chr('n')), Some(Action::NewProject));
-        assert_eq!(map.menu(Menu::Session, &chr('d')), Some(Action::Delete));
+        assert_eq!(map.menu(Menu::Session, &chr('d')), Some(Action::Archive));
+        assert_eq!(map.menu(Menu::Session, &chr('D')), Some(Action::Delete));
         assert_eq!(
             map.menu(Menu::Project, &chr('d')),
             Some(Action::RemoveProject)
@@ -383,7 +386,7 @@ mod tests {
             .iter()
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "a", "d"]);
+        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "a", "d", "D"]);
     }
 
     #[test]
@@ -395,14 +398,14 @@ mod tests {
         keys.view.menu = KeyList(vec!["s".into()]);
         assert!(Keymap::new(&keys).is_err());
         let mut keys = Keys::default();
-        keys.session.delete = KeyList(vec![]);
+        keys.session.archive = KeyList(vec![]);
         let map = Keymap::new(&keys).unwrap();
-        assert_eq!(map.label(Action::Delete), None);
+        assert_eq!(map.label(Action::Archive), None);
         assert_eq!(map.menu(Menu::Session, &chr('d')), None);
         assert!(
             !map.menu_items(Menu::Session)
                 .iter()
-                .any(|(_, a)| *a == Action::Delete)
+                .any(|(_, a)| *a == Action::Archive)
         );
     }
 }

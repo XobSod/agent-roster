@@ -140,7 +140,7 @@ pub mod tests {
                 effort: None,
             }),
             new_project: "elsewhere".into(),
-            deleted: None,
+            archived: None,
         }
     }
 

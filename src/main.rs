@@ -118,13 +118,13 @@ enum Cmd {
     },
     /// List sessions and their state (● = unread)
     Ls {
-        /// List deleted sessions instead
+        /// List archived sessions instead
         #[arg(long)]
-        deleted: bool,
+        archived: bool,
         /// Only this project's sessions
         #[arg(long)]
         project: Option<String>,
-        /// `project` (default) or `attention`: needs you, idle, working, stopped, like the TUI's shelves
+        /// `project` (default) or `attention`: needs input, idle, stopped, working, like the TUI's shelves
         #[arg(long, default_value = "project", value_parser = ["project", "attention"])]
         sort: String,
         #[arg(long)]
@@ -154,13 +154,19 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Delete a session (`roster restore` brings it back)
+    /// Archive a session: its agent stops, and `roster restore` brings it back
+    Archive {
+        session: String,
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Delete an archived session for good (a Claude conversation stays, and can be adopted again)
     Rm {
         session: String,
         #[arg(short, long)]
         yes: bool,
     },
-    /// Restore a deleted session
+    /// Restore an archived session
     Restore {
         session: String,
         /// Restore under a new name
@@ -308,7 +314,7 @@ fn run(cli: Cli) -> Result<()> {
             for s in purged {
                 let conversation = s.conversation_id.as_deref().unwrap_or("none");
                 println!(
-                    "  with deleted session {} (conversation {conversation})",
+                    "  with archived session {} (conversation {conversation})",
                     s.name
                 );
             }
@@ -353,13 +359,13 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Ls {
-            deleted,
+            archived,
             project,
             sort,
             json,
         } => {
             r.settle()?;
-            list_sessions(&r, deleted, project.as_deref(), sort == "attention", json)?;
+            list_sessions(&r, archived, project.as_deref(), sort == "attention", json)?;
         }
         Cmd::Show { session } => {
             r.refresh()?;
@@ -406,16 +412,45 @@ fn run(cli: Cli) -> Result<()> {
             r.restart(&s.id)?;
             println!("Restarted {}", s.label());
         }
-        Cmd::Rm { session, yes } => {
+        Cmd::Archive { session, yes } => {
             let s = r.resolve(&session, false)?;
             if !confirm(
-                &format!("Delete {}? (`roster restore` brings it back)", s.label()),
+                &format!(
+                    "Archive {}? Its agent stops (`roster restore` brings it back)",
+                    s.label()
+                ),
+                yes,
+            )? {
+                return Ok(());
+            }
+            r.archive(&s.id)?;
+            println!("Archived {} ({})", s.label(), s.id);
+        }
+        Cmd::Rm { session, yes } => {
+            let s = match r.resolve(&session, true) {
+                Ok(s) => s,
+                Err(e) => match r.resolve(&session, false) {
+                    Ok(live) => bail!(
+                        "{} isn't archived; only archived sessions can be deleted (`roster archive {}`)",
+                        live.label(),
+                        live.label()
+                    ),
+                    Err(_) => return Err(e),
+                },
+            };
+            let kept = if s.agent == agent::CLAUDE {
+                "; its Claude conversation stays and can be adopted again"
+            } else {
+                ""
+            };
+            if !confirm(
+                &format!("Delete {} for good? Roster forgets it{kept}", s.label()),
                 yes,
             )? {
                 return Ok(());
             }
             r.delete(&s.id)?;
-            println!("Deleted {} ({})", s.label(), s.id);
+            println!("Deleted {} ({}) for good", s.label(), s.id);
         }
         Cmd::Restore { session, name } => {
             let s = r.resolve(&session, true)?;
@@ -550,8 +585,8 @@ fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
                 Some(p) => p.name.clone(),
                 None => format!("new: {}", a.new_project),
             };
-            let note = match (&a.deleted, c.open_in) {
-                (Some(s), _) => format!("deleted in roster as {}", s.label()),
+            let note = match (&a.archived, c.open_in) {
+                (Some(s), _) => format!("archived in roster as {}", s.label()),
                 (None, Some(pid)) => format!("open in Claude (pid {pid})"),
                 (None, None) => String::new(),
             };
@@ -582,7 +617,7 @@ fn print_info(r: &Roster, s: &Session) {
         .flatten()
         .collect::<Vec<_>>();
     let state = match s.deleted_at {
-        Some(t) => format!("deleted {} ago", util::ago(now - t)),
+        Some(t) => format!("archived {} ago", util::ago(now - t)),
         None => format!(
             "{} {}",
             s.state.as_str(),
@@ -701,7 +736,7 @@ fn list_projects(r: &Roster) -> Result<()> {
 
 fn list_sessions(
     r: &Roster,
-    deleted: bool,
+    archived: bool,
     project: Option<&str>,
     by_attention: bool,
     json: bool,
@@ -712,9 +747,9 @@ fn list_sessions(
         bail!("no project {name:?}");
     }
     let mut sessions: Vec<Session> = r
-        .sessions(deleted)?
+        .sessions(archived)?
         .into_iter()
-        .filter(|s| s.deleted_at.is_some() == deleted && project.is_none_or(|p| s.project == p))
+        .filter(|s| s.deleted_at.is_some() == archived && project.is_none_or(|p| s.project == p))
         .collect();
     if by_attention {
         sessions.sort_by_key(|s| (s.attention(), std::cmp::Reverse(s.state_since)));
@@ -726,7 +761,7 @@ fn list_sessions(
                 json!({
                     "id": s.id, "project": s.project, "name": s.name, "agent": s.agent,
                     "state": s.state.as_str(), "unread": s.unread, "exit_status": s.exit_status,
-                    "conversation_id": s.conversation_id, "transcript_path": s.transcript_path, "workdir": s.workdir, "deleted_at": s.deleted_at,
+                    "conversation_id": s.conversation_id, "transcript_path": s.transcript_path, "workdir": s.workdir, "archived_at": s.deleted_at,
                     "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
                     "pending_prompt": s.pending_prompt.is_some(),
                     "running_model": s.running_model, "running_effort": s.running_effort,
@@ -739,8 +774,8 @@ fn list_sessions(
         return Ok(());
     }
     if sessions.is_empty() {
-        if deleted {
-            println!("No deleted sessions.");
+        if archived {
+            println!("No archived sessions.");
         } else {
             println!("No sessions. Start one with `roster new <project>`.");
         }

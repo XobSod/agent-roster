@@ -53,19 +53,19 @@ fn tui_walkthrough() {
     term.wait_for("the list again", "Enter attach");
     term.wait_for("the agent's echo in the preview", "typed while attached");
 
-    // Stop it: it moves to the folded Stopped shelf, which gets the selection.
+    // Stop it: it moves to the Stopped shelf, still selected.
     term.keys(&["s", "x"]);
     term.wait_for("the stop", "Stopped demo/one");
     term.wait_for("the Stopped shelf", "Stopped (1)");
-    term.keys(&["l", "j"]);
     term.keys(&["s", "d"]);
-    term.wait_for("the confirmation", "Delete demo/one?");
+    term.wait_for("the confirmation", "Archive demo/one?");
     term.keys(&["y"]);
-    term.wait_for("the delete", "Deleted demo/one");
+    term.wait_for("the archive", "Archived demo/one");
 
-    // The view menu shows deleted sessions; Enter restores.
-    term.keys(&["v", "d"]);
-    term.wait_for("the deleted view", "deleted sessions");
+    // It's on the folded Archived shelf, which gets the selection; Enter restores.
+    term.wait_for("the Archived shelf", "Archived (1)");
+    term.keys(&["l", "j"]);
+    term.wait_for("the archived row", "archived now");
     term.keys(&["Enter"]);
     term.wait_for("the restore", "Restored demo/one");
 
@@ -82,10 +82,20 @@ fn tui_walkthrough() {
     term.keys(&["Escape"]);
     term.wait_for_gone("the help closed", "Session menu (s …)");
 
+    // Archived again, then deleted for good.
+    term.keys(&["s", "d"]);
+    term.wait_for("the confirmation", "Archive demo/one?");
+    term.keys(&["y"]);
+    term.wait_for("the archive", "Archived demo/one");
+    term.keys(&["s", "D"]);
+    term.wait_for("the confirmation", "Delete demo/one for good?");
+    term.keys(&["y"]);
+    term.wait_for("the deletion", "Deleted demo/one for good");
+
     term.keys(&["q"]);
     term.wait_for("the TUI to exit", "TUI-EXIT=0");
     // tmux's "[detached (from session …)]" isn't left behind, once per attach.
     let screen = term.screen();
     assert!(!screen.contains("[detached"), "{screen}");
-    assert_eq!(t.session("one", false).unwrap()["state"], "stopped");
+    assert!(t.session("one", false).is_none() && t.session("one", true).is_none());
 }

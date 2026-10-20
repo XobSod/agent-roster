@@ -88,8 +88,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
     let working = live.iter().filter(|s| s.state == State::Working).count();
     let mut summary = Vec::new();
     if needs > 0 {
+        let verb = if needs == 1 { "needs" } else { "need" };
         summary.push(Span::styled(
-            format!("{needs} need you"),
+            format!("{needs} {verb} input"),
             Style::new().fg(UNREAD),
         ));
     }
@@ -113,7 +114,6 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
     );
 
     let note = match (app.mode, app.filter.and_then(|id| app.project(id))) {
-        (Mode::Deleted, _) => Some(" deleted sessions".to_string()),
         (Mode::Live, Some(p)) => Some(format!(" only {}", p.name)),
         _ => None,
     };
@@ -127,8 +127,20 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
         );
     }
 
-    let (lines, spans) = list_lines(app, width, now);
+    let (mut lines, mut spans) = list_lines(app, width, now);
     let height = list.height as usize;
+    // What's handed off (working) or finished (archived) sits at the bottom
+    // while everything fits.
+    if lines.len() < height
+        && let Some(first) = app.entries.iter().position(Entry::at_bottom)
+    {
+        let gap = height - lines.len();
+        let at = spans[first].0;
+        lines.splice(at..at, std::iter::repeat_n(Line::default(), gap));
+        for span in &mut spans[first..] {
+            span.0 += gap;
+        }
+    }
     // Keep the selected entry in view.
     let mut scroll = app.scroll.get().min(lines.len().saturating_sub(height));
     if let Some(&(start, len)) = spans.get(app.selected) {
@@ -267,30 +279,23 @@ fn card(s: &Session, with_project: bool, width: usize, now: i64) -> Vec<Vec<Span
     lines
 }
 
+/// A stopped or archived session's line: project / title and its state.
 fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
-    let right = if app.mode == Mode::Deleted {
-        let ago = s.deleted_at.map_or(String::new(), |t| theme::ago(now - t));
-        vec![Span::styled(
-            format!("deleted {ago} "),
-            Style::new().fg(MUTED),
-        )]
-    } else {
-        [status(s, now), vec![Span::raw(" ")]].concat()
+    let right = match s.deleted_at {
+        Some(at) => vec![Span::styled(
+            format!("archived {} ", theme::ago(now - at)),
+            Style::new().fg(FAINT),
+        )],
+        None => [status(s, now), vec![Span::raw(" ")]].concat(),
     };
-    let title = Span::styled(
-        if app.mode == Mode::Deleted {
-            s.label()
-        } else {
-            s.display_title().to_string()
-        },
-        Style::new().fg(MUTED),
-    );
-    let left = match (app.mode, app.grouped) {
-        // The label says the project.
-        (Mode::Deleted, _) => vec![badge(&s.project), Span::raw(" "), title],
-        // The project's heading is right above.
-        (_, true) => vec![Span::raw("   "), title],
-        (_, false) => [project_name(&s.project), vec![Span::raw("  "), title]].concat(),
+    let title = Span::styled(s.display_title().to_string(), Style::new().fg(MUTED));
+    // Grouped by project, the heading right above says it; archived sessions
+    // come from every project.
+    let left = if app.grouped && s.deleted_at.is_none() {
+        vec![Span::raw("   "), title]
+    } else {
+        let slash = Span::styled(" / ", Style::new().fg(FAINT));
+        [project_name(&s.project), vec![slash, title]].concat()
     };
     fit(width, left, right)
 }
@@ -448,7 +453,7 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
             }
             right.push(sep());
             if s.deleted_at.is_some() {
-                right.push(Span::styled("deleted", Style::new().fg(MUTED)));
+                right.push(Span::styled("archived", Style::new().fg(MUTED)));
             } else {
                 right.push(state_words(s, now));
             }
@@ -884,8 +889,8 @@ fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
             ),
             Span::raw(what),
         ];
-        let right = match (&a.deleted, c.open_in) {
-            (Some(_), _) => vec![Span::styled("deleted session ", Style::new().fg(MUTED))],
+        let right = match (&a.archived, c.open_in) {
+            (Some(_), _) => vec![Span::styled("archived session ", Style::new().fg(MUTED))],
             (None, Some(_)) => vec![Span::styled("open in Claude ", Style::new().fg(INPUT))],
             (None, None) => vec![],
         };
@@ -1085,8 +1090,8 @@ mod tests {
     #[test]
     fn shows_shelves_cards_header_and_hints() {
         let screen = render(&app(), 120, 16);
-        assert!(screen.contains("1 need you · 1 working"), "{screen}");
-        assert!(screen.contains("Needs you (1)"), "{screen}");
+        assert!(screen.contains("1 needs input · 1 working"), "{screen}");
+        assert!(screen.contains("Needs input (1)"), "{screen}");
         // Without project headings, each card names its project first.
         assert!(screen.contains("RO roster"), "{screen}");
         assert!(screen.contains("   Fix scrollback"), "{screen}");
@@ -1123,7 +1128,36 @@ mod tests {
         app.selected = stopped;
         app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
         let screen = render(&app, 120, 16);
-        assert!(screen.contains("RO roster  db"), "{screen}");
+        assert!(screen.contains("RO roster / db"), "{screen}");
+    }
+
+    #[test]
+    fn working_and_archived_sit_at_the_bottom_while_all_fits() {
+        let mut app = app();
+        let mut sessions = app.sessions.clone();
+        let mut archived = session("c1");
+        archived.project = "roster".into();
+        archived.title = Some("Old work".into());
+        archived.deleted_at = Some(now_ms() - 3 * 86_400_000);
+        sessions.push(archived);
+        app.set_data(app.projects.clone(), sessions);
+        let screen = render(&app, 120, 20);
+        let lines: Vec<&str> = screen.lines().collect();
+        let row = |text: &str| lines.iter().position(|l| l.contains(text)).unwrap();
+        // The footer is the last line; Archived (folded) right above it.
+        assert_eq!(row("Archived (1)"), lines.len() - 2, "{screen}");
+        assert!(row("Working (1)") > row("api · opus high") + 2, "{screen}");
+        // Unfolded: project / title, and when it was archived.
+        app.selected = app.entries.len() - 1;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 20);
+        assert!(screen.contains("RO roster / Old work"), "{screen}");
+        assert!(screen.contains("archived 3d"), "{screen}");
+        // Too long to fit: no gap, it scrolls (here: to the top).
+        app.selected = 0;
+        let screen = render(&app, 120, 10);
+        assert!(screen.contains("Needs input (1)"), "{screen}");
+        assert!(!screen.contains("Archived"), "{screen}");
     }
 
     #[test]
@@ -1134,7 +1168,8 @@ mod tests {
         assert!(screen.contains(" session "), "{screen}");
         assert!(screen.contains("n new"), "{screen}");
         assert!(screen.contains("x stop"), "{screen}");
-        assert!(screen.contains("d delete"), "{screen}");
+        assert!(screen.contains("d archive / restore"), "{screen}");
+        assert!(screen.contains("D delete for good"), "{screen}");
     }
 
     #[test]

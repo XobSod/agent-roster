@@ -237,6 +237,18 @@ mod tests {
         path
     }
 
+    /// Until the child has exec'd, its command line is still the test's.
+    pub fn wait_until_claude(pid: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !is_claude(pid as i32) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{pid} never became claude"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn reads_what_a_conversation_says_about_itself() {
         let dir = tempfile::tempdir().unwrap();
@@ -309,6 +321,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         let pid = child.id();
+        wait_until_claude(pid);
         fs::write(
             sessions.join(format!("{pid}.json")),
             format!(r#"{{"pid":{pid},"sessionId":"c-1"}}"#),

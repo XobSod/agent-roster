@@ -20,11 +20,11 @@ use std::process::ExitCode;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use engine::Roster;
+use engine::{Defaults, NewSession, Roster};
 use model::{Session, State};
 
 #[derive(Parser)]
@@ -49,12 +49,33 @@ enum Cmd {
         project: String,
         #[arg(short, long)]
         name: Option<String>,
-        /// claude, or an agent from [agents] in config.toml
-        #[arg(long, default_value = "claude")]
-        agent: String,
+        /// claude, or an agent from [agents] in config.toml (default: the project's)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Claude model (default: the project's; "default" for Claude's own)
+        #[arg(long)]
+        model: Option<String>,
+        /// Claude effort (default: the project's; "default" for Claude's own)
+        #[arg(long)]
+        effort: Option<String>,
+        /// A first prompt, typed into the agent once it's ready
+        #[arg(long)]
+        prompt: Option<String>,
         /// Attach to it right away
         #[arg(short, long)]
         attach: bool,
+    },
+    /// Rename a session or change its model and effort (applies on its next start)
+    Edit {
+        session: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Claude model ("default" for Claude's own)
+        #[arg(long)]
+        model: Option<String>,
+        /// Claude effort ("default" for Claude's own)
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// List sessions and their state (● = unread)
     Ls {
@@ -120,11 +141,47 @@ enum Cmd {
 #[derive(Subcommand)]
 enum ProjectCmd {
     /// Add a project: a name and its origin directory
-    Add { name: String, path: PathBuf },
+    Add {
+        name: String,
+        path: PathBuf,
+        #[command(flatten)]
+        defaults: DefaultsArgs,
+    },
+    /// Rename, move, or change the defaults of a project
+    Edit {
+        project: String,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+        /// New origin directory (existing sessions keep theirs)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[command(flatten)]
+        defaults: DefaultsArgs,
+    },
     /// List projects
     Ls,
     /// Remove a project (it must have no live sessions)
     Rm { name: String },
+}
+
+/// A project's defaults for new sessions; "default" clears one.
+#[derive(clap::Args)]
+struct DefaultsArgs {
+    /// Default agent for new sessions
+    #[arg(long)]
+    agent: Option<String>,
+    /// Default Claude model (opus, sonnet, haiku, fable, or a full name)
+    #[arg(long)]
+    model: Option<String>,
+    /// Default Claude effort (low, medium, high, xhigh, max)
+    #[arg(long)]
+    effort: Option<String>,
+}
+
+/// None: not given; Some(None): "default" (no value); Some(Some(v)): v.
+fn setting(value: Option<String>) -> Option<Option<String>> {
+    value.map(|v| (v != "default").then_some(v))
 }
 
 fn main() -> ExitCode {
@@ -150,9 +207,35 @@ fn run(cli: Cli) -> Result<()> {
         return tui::run(&mut r);
     };
     match command {
-        Cmd::Project(ProjectCmd::Add { name, path }) => {
-            let p = r.add_project(&name, &path)?;
+        Cmd::Project(ProjectCmd::Add {
+            name,
+            path,
+            defaults,
+        }) => {
+            let defaults = Defaults {
+                agent: setting(defaults.agent).flatten(),
+                model: setting(defaults.model).flatten(),
+                effort: setting(defaults.effort).flatten(),
+            };
+            let p = r.add_project(&name, &path, defaults)?;
             println!("Added project {} ({})", p.name, p.origin.display());
+        }
+        Cmd::Project(ProjectCmd::Edit {
+            project,
+            name,
+            path,
+            defaults,
+        }) => {
+            let p = r.projects()?.into_iter().find(|p| p.name == project);
+            let p = p.with_context(|| format!("no project {project:?}"))?;
+            let updated = Defaults {
+                agent: setting(defaults.agent).unwrap_or(p.agent.clone()),
+                model: setting(defaults.model).unwrap_or(p.model.clone()),
+                effort: setting(defaults.effort).unwrap_or(p.effort.clone()),
+            };
+            let name = name.unwrap_or(p.name.clone());
+            let p = r.update_project(p.id, &name, &path.unwrap_or(p.origin.clone()), updated)?;
+            println!("Updated project {} ({})", p.name, p.origin.display());
         }
         Cmd::Project(ProjectCmd::Ls) => list_projects(&r)?,
         Cmd::Project(ProjectCmd::Rm { name }) => {
@@ -170,10 +253,37 @@ fn run(cli: Cli) -> Result<()> {
             project,
             name,
             agent,
+            model,
+            effort,
+            prompt,
             attach,
         } => {
-            let s = r.new_session(&project, name.as_deref(), &agent)?;
+            let p = r.projects()?.into_iter().find(|p| p.name == project);
+            let p = p.with_context(|| {
+                format!("no project {project:?} (add it with `roster project add`)")
+            })?;
+            let waits = prompt.is_some() && !attach;
+            let s = r.new_session(NewSession {
+                project,
+                name,
+                agent,
+                model: setting(model).unwrap_or(p.model),
+                effort: setting(effort).unwrap_or(p.effort),
+                prompt,
+            })?;
             println!("Started {} ({})", s.label(), s.id);
+            if waits {
+                if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
+                    println!("Sent the first prompt");
+                } else {
+                    println!(
+                        "The agent isn't ready yet (it may be waiting for you, e.g. to trust the folder);"
+                    );
+                    println!(
+                        "the prompt is typed in once it is, by the next roster command or the TUI"
+                    );
+                }
+            }
             if attach {
                 r.attach(&s.id)?;
             }
@@ -246,6 +356,27 @@ fn run(cli: Cli) -> Result<()> {
                 s.label(),
                 s.label()
             );
+        }
+        Cmd::Edit {
+            session,
+            name,
+            model,
+            effort,
+        } => {
+            let s = r.resolve(&session, false)?;
+            let s = r.update_session(
+                &s.id,
+                name.as_deref().unwrap_or(&s.name),
+                setting(model).unwrap_or(s.model.clone()),
+                setting(effort).unwrap_or(s.effort.clone()),
+            )?;
+            println!("Updated {}", s.label());
+            if s.state != State::Stopped {
+                println!(
+                    "The agent picks up a new model or effort on its next start (`roster restart {}`)",
+                    s.label()
+                );
+            }
         }
         Cmd::Read { session } => {
             let s = r.resolve(&session, false)?;
@@ -325,6 +456,7 @@ fn list_sessions(r: &Roster, deleted: bool, json: bool) -> Result<()> {
                     "id": s.id, "project": s.project, "name": s.name, "agent": s.agent,
                     "state": s.state.as_str(), "unread": s.unread, "exit_status": s.exit_status,
                     "conversation_id": s.conversation_id, "workdir": s.workdir, "deleted_at": s.deleted_at,
+                    "title": s.title, "model": s.model, "effort": s.effort,
                 })
             })
             .collect();

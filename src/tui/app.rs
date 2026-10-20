@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Text;
 
+use super::form::{Form, Outcome};
 use super::list::{self, Entry, EntryKey, Group, Shelf};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
@@ -21,7 +22,6 @@ pub enum Mode {
     Deleted,
 }
 
-#[derive(Debug)]
 pub enum Dialog {
     Confirm {
         question: String,
@@ -32,14 +32,11 @@ pub enum Dialog {
         value: String,
         purpose: Purpose,
     },
+    Form(Form),
 }
 
 #[derive(Clone, Debug)]
 pub enum Purpose {
-    ChooseAgent { project: String },
-    NewSession { project: String, agent: String },
-    ProjectName,
-    ProjectPath { name: String },
     RestoreName { id: String },
 }
 
@@ -60,10 +57,30 @@ pub enum Op {
         project: String,
         agent: String,
         name: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        prompt: Option<String>,
+    },
+    EditSession {
+        id: String,
+        name: String,
+        model: Option<String>,
+        effort: Option<String>,
     },
     AddProject {
         name: String,
         path: String,
+        agent: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    EditProject {
+        id: i64,
+        name: String,
+        path: String,
+        agent: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
     },
     RemoveProject(String),
     Quit,
@@ -325,8 +342,21 @@ impl App {
                 ));
             }
             Action::NewProject => {
-                self.input("New project's name:", String::new(), Purpose::ProjectName)
+                let agents = self.agent_names();
+                self.dialog = Some(Dialog::Form(Form::new_project(&self.default_path, &agents)));
             }
+            Action::EditProject => match self.selected_project() {
+                Some(p) => {
+                    self.dialog = Some(Dialog::Form(Form::edit_project(&p, &self.agent_names())))
+                }
+                None => {
+                    self.fail("Select a project (group by project) or one of its sessions first")
+                }
+            },
+            Action::EditSession => match self.selected_session().cloned() {
+                Some(s) => self.dialog = Some(Dialog::Form(Form::edit_session(&s))),
+                None => self.fail("Select a session first"),
+            },
             Action::FilterProject => self.toggle_filter(),
             Action::RemoveProject => self.remove_project(),
             Action::NewSession => self.new_session(),
@@ -440,10 +470,13 @@ impl App {
             self.fail(format!("Add a project first ({key})"));
             return;
         }
-        match self.selected_project() {
-            Some(p) => self.ask_new_session(p.name),
-            None => self.fail("Select a session or a project first"),
-        }
+        let selected = self.selected_project();
+        let form = Form::new_session(&self.projects, selected.as_ref(), &self.agent_names());
+        self.dialog = Some(Dialog::Form(form));
+    }
+
+    fn agent_names(&self) -> Vec<String> {
+        self.agents.iter().map(|(name, _)| name.clone()).collect()
     }
 
     fn toggle_filter(&mut self) {
@@ -503,37 +536,6 @@ impl App {
         format!("{open} {key}")
     }
 
-    /// Asks for the agent if there's a choice, then for the name.
-    fn ask_new_session(&mut self, project: String) {
-        if self.agents.len() > 1 {
-            let names: Vec<&str> = self.agents.iter().map(|(n, _)| n.as_str()).collect();
-            let prompt = format!(
-                "Agent for the new session in {project} ({}):",
-                names.join(", ")
-            );
-            self.input(
-                &prompt,
-                names[0].to_string(),
-                Purpose::ChooseAgent { project },
-            );
-        } else {
-            let agent = self
-                .agents
-                .first()
-                .map_or("claude".to_string(), |(n, _)| n.clone());
-            self.ask_session_name(project, agent);
-        }
-    }
-
-    fn ask_session_name(&mut self, project: String, agent: String) {
-        let prompt = format!("New {agent} session in {project}. Name (empty for automatic):");
-        self.input(
-            &prompt,
-            String::new(),
-            Purpose::NewSession { project, agent },
-        );
-    }
-
     fn new_conversation_question(&self, s: &Session) -> String {
         format!(
             "{} ({}) can't resume its conversation. Start a new one?",
@@ -546,6 +548,14 @@ impl App {
         let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
         let alt = e.modifiers.contains(KeyModifiers::ALT);
         match self.dialog.take()? {
+            Dialog::Form(mut form) => match form.on_key(e) {
+                Outcome::Continue => {
+                    self.dialog = Some(Dialog::Form(form));
+                    None
+                }
+                Outcome::Cancel => None,
+                Outcome::Submit(op) => Some(op),
+            },
             Dialog::Confirm { question, op } => match e.code {
                 KeyCode::Char('y' | 'Y') => Some(op),
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
@@ -584,35 +594,6 @@ impl App {
     fn submit(&mut self, value: String, purpose: Purpose) -> Option<Op> {
         let value = value.trim().to_string();
         match purpose {
-            Purpose::ChooseAgent { project } => {
-                if self.agents.iter().any(|(n, _)| *n == value) {
-                    self.ask_session_name(project, value);
-                } else {
-                    self.fail(format!(
-                        "No agent {value:?}; configure it under [agents] in config.toml"
-                    ));
-                }
-                None
-            }
-            Purpose::NewSession { project, agent } => Some(Op::NewSession {
-                project,
-                agent,
-                name: (!value.is_empty()).then_some(value),
-            }),
-            Purpose::ProjectName if value.is_empty() => None,
-            Purpose::ProjectName => {
-                let prompt = format!("Origin directory of {value}:");
-                self.input(
-                    &prompt,
-                    self.default_path.clone(),
-                    Purpose::ProjectPath { name: value },
-                );
-                None
-            }
-            Purpose::ProjectPath { name } => Some(Op::AddProject {
-                name,
-                path: expand_tilde(&value),
-            }),
             Purpose::RestoreName { .. } if value.is_empty() => None,
             Purpose::RestoreName { id } => Some(Op::Restore {
                 id,
@@ -716,15 +697,6 @@ impl App {
             )),
             Mode::Deleted => Text::from("No deleted sessions."),
         }
-    }
-}
-
-fn expand_tilde(path: &str) -> String {
-    match (path.strip_prefix('~'), dirs::home_dir()) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            format!("{}{rest}", home.display())
-        }
-        _ => path.to_string(),
     }
 }
 
@@ -891,21 +863,26 @@ mod tests {
         // An unbound key closes the menu without doing anything.
         assert_eq!(keys(&mut app, "sz"), None);
         assert_eq!((app.menu, app.dialog.is_none()), (None, true));
-        // s n opens the new-session prompt for the selected session's project.
+        // s n opens the new-session form on the selected session's project.
         keys(&mut app, "sn");
+        let Some(Dialog::Form(form)) = &app.dialog else {
+            panic!("no form")
+        };
+        assert_eq!(form.title, "New session");
+        assert!(form.fields.iter().any(|f| f.value == "alpha"));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.dialog.is_none());
+        // p n opens the new-project form; s e and p e the edit forms.
+        keys(&mut app, "pn");
+        assert!(matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "New project"));
+        app.on_key(key(KeyCode::Esc));
+        keys(&mut app, "se");
         assert!(
-            matches!(&app.dialog, Some(Dialog::Input { prompt, .. }) if prompt.contains("alpha"))
+            matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "Edit session alpha/s-s1")
         );
         app.on_key(key(KeyCode::Esc));
-        // p n starts a new project.
-        keys(&mut app, "pn");
-        assert!(matches!(
-            &app.dialog,
-            Some(Dialog::Input {
-                purpose: Purpose::ProjectName,
-                ..
-            })
-        ));
+        keys(&mut app, "pe");
+        assert!(matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "Edit project alpha"));
     }
 
     #[test]

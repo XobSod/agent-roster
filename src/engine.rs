@@ -95,6 +95,13 @@ impl Roster {
                             }
                         }
                     }
+                    if s.pending_prompt.is_some() && self.ready_for_prompt(&s, now) {
+                        // Claimed in the database first, so only one process types it.
+                        if let Some(prompt) = self.db.take_pending_prompt(&s.id)? {
+                            self.tmux.type_line(&s.tmux_name(), &prompt)?;
+                        }
+                        s.pending_prompt = None;
+                    }
                 }
             }
             if s != before {
@@ -136,22 +143,52 @@ impl Roster {
 
     // Projects
 
-    pub fn add_project(&self, name: &str, path: &Path) -> Result<Project> {
+    pub fn add_project(&self, name: &str, path: &Path, defaults: Defaults) -> Result<Project> {
+        let project = self.checked_project(0, name, path, defaults)?;
+        self.db.add_project(&project, now_ms())
+    }
+
+    /// Renames, moves or changes the defaults of a project. Its existing sessions
+    /// keep their directory.
+    pub fn update_project(
+        &self,
+        id: i64,
+        name: &str,
+        path: &Path,
+        defaults: Defaults,
+    ) -> Result<Project> {
+        let project = self.checked_project(id, name, path, defaults)?;
+        self.db.save_project(&project)?;
+        Ok(project)
+    }
+
+    fn checked_project(
+        &self,
+        id: i64,
+        name: &str,
+        path: &Path,
+        defaults: Defaults,
+    ) -> Result<Project> {
         validate_name("project", name)?;
         let origin =
             fs::canonicalize(path).with_context(|| format!("can't find {}", path.display()))?;
         if !origin.is_dir() {
             bail!("{} is not a directory", origin.display());
         }
-        let project = Project {
-            id: 0,
+        if let Some(agent) = &defaults.agent {
+            agent::kind(agent, &self.config)?;
+        }
+        if let Some(effort) = &defaults.effort {
+            agent::check_effort(effort)?;
+        }
+        Ok(Project {
+            id,
             name: name.to_string(),
             origin,
-            agent: None,
-            model: None,
-            effort: None,
-        };
-        self.db.add_project(&project, now_ms())
+            agent: defaults.agent,
+            model: defaults.model,
+            effort: defaults.effort,
+        })
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
@@ -210,16 +247,21 @@ impl Roster {
     }
 
     /// Creates a session in `project` and starts its agent.
-    pub fn new_session(
-        &mut self,
-        project: &str,
-        name: Option<&str>,
-        agent: &str,
-    ) -> Result<Session> {
-        agent::kind(agent, &self.config)?;
-        let project = self.db.project(project)?.with_context(|| {
-            format!("no project {project:?} (add it with `roster project add`)")
+    pub fn new_session(&mut self, req: NewSession) -> Result<Session> {
+        let project = self.db.project(&req.project)?.with_context(|| {
+            format!(
+                "no project {:?} (add it with `roster project add`)",
+                req.project
+            )
         })?;
+        let agent = req
+            .agent
+            .or_else(|| project.agent.clone())
+            .unwrap_or_else(|| agent::CLAUDE.to_string());
+        let kind = agent::kind(&agent, &self.config)?;
+        if let Some(effort) = &req.effort {
+            agent::check_effort(effort)?;
+        }
         let taken: Vec<String> = self
             .db
             .sessions(false)?
@@ -227,7 +269,7 @@ impl Roster {
             .filter(|s| s.project_id == project.id)
             .map(|s| s.name)
             .collect();
-        let name = match name {
+        let name = match req.name.as_deref() {
             Some(name) => {
                 validate_name("session", name)?;
                 if taken.iter().any(|t| t == name) {
@@ -243,12 +285,22 @@ impl Roster {
                 .find(|n| !taken.contains(n))
                 .expect("unbounded"),
         };
+        // Model and effort are Claude flags.
+        let (model, effort) = if kind == Kind::Claude {
+            (req.model, req.effort)
+        } else {
+            (None, None)
+        };
+        let prompt = req
+            .prompt
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
         let s = Session {
             id: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
             project_id: project.id,
             project: project.name.clone(),
             name,
-            agent: agent.to_string(),
+            agent: agent.clone(),
             workdir: project.origin.clone(),
             conversation_id: None,
             transcript_path: None,
@@ -262,10 +314,10 @@ impl Roster {
             deleted_at: None,
             baseline_at: None,
             title: None,
-            model: None,
-            effort: None,
+            model,
+            effort,
             state_since: Some(now_ms()),
-            pending_prompt: None,
+            pending_prompt: prompt,
         };
         self.db.insert_session(&s)?;
         self.start(&s.id)?;
@@ -423,6 +475,57 @@ impl Roster {
         self.set_unread(id, false)
     }
 
+    /// Renames a session or changes its model and effort; the agent picks those up
+    /// on its next start.
+    pub fn update_session(
+        &mut self,
+        id: &str,
+        name: &str,
+        model: Option<String>,
+        effort: Option<String>,
+    ) -> Result<Session> {
+        validate_name("session", name)?;
+        if let Some(effort) = &effort {
+            agent::check_effort(effort)?;
+        }
+        self.db.fold_events(now_ms())?;
+        let mut s = self.db.session(id)?;
+        let taken = self
+            .db
+            .sessions(false)?
+            .iter()
+            .any(|o| o.id != s.id && o.project_id == s.project_id && o.name == name);
+        if taken {
+            bail!(
+                "project {:?} already has a session named {name:?}",
+                s.project
+            );
+        }
+        s.name = name.to_string();
+        if self.kind(&s) == Kind::Claude {
+            s.model = model;
+            s.effort = effort;
+        }
+        self.db.save_session(&s)?;
+        Ok(s)
+    }
+
+    /// Waits (refreshing) until a session's first prompt has been typed in, for
+    /// one-shot commands. False if the agent wasn't ready within `timeout`.
+    pub fn wait_for_prompt(&mut self, id: &str, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.refresh()?;
+            if self.db.session(id)?.pending_prompt.is_none() {
+                return Ok(true);
+            }
+            if Instant::now() > deadline {
+                return Ok(false);
+            }
+            sleep(Duration::from_millis(500));
+        }
+    }
+
     /// Marks a session unread, or read: then everything on its screen so far
     /// counts as seen.
     pub fn set_unread(&mut self, id: &str, unread: bool) -> Result<()> {
@@ -442,6 +545,17 @@ impl Roster {
     /// TUI ask first.
     pub fn can_resume(&self, s: &Session) -> bool {
         self.kind(s).can_resume()
+    }
+
+    /// Whether an agent is waiting for its first prompt: for Claude, after it has
+    /// reported its session (a new conversation has no transcript before that);
+    /// for others, idle after starting up.
+    fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
+        s.state == State::Idle
+            && match self.kind(s) {
+                Kind::Claude => s.transcript_path.is_some(),
+                Kind::Generic => s.baseline_at.is_some_and(|b| now > b),
+            }
     }
 
     /// Agents removed from the config are still watched, by their screen.
@@ -487,6 +601,26 @@ fn claude_title(pane_title: &str) -> Option<String> {
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim();
     (!title.is_empty() && title != "Claude Code").then(|| title.to_string())
+}
+
+/// Default agent, model and effort for a project's new sessions.
+#[derive(Clone, Debug, Default)]
+pub struct Defaults {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// What a new session should be; the agent defaults to the project's.
+#[derive(Clone, Debug, Default)]
+pub struct NewSession {
+    pub project: String,
+    pub name: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Typed into the agent once it's ready.
+    pub prompt: Option<String>,
 }
 
 fn signal(pid: i32, sig: libc::c_int) {

@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Dialog, Mode};
+use super::form::{Form, Kind};
 use super::list::{Entry, Group};
 use super::theme::{
     self, ACCENT, CLAUDE, ERROR, FAINT, INPUT, MUTED, SELECTED_BG, UNREAD, WORKING,
@@ -576,6 +577,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
 fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     match dialog {
+        Dialog::Form(form) => draw_form(f, form, area),
         Dialog::Confirm { question, .. } => {
             let rect = centered(area, width, 6);
             let key = |k: &'static str| {
@@ -617,6 +619,119 @@ fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
             f.set_cursor_position((value_area.x + 2 + shown.width() as u16, value_area.y));
         }
     }
+}
+
+/// A form: one line per visible field, the focused one marked, with its hint on
+/// the right; errors and notes below.
+fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
+    const LABEL: usize = 10;
+    let visible: Vec<usize> = (0..form.fields.len())
+        .filter(|&i| !form.fields[i].hidden)
+        .collect();
+    let notes: Vec<Line> = [
+        form.error
+            .as_ref()
+            .map(|e| Line::styled(format!("  {e}"), Style::new().fg(ERROR))),
+        form.note
+            .as_ref()
+            .map(|n| Line::styled(format!("  {n}"), Style::new().fg(MUTED))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let height = (visible.len() + notes.len() + 4) as u16;
+    let rect = centered(area, area.width.saturating_sub(4).min(84), height);
+    let hint = format!(" Enter {} · Esc cancel ", form.verb());
+    let block = popup_block(&form.title)
+        .title_bottom(Line::styled(hint, Style::new().fg(MUTED)).right_aligned());
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+
+    let width = inner.width as usize;
+    let mut lines = vec![Line::default()];
+    let mut cursor = None;
+    for &i in &visible {
+        let field = &form.fields[i];
+        let focused = i == form.focus;
+        let label_style = if focused {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(MUTED)
+        };
+        let mut left = vec![
+            Span::styled(if focused { "▸ " } else { "  " }, Style::new().fg(ACCENT)),
+            Span::styled(format!("{:<LABEL$} ", field.label), label_style),
+        ];
+        let right = if focused {
+            vec![
+                Span::styled(field.hint(), Style::new().fg(FAINT)),
+                Span::raw(" "),
+            ]
+        } else {
+            vec![]
+        };
+        let room = width.saturating_sub(LABEL + 3 + field.hint().width() + 6);
+        let shown = tail(&field.value, room);
+        match &field.kind {
+            Kind::Text { placeholder, .. } if field.value.is_empty() => {
+                left.push(Span::styled(
+                    placeholder.clone(),
+                    Style::new().fg(FAINT).add_modifier(Modifier::ITALIC),
+                ));
+                if focused {
+                    cursor = Some((LABEL + 3, lines.len()));
+                }
+            }
+            Kind::Text { .. } => {
+                if focused {
+                    cursor = Some((LABEL + 3 + shown.width(), lines.len()));
+                }
+                left.push(Span::raw(shown));
+            }
+            Kind::Choice(_) | Kind::Combo(_) => {
+                let style = if field.value == "default" {
+                    Style::new().fg(MUTED)
+                } else {
+                    Style::new()
+                };
+                if focused {
+                    left.push(Span::styled("‹ ", Style::new().fg(FAINT)));
+                    left.push(Span::styled(shown.clone(), style));
+                    left.push(Span::styled(" ›", Style::new().fg(FAINT)));
+                    if matches!(field.kind, Kind::Combo(_)) {
+                        cursor = Some((LABEL + 5 + shown.width(), lines.len()));
+                    }
+                } else {
+                    left.push(Span::styled(shown, style));
+                }
+            }
+            Kind::Info => left.push(Span::styled(shown, Style::new().fg(MUTED))),
+        }
+        lines.push(Line::from(fit(width, left, right)));
+    }
+    lines.push(Line::default());
+    lines.extend(notes);
+    f.render_widget(Paragraph::new(lines), inner);
+    if let Some((x, y)) = cursor {
+        f.set_cursor_position((inner.x + x as u16, inner.y + y as u16));
+    }
+}
+
+/// The end of `s` if it's wider than `width`, with "…" in front.
+fn tail(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    for c in chars.iter().rev() {
+        if out.width() + c.to_string().width() + 1 > width {
+            break;
+        }
+        out.insert(0, *c);
+    }
+    format!("…{out}")
 }
 
 // Helpers
@@ -773,6 +888,28 @@ mod tests {
         assert!(screen.contains("Session menu (s …)"), "{screen}");
         assert!(screen.contains("s n  new"), "{screen}");
         assert!(screen.contains("C-q  back to roster"), "{screen}");
+    }
+
+    #[test]
+    fn forms_show_fields_choices_and_hints() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 24);
+        assert!(screen.contains(" New session "), "{screen}");
+        assert!(screen.contains("Project    roster"), "{screen}");
+        assert!(screen.contains("▸ Name       automatic"), "{screen}");
+        assert!(screen.contains("Effort     default"), "{screen}");
+        assert!(
+            screen.contains("optional: typed in once the agent is ready"),
+            "{screen}"
+        );
+        assert!(screen.contains("Enter start · Esc cancel"), "{screen}");
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let screen = render(&app, 120, 24);
+        assert!(screen.contains("▸ Agent      ‹ claude ›"), "{screen}");
+        assert!(screen.contains("←→ change"), "{screen}");
+        assert_eq!(tail("/a/very/long/path", 8), "…ng/path");
     }
 
     #[test]

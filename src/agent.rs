@@ -13,6 +13,19 @@ use crate::util::sh_quote;
 
 pub const CLAUDE: &str = "claude";
 
+/// Model aliases Claude accepts (`claude --help`); any full model name works too.
+pub const CLAUDE_MODELS: &[&str] = &["opus", "sonnet", "haiku", "fable"];
+
+/// Claude's `--effort` levels.
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+pub fn check_effort(effort: &str) -> Result<()> {
+    if !EFFORTS.contains(&effort) {
+        bail!("unknown effort {effort:?} (one of: {})", EFFORTS.join(", "));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// Hooks report its state, and its conversations resume.
@@ -77,6 +90,13 @@ pub fn launch(s: &Session, config: &Config, roster_exe: &Path) -> Result<Launch>
 }
 
 fn claude(s: &Session, mut argv: Vec<String>, roster_exe: &Path) -> Launch {
+    // After the config's args, so the session's choice wins.
+    if let Some(model) = &s.model {
+        argv.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = &s.effort {
+        argv.extend(["--effort".into(), effort.clone()]);
+    }
     // --session-id fails once the conversation has messages, i.e. once its
     // transcript exists; from then on it has to be --resume.
     let has_transcript = s
@@ -197,6 +217,23 @@ mod tests {
             settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             "'/my tools/roster' report needs-input"
         );
+    }
+
+    #[test]
+    fn session_model_and_effort_follow_the_config_args() {
+        let agent = AgentConfig {
+            args: vec!["--model".into(), "sonnet".into()],
+            ..AgentConfig::default()
+        };
+        let mut s = session("a");
+        s.model = Some("opus".into());
+        s.effort = Some("high".into());
+        let l = launch(&s, &config_with("claude", agent), Path::new("/bin/roster")).unwrap();
+        assert_eq!(
+            l.argv[1..7],
+            ["--model", "sonnet", "--model", "opus", "--effort", "high"]
+        );
+        assert!(check_effort("xhigh").is_ok() && check_effort("extreme").is_err());
     }
 
     #[test]

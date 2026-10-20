@@ -317,3 +317,134 @@ fn config_changes_reach_a_running_server() {
     t.ok(&["ls"]);
     assert!(root_keys().contains("F9"));
 }
+
+#[test]
+fn first_prompts_are_typed_in_once_the_agent_is_ready() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let Some(t) = TestEnv::new("prompt") else {
+        return;
+    };
+    t.ok(&[
+        "project",
+        "add",
+        "demo",
+        t.path("proj").to_str().unwrap(),
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+    ]);
+
+    // Claude is ready once it reports its session; `new` waits for that.
+    let waiting = t
+        .command(&["new", "demo", "--name", "c", "--prompt", "fix the tests"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    t.wait_for("the session", |t| t.session("c", false).is_some());
+    let s = t.session("c", false).unwrap();
+    assert_eq!(
+        (s["model"].as_str(), s["effort"].as_str()),
+        (Some("opus"), Some("high"))
+    );
+    let id = s["id"].as_str().unwrap().to_string();
+    let screen = t.ok(&["show", "c"]);
+    assert!(screen.contains("--model opus --effort high"), "{screen}");
+    assert!(
+        !screen.contains("fix the tests"),
+        "typed before the agent was ready: {screen}"
+    );
+    let payload = format!(
+        r#"{{"session_id":"x","transcript_path":"{}"}}"#,
+        t.path("x.jsonl").display()
+    );
+    t.report(&id, "session", &payload);
+    let out = waiting.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Sent the first prompt"));
+    t.wait_for("the prompt in the agent", |t| {
+        t.ok(&["show", "c"]).contains("fix the tests")
+    });
+
+    // A generic agent is ready once it's idle after starting up.
+    let agent = t.path("generic-agent");
+    fs::write(&agent, "#!/bin/sh\necho ready\nexec cat\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "{text}[agents.echo]\ncommand = \"{}\"\nidle_after = 1\n",
+            agent.display()
+        ),
+    )
+    .unwrap();
+    let out = t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "g",
+        "--prompt",
+        "hello generic",
+    ]);
+    assert!(out.contains("Sent the first prompt"), "{out}");
+    assert!(t.ok(&["show", "g"]).contains("hello generic"));
+    // Model and effort are Claude's; a generic session doesn't keep them.
+    assert_eq!(t.session("g", false).unwrap()["model"], Value::Null);
+}
+
+#[test]
+fn projects_and_sessions_can_be_edited() {
+    let Some(t) = TestEnv::new("edit") else {
+        return;
+    };
+    t.ok(&[
+        "project",
+        "add",
+        "demo",
+        t.path("proj").to_str().unwrap(),
+        "--model",
+        "sonnet",
+    ]);
+    fs::create_dir_all(t.path("moved")).unwrap();
+    t.ok(&[
+        "project",
+        "edit",
+        "demo",
+        "--name",
+        "renamed",
+        "--path",
+        t.path("moved").to_str().unwrap(),
+        "--model",
+        "default",
+        "--effort",
+        "max",
+    ]);
+    assert!(t.ok(&["project", "ls"]).contains("renamed"));
+    assert!(
+        !t.run(&["project", "edit", "renamed", "--effort", "extreme"])
+            .status
+            .success()
+    );
+
+    t.ok(&["new", "renamed", "--name", "s"]);
+    let s = t.session("s", false).unwrap();
+    assert_eq!(
+        (s["model"].clone(), s["effort"].as_str()),
+        (Value::Null, Some("max"))
+    );
+    let out = t.ok(&["edit", "s", "--name", "t", "--model", "haiku"]);
+    assert!(out.contains("next start"), "{out}");
+    let s = t.session("t", false).unwrap();
+    assert_eq!(
+        (s["model"].as_str(), s["effort"].as_str()),
+        (Some("haiku"), Some("max"))
+    );
+    t.ok(&["restart", "--yes", "t"]);
+    t.wait_for("the new model", |t| {
+        t.ok(&["show", "t"]).contains("--model haiku --effort max")
+    });
+}

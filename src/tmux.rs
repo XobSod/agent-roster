@@ -186,6 +186,14 @@ impl Tmux {
         self.run(args).map(drop)
     }
 
+    /// Types a line into the pane, as if the user typed it and pressed Enter.
+    pub fn type_line(&self, name: &str, text: &str) -> Result<()> {
+        let target = pane_target(name);
+        self.run(["send-keys", "-t", target.as_str(), "-l", "--", text])?;
+        self.run(["send-keys", "-t", target.as_str(), "Enter"])
+            .map(drop)
+    }
+
     pub fn kill_session(&self, name: &str) -> Result<()> {
         match self.run(["kill-session", "-t", &format!("={name}")]) {
             Err(e) if is_missing(&e) => Ok(()),

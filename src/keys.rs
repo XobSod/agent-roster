@@ -41,12 +41,14 @@ pub enum Action {
     Help,
     Open(Menu),
     NewSession,
+    EditSession,
     Start,
     Stop,
     Restart,
     Delete,
     ToggleRead,
     NewProject,
+    EditProject,
     RemoveProject,
     FilterProject,
     ToggleGroup,
@@ -66,6 +68,7 @@ impl Action {
             Action::Help => "help",
             Action::Open(menu) => menu.name(),
             Action::NewSession | Action::NewProject => "new",
+            Action::EditSession | Action::EditProject => "edit",
             Action::Start => "start",
             Action::Stop => "stop",
             Action::Restart => "restart",
@@ -244,6 +247,7 @@ impl Keymap {
         let mut session = Table::default();
         let (t, k) = ("keys.session", &keys.session);
         session.bind(t, "new", &k.new, Action::NewSession, &mut labels)?;
+        session.bind(t, "edit", &k.edit, Action::EditSession, &mut labels)?;
         session.bind(t, "start", &k.start, Action::Start, &mut labels)?;
         session.bind(t, "stop", &k.stop, Action::Stop, &mut labels)?;
         session.bind(t, "restart", &k.restart, Action::Restart, &mut labels)?;
@@ -259,6 +263,7 @@ impl Keymap {
         let mut project = Table::default();
         let (t, k) = ("keys.project", &keys.project);
         project.bind(t, "new", &k.new, Action::NewProject, &mut labels)?;
+        project.bind(t, "edit", &k.edit, Action::EditProject, &mut labels)?;
         project.bind(t, "filter", &k.filter, Action::FilterProject, &mut labels)?;
         project.bind(t, "remove", &k.remove, Action::RemoveProject, &mut labels)?;
 
@@ -369,7 +374,7 @@ mod tests {
             .iter()
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(items, ["n", "s", "x", "r", "u", "d"]);
+        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "d"]);
     }
 
     #[test]

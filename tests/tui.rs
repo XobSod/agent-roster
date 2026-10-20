@@ -12,24 +12,38 @@ fn tui_walkthrough() {
     let term = Terminal::start(&t, &command, (120, 30));
     term.wait_for("the empty list", "No projects yet");
 
-    // The project menu adds a project: its name, then its directory.
+    // The project menu's form: directory first (the name follows it), then the name.
     term.keys(&["p"]);
     term.wait_for("the project menu", "n new");
     term.keys(&["n"]);
-    term.text("demo");
-    term.keys(&["Enter"]);
-    term.wait_for("the directory prompt", "Origin directory of demo");
+    term.wait_for("the new-project form", "New project");
     term.keys(&["C-u"]);
     term.text(t.path("proj").to_str().unwrap());
+    term.wait_for("the name taken from the directory", "Name       proj");
+    term.keys(&["Down", "C-u"]);
+    term.text("demo");
     term.keys(&["Enter"]);
     term.wait_for("the project", "Added project demo");
 
-    // The session menu starts a session; its screen shows in the preview.
+    // The session menu's form starts on the name; its screen shows in the preview.
     term.keys(&["s", "n"]);
+    term.wait_for("the new-session form", "New session");
     term.text("one");
     term.keys(&["Enter"]);
     term.wait_for("the agent's screen in the preview", "fake agent:");
     term.wait_for("the header", "demo / one");
+
+    // Editing the session: rename it.
+    term.keys(&["s", "e"]);
+    term.wait_for("the edit form", "Edit session demo/one");
+    term.keys(&["C-u"]);
+    term.text("first");
+    term.keys(&["Enter"]);
+    term.wait_for("the rename", "demo / first");
+    term.keys(&["s", "e", "C-u"]);
+    term.text("one");
+    term.keys(&["Enter"]);
+    term.wait_for("the rename back", "demo / one");
 
     // Attach, type to the agent, come back with Ctrl+Q.
     term.keys(&["Enter"]);

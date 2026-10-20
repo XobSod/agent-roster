@@ -154,7 +154,6 @@ impl Db {
         })
     }
 
-    #[allow(dead_code)] // for editing projects (the forms, next)
     pub fn save_project(&self, p: &Project) -> Result<()> {
         self.conn
             .execute(
@@ -261,6 +260,29 @@ impl Db {
 
     pub fn save_session(&self, s: &Session) -> Result<()> {
         save_session(&self.conn, s)
+    }
+
+    /// Takes a session's pending first prompt, so that only one process types it.
+    pub fn take_pending_prompt(&mut self, id: &str) -> Result<Option<String>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prompt: Option<String> = tx
+            .query_row(
+                "SELECT pending_prompt FROM sessions WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if prompt.is_some() {
+            tx.execute(
+                "UPDATE sessions SET pending_prompt = NULL WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(prompt)
     }
 
     // Events

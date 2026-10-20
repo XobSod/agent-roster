@@ -27,19 +27,26 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `s` start · `x` stop · `r` restart · `u` read/unread · `d` delete |
-| `p` project | `n` new · `f` show only this project · `d` remove |
+| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `d` delete |
+| `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
 | `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) |
 
 Sessions sit on shelves by attention: *Needs you* (questions, finished turns you
 haven't seen), *Idle*, *Working* (dimmed) and *Stopped*. In an agent, Ctrl+Q comes
 back and marks it read.
 
+New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits). Projects
+carry a default agent, model and effort for their sessions; a new session can also
+get a first prompt, typed into the agent once it's ready.
+
 Everything is also available from the CLI:
 
 ```sh
-roster project add myproj ~/src/myproj
+roster project add myproj ~/src/myproj --model opus --effort high
 roster new myproj --name api --attach   # start Claude and go into it; Ctrl+Q comes back
+roster new myproj --prompt "fix the failing tests"   # typed in once Claude is ready
+roster edit api --model sonnet          # applies on the next start
+roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read

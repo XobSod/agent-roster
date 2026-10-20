@@ -1,0 +1,834 @@
+//! Forms for creating and editing projects and sessions: labelled fields moved
+//! through with Tab or ↑/↓, choices changed with ←/→, submitted with Enter.
+
+use std::fs;
+use std::path::Path;
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::app::Op;
+use crate::agent::{CLAUDE, CLAUDE_MODELS, EFFORTS};
+use crate::model::{Project, Session};
+use crate::paths::PROJECT_ENV;
+
+/// Shown for "no value": the agent's own default.
+const DEFAULT: &str = "default";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Id {
+    Directory,
+    Name,
+    Project,
+    Agent,
+    Model,
+    Effort,
+    Prompt,
+    EnvFile,
+}
+
+#[derive(Clone, Debug)]
+pub enum Kind {
+    /// Free text; a `path` field completes directories with Tab.
+    Text { path: bool, placeholder: String },
+    /// One of these, changed with ←/→.
+    Choice(Vec<String>),
+    /// One of these with ←/→, or any typed value.
+    Combo(Vec<String>),
+    /// Read-only, worked out from the other fields.
+    Info,
+}
+
+#[derive(Clone, Debug)]
+pub struct Field {
+    pub id: Id,
+    pub label: &'static str,
+    pub kind: Kind,
+    pub value: String,
+    pub hidden: bool,
+    /// Changed by the user, so no longer filled in from other fields.
+    edited: bool,
+}
+
+impl Field {
+    fn new(id: Id, label: &'static str, kind: Kind, value: impl Into<String>) -> Field {
+        Field {
+            id,
+            label,
+            kind,
+            value: value.into(),
+            hidden: false,
+            edited: false,
+        }
+    }
+
+    fn focusable(&self) -> bool {
+        !self.hidden && !matches!(self.kind, Kind::Info)
+    }
+
+    /// What ←/→ do here, for the hint next to the focused field.
+    pub fn hint(&self) -> &'static str {
+        match self.kind {
+            Kind::Text { path: true, .. } => "Tab completes",
+            Kind::Text { .. } => "",
+            Kind::Choice(_) => "←→ change",
+            Kind::Combo(_) => "←→ or type",
+            Kind::Info => "",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Purpose {
+    NewProject,
+    EditProject(i64),
+    NewSession,
+    EditSession(String),
+}
+
+pub enum Outcome {
+    Continue,
+    Cancel,
+    Submit(Op),
+}
+
+pub struct Form {
+    pub purpose: Purpose,
+    pub title: String,
+    pub fields: Vec<Field>,
+    pub focus: usize,
+    pub error: Option<String>,
+    /// A note under the form, e.g. what a directory could complete to.
+    pub note: Option<String>,
+    projects: Vec<Project>,
+    /// The project the session fields were last filled in from.
+    filled_from: Option<String>,
+}
+
+fn options(first: &str, rest: &[&str]) -> Vec<String> {
+    std::iter::once(first)
+        .chain(rest.iter().copied())
+        .map(String::from)
+        .collect()
+}
+
+fn or_default(value: &Option<String>) -> String {
+    value.clone().unwrap_or_else(|| DEFAULT.to_string())
+}
+
+impl Form {
+    pub fn new_project(directory: &str, agents: &[String]) -> Form {
+        let fields = vec![
+            Field::new(
+                Id::Directory,
+                "Directory",
+                Kind::Text {
+                    path: true,
+                    placeholder: String::new(),
+                },
+                directory,
+            ),
+            Field::new(
+                Id::Name,
+                "Name",
+                Kind::Text {
+                    path: false,
+                    placeholder: "from the directory".into(),
+                },
+                "",
+            ),
+            Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
+            Field::new(
+                Id::Model,
+                "Model",
+                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                DEFAULT,
+            ),
+            Field::new(
+                Id::Effort,
+                "Effort",
+                Kind::Choice(options(DEFAULT, EFFORTS)),
+                DEFAULT,
+            ),
+            Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
+        ];
+        Form::build(
+            Purpose::NewProject,
+            "New project".into(),
+            fields,
+            Vec::new(),
+        )
+    }
+
+    pub fn edit_project(p: &Project, agents: &[String]) -> Form {
+        let mut fields = vec![
+            Field::new(
+                Id::Name,
+                "Name",
+                Kind::Text {
+                    path: false,
+                    placeholder: String::new(),
+                },
+                &p.name,
+            ),
+            Field::new(
+                Id::Directory,
+                "Directory",
+                Kind::Text {
+                    path: true,
+                    placeholder: String::new(),
+                },
+                p.origin.display().to_string(),
+            ),
+            Field::new(
+                Id::Agent,
+                "Agent",
+                Kind::Choice(agents.to_vec()),
+                p.agent.as_deref().unwrap_or(CLAUDE),
+            ),
+            Field::new(
+                Id::Model,
+                "Model",
+                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                or_default(&p.model),
+            ),
+            Field::new(
+                Id::Effort,
+                "Effort",
+                Kind::Choice(options(DEFAULT, EFFORTS)),
+                or_default(&p.effort),
+            ),
+            Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
+        ];
+        fields[0].edited = true;
+        Form::build(
+            Purpose::EditProject(p.id),
+            format!("Edit project {}", p.name),
+            fields,
+            Vec::new(),
+        )
+    }
+
+    pub fn new_session(
+        projects: &[Project],
+        selected: Option<&Project>,
+        agents: &[String],
+    ) -> Form {
+        let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+        let project = selected
+            .or(projects.first())
+            .map_or(String::new(), |p| p.name.clone());
+        let fields = vec![
+            Field::new(Id::Project, "Project", Kind::Choice(names), project),
+            Field::new(
+                Id::Name,
+                "Name",
+                Kind::Text {
+                    path: false,
+                    placeholder: "automatic".into(),
+                },
+                "",
+            ),
+            Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
+            Field::new(
+                Id::Model,
+                "Model",
+                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                DEFAULT,
+            ),
+            Field::new(
+                Id::Effort,
+                "Effort",
+                Kind::Choice(options(DEFAULT, EFFORTS)),
+                DEFAULT,
+            ),
+            Field::new(
+                Id::Prompt,
+                "Prompt",
+                Kind::Text {
+                    path: false,
+                    placeholder: "optional: typed in once the agent is ready".into(),
+                },
+                "",
+            ),
+        ];
+        let mut form = Form::build(
+            Purpose::NewSession,
+            "New session".into(),
+            fields,
+            projects.to_vec(),
+        );
+        // Start on the name when the project is already chosen.
+        if selected.is_some() || projects.len() == 1 {
+            form.focus = 1;
+        }
+        form
+    }
+
+    pub fn edit_session(s: &Session) -> Form {
+        let mut fields = vec![
+            Field::new(
+                Id::Name,
+                "Name",
+                Kind::Text {
+                    path: false,
+                    placeholder: String::new(),
+                },
+                &s.name,
+            ),
+            Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
+            Field::new(
+                Id::Model,
+                "Model",
+                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                or_default(&s.model),
+            ),
+            Field::new(
+                Id::Effort,
+                "Effort",
+                Kind::Choice(options(DEFAULT, EFFORTS)),
+                or_default(&s.effort),
+            ),
+        ];
+        fields[0].edited = true;
+        Form::build(
+            Purpose::EditSession(s.id.clone()),
+            format!("Edit session {}", s.label()),
+            fields,
+            Vec::new(),
+        )
+    }
+
+    fn build(purpose: Purpose, title: String, fields: Vec<Field>, projects: Vec<Project>) -> Form {
+        let mut form = Form {
+            purpose,
+            title,
+            fields,
+            focus: 0,
+            error: None,
+            note: None,
+            projects,
+            filled_from: None,
+        };
+        form.update();
+        form
+    }
+
+    /// Enter's verb, for the hint.
+    pub fn verb(&self) -> &'static str {
+        match self.purpose {
+            Purpose::NewProject => "create",
+            Purpose::NewSession => "start",
+            Purpose::EditProject(_) | Purpose::EditSession(_) => "save",
+        }
+    }
+
+    fn field(&self, id: Id) -> Option<&Field> {
+        self.fields.iter().find(|f| f.id == id)
+    }
+
+    fn field_mut(&mut self, id: Id) -> Option<&mut Field> {
+        self.fields.iter_mut().find(|f| f.id == id)
+    }
+
+    fn value(&self, id: Id) -> &str {
+        self.field(id).map_or("", |f| f.value.as_str())
+    }
+
+    /// The value, or None for "default" or empty.
+    fn setting(&self, id: Id) -> Option<String> {
+        let value = self.value(id).trim();
+        (!value.is_empty() && value != DEFAULT).then(|| value.to_string())
+    }
+
+    /// Fills in fields that follow others.
+    fn update(&mut self) {
+        // Model and effort are Claude flags.
+        let agent = self.value(Id::Agent).to_string();
+        for id in [Id::Model, Id::Effort] {
+            if let Some(f) = self.field_mut(id) {
+                f.hidden = agent != CLAUDE;
+            }
+        }
+        // A new project is named after its directory until the user names it.
+        let directory = expand_tilde(self.value(Id::Directory));
+        if matches!(self.purpose, Purpose::NewProject)
+            && let Some(name) = self.field_mut(Id::Name).filter(|f| !f.edited)
+        {
+            name.value = directory_name(&directory);
+        }
+        let env = Path::new(&directory).join(PROJECT_ENV);
+        let state = if env.exists() {
+            "found: sourced before every start"
+        } else {
+            "none"
+        };
+        if let Some(f) = self.field_mut(Id::EnvFile) {
+            f.value = format!("{PROJECT_ENV} ({state})");
+        }
+        // A new session takes its project's defaults, unless changed here.
+        let project = self.value(Id::Project).to_string();
+        if self.purpose == Purpose::NewSession && self.filled_from.as_deref() != Some(&project) {
+            if let Some(p) = self.projects.iter().find(|p| p.name == project).cloned() {
+                let defaults = [
+                    (
+                        Id::Agent,
+                        p.agent.clone().unwrap_or_else(|| CLAUDE.to_string()),
+                    ),
+                    (Id::Model, or_default(&p.model)),
+                    (Id::Effort, or_default(&p.effort)),
+                ];
+                for (id, value) in defaults {
+                    if let Some(f) = self.field_mut(id).filter(|f| !f.edited) {
+                        f.value = value;
+                    }
+                }
+            }
+            self.filled_from = Some(project);
+            // The agent may have changed.
+            self.update();
+        }
+    }
+
+    pub fn on_key(&mut self, e: KeyEvent) -> Outcome {
+        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = e.modifiers.contains(KeyModifiers::ALT);
+        self.note = None;
+        match e.code {
+            KeyCode::Esc => return Outcome::Cancel,
+            KeyCode::Char('c') if ctrl => return Outcome::Cancel,
+            KeyCode::Enter => {
+                return match self.submit() {
+                    Ok(op) => Outcome::Submit(op),
+                    Err(message) => {
+                        self.error = Some(message);
+                        Outcome::Continue
+                    }
+                };
+            }
+            KeyCode::Tab => {
+                if !self.complete_path() {
+                    self.move_focus(1);
+                }
+            }
+            KeyCode::Down => self.move_focus(1),
+            KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
+            _ => self.edit(e.code, ctrl, alt),
+        }
+        Outcome::Continue
+    }
+
+    fn move_focus(&mut self, step: isize) {
+        let n = self.fields.len() as isize;
+        let mut i = self.focus as isize;
+        for _ in 0..n {
+            i = (i + step).rem_euclid(n);
+            if self.fields[i as usize].focusable() {
+                self.focus = i as usize;
+                return;
+            }
+        }
+    }
+
+    fn edit(&mut self, code: KeyCode, ctrl: bool, alt: bool) {
+        let Some(field) = self.fields.get_mut(self.focus) else {
+            return;
+        };
+        let before = field.value.clone();
+        match (&field.kind, code) {
+            (Kind::Choice(opts) | Kind::Combo(opts), KeyCode::Left | KeyCode::Right) => {
+                field.value = cycle(opts, &field.value, code == KeyCode::Right);
+            }
+            (Kind::Choice(opts), KeyCode::Char('h' | 'l' | ' ')) => {
+                field.value = cycle(opts, &field.value, code != KeyCode::Char('h'));
+            }
+            (Kind::Text { .. } | Kind::Combo(_), KeyCode::Backspace) => {
+                field.value.pop();
+            }
+            (Kind::Text { .. } | Kind::Combo(_), KeyCode::Char('u')) if ctrl => field.value.clear(),
+            (Kind::Combo(_), KeyCode::Char(c)) if !ctrl && !alt => {
+                // Typing replaces a listed choice rather than appending to it.
+                if field.value == DEFAULT {
+                    field.value.clear();
+                }
+                field.value.push(c);
+            }
+            (Kind::Text { .. }, KeyCode::Char(c)) if !ctrl && !alt => field.value.push(c),
+            _ => return,
+        }
+        if field.value != before {
+            field.edited = true;
+            self.error = None;
+            self.update();
+        }
+    }
+
+    /// Completes the focused directory field. False if there was nothing to do.
+    fn complete_path(&mut self) -> bool {
+        let Some(field) = self.fields.get_mut(self.focus) else {
+            return false;
+        };
+        if !matches!(field.kind, Kind::Text { path: true, .. }) {
+            return false;
+        }
+        let (completed, matches) = complete_directory(&field.value);
+        if completed != field.value {
+            field.value = completed;
+            field.edited = true;
+            self.update();
+            return true;
+        }
+        if matches.len() > 1 {
+            let shown: Vec<&str> = matches.iter().take(6).map(String::as_str).collect();
+            let more = if matches.len() > 6 { ", …" } else { "" };
+            self.note = Some(format!("{}{more}", shown.join(", ")));
+            return true;
+        }
+        false
+    }
+
+    fn submit(&self) -> Result<Op, String> {
+        let required = |id: Id, what: &str| -> Result<String, String> {
+            let value = self.value(id).trim();
+            if value.is_empty() {
+                Err(format!("{what} is missing"))
+            } else {
+                Ok(value.to_string())
+            }
+        };
+        // A project's default agent: None for Claude, the default.
+        let agent = || self.setting(Id::Agent).filter(|a| a != CLAUDE);
+        let claude = self.value(Id::Agent) == CLAUDE;
+        let model = || {
+            if claude {
+                self.setting(Id::Model)
+            } else {
+                None
+            }
+        };
+        let effort = || {
+            if claude {
+                self.setting(Id::Effort)
+            } else {
+                None
+            }
+        };
+        Ok(match &self.purpose {
+            Purpose::NewProject => Op::AddProject {
+                name: required(Id::Name, "The name")?,
+                path: expand_tilde(&required(Id::Directory, "The directory")?),
+                agent: agent(),
+                model: model(),
+                effort: effort(),
+            },
+            Purpose::EditProject(id) => Op::EditProject {
+                id: *id,
+                name: required(Id::Name, "The name")?,
+                path: expand_tilde(&required(Id::Directory, "The directory")?),
+                agent: agent(),
+                model: model(),
+                effort: effort(),
+            },
+            Purpose::NewSession => Op::NewSession {
+                project: required(Id::Project, "The project")?,
+                agent: self.value(Id::Agent).to_string(),
+                name: self.setting(Id::Name),
+                model: model(),
+                effort: effort(),
+                prompt: self.setting(Id::Prompt),
+            },
+            Purpose::EditSession(id) => {
+                let claude = self.value(Id::Agent) == CLAUDE;
+                Op::EditSession {
+                    id: id.clone(),
+                    name: required(Id::Name, "The name")?,
+                    model: if claude {
+                        self.setting(Id::Model)
+                    } else {
+                        None
+                    },
+                    effort: if claude {
+                        self.setting(Id::Effort)
+                    } else {
+                        None
+                    },
+                }
+            }
+        })
+    }
+}
+
+/// The next (or previous) option after `value`; a typed value goes to the first.
+fn cycle(options: &[String], value: &str, forward: bool) -> String {
+    if options.is_empty() {
+        return value.to_string();
+    }
+    let n = options.len();
+    let next = match options.iter().position(|o| o == value) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None => 0,
+    };
+    options[next].clone()
+}
+
+pub fn expand_tilde(path: &str) -> String {
+    match (path.strip_prefix('~'), dirs::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.display())
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// A project name from a directory: its last part, with anything a name can't
+/// hold replaced by '-'.
+fn directory_name(directory: &str) -> String {
+    let base = Path::new(directory.trim_end_matches('/'))
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    base.unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Completes `input` as far as the directories under it allow; also returns the
+/// matching names. A single match gets a trailing '/'.
+fn complete_directory(input: &str) -> (String, Vec<String>) {
+    let expanded = expand_tilde(input);
+    let (dir, prefix) = match expanded.rfind('/') {
+        Some(i) => (&expanded[..=i], &expanded[i + 1..]),
+        None => ("./", expanded.as_str()),
+    };
+    let mut matches: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| {
+                    n.starts_with(prefix) && (prefix.starts_with('.') || !n.starts_with('.'))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    matches.sort();
+    let Some(first) = matches.first() else {
+        return (input.to_string(), matches);
+    };
+    let common = matches.iter().fold(first.clone(), |common, m| {
+        common
+            .chars()
+            .zip(m.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect()
+    });
+    let mut completed = format!(
+        "{}{common}",
+        if dir == "./" && !expanded.starts_with("./") {
+            ""
+        } else {
+            dir
+        }
+    );
+    if matches.len() == 1 {
+        completed.push('/');
+    }
+    // Keep the user's "~".
+    if input.starts_with('~')
+        && let Some(home) = dirs::home_dir()
+    {
+        let home = home.display().to_string();
+        if let Some(rest) = completed.strip_prefix(&home) {
+            completed = format!("~{rest}");
+        }
+    }
+    if completed.len() < input.len() {
+        completed = input.to_string();
+    }
+    (completed, matches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(form: &mut Form, text: &str) {
+        for c in text.chars() {
+            form.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn submit(form: &mut Form) -> Op {
+        match form.on_key(key(KeyCode::Enter)) {
+            Outcome::Submit(op) => op,
+            _ => panic!("not submitted: {:?}", form.error),
+        }
+    }
+
+    fn agents() -> Vec<String> {
+        vec!["claude".into(), "aider".into()]
+    }
+
+    fn project(name: &str, model: Option<&str>) -> Project {
+        Project {
+            id: 7,
+            name: name.into(),
+            origin: format!("/{name}").into(),
+            agent: None,
+            model: model.map(String::from),
+            effort: Some("high".into()),
+        }
+    }
+
+    #[test]
+    fn new_project_is_named_after_its_directory() {
+        let mut form = Form::new_project("/src/my app", &agents());
+        assert_eq!(form.value(Id::Name), "my-app");
+        // Tab past the directory (nothing to complete), then the name is the user's.
+        form.focus = 1;
+        form.on_key(key(KeyCode::Char('x')));
+        assert_eq!(form.value(Id::Name), "my-appx");
+        form.focus = 0;
+        type_text(&mut form, "2");
+        assert_eq!(form.value(Id::Name), "my-appx");
+    }
+
+    #[test]
+    fn choices_cycle_and_the_model_takes_any_name() {
+        let mut form = Form::new_project("/src/app", &agents());
+        form.focus = 3; // model
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Model), "opus");
+        form.on_key(key(KeyCode::Left));
+        assert_eq!(form.value(Id::Model), "default");
+        type_text(&mut form, "claude-opus-5-5");
+        assert_eq!(form.value(Id::Model), "claude-opus-5-5");
+        form.on_key(key(KeyCode::Down)); // effort
+        form.on_key(key(KeyCode::Char('l')));
+        form.on_key(key(KeyCode::Char('l')));
+        assert_eq!(form.value(Id::Effort), "medium");
+        let op = submit(&mut form);
+        assert_eq!(
+            op,
+            Op::AddProject {
+                name: "app".into(),
+                path: "/src/app".into(),
+                agent: None,
+                model: Some("claude-opus-5-5".into()),
+                effort: Some("medium".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn other_agents_hide_model_and_effort() {
+        let mut form = Form::new_project("/src/app", &agents());
+        form.focus = 2; // agent
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Agent), "aider");
+        assert!(form.field(Id::Model).unwrap().hidden && form.field(Id::Effort).unwrap().hidden);
+        // ↓ skips the hidden fields and the info line, back to the top.
+        form.on_key(key(KeyCode::Down));
+        assert_eq!(form.fields[form.focus].id, Id::Directory);
+        let Op::AddProject { agent, model, .. } = submit(&mut form) else {
+            panic!()
+        };
+        assert_eq!((agent.as_deref(), model), (Some("aider"), None));
+    }
+
+    #[test]
+    fn new_session_takes_the_projects_defaults() {
+        let projects = vec![project("alpha", Some("opus")), project("beta", None)];
+        let mut form = Form::new_session(&projects, Some(&projects[0]), &agents());
+        assert_eq!(form.fields[form.focus].id, Id::Name);
+        assert_eq!(
+            (form.value(Id::Model), form.value(Id::Effort)),
+            ("opus", "high")
+        );
+        // Choosing another project refills what wasn't changed here.
+        form.focus = 0;
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Project), "beta");
+        assert_eq!(form.value(Id::Model), "default");
+        form.focus = 5;
+        type_text(&mut form, "fix the tests");
+        assert_eq!(
+            submit(&mut form),
+            Op::NewSession {
+                project: "beta".into(),
+                agent: "claude".into(),
+                name: None,
+                model: None,
+                effort: Some("high".into()),
+                prompt: Some("fix the tests".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn missing_values_are_errors_not_submissions() {
+        let mut form = Form::new_project("", &agents());
+        assert!(matches!(
+            form.on_key(key(KeyCode::Enter)),
+            Outcome::Continue
+        ));
+        assert!(form.error.is_some());
+        assert!(matches!(form.on_key(key(KeyCode::Esc)), Outcome::Cancel));
+    }
+
+    #[test]
+    fn completes_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for d in ["alpha", "alpine", "beta", ".hidden"] {
+            std::fs::create_dir(dir.path().join(d)).unwrap();
+        }
+        std::fs::write(dir.path().join("alfile"), "").unwrap();
+        let base = dir.path().display().to_string();
+        assert_eq!(
+            complete_directory(&format!("{base}/b")).0,
+            format!("{base}/beta/")
+        );
+        let (completed, matches) = complete_directory(&format!("{base}/a"));
+        assert_eq!(completed, format!("{base}/alp"));
+        assert_eq!(matches, ["alpha", "alpine"]);
+        assert_eq!(
+            complete_directory(&format!("{base}/")).1,
+            ["alpha", "alpine", "beta"]
+        );
+        assert_eq!(
+            complete_directory(&format!("{base}/zzz")).0,
+            format!("{base}/zzz")
+        );
+    }
+
+    #[test]
+    fn edit_session_keeps_the_agent_fixed() {
+        let mut s = crate::model::tests::session("s1");
+        s.name = "api".into();
+        s.model = Some("opus".into());
+        let mut form = Form::edit_session(&s);
+        form.on_key(key(KeyCode::Backspace));
+        type_text(&mut form, "2");
+        assert_eq!(
+            submit(&mut form),
+            Op::EditSession {
+                id: "s1".into(),
+                name: "ap2".into(),
+                model: Some("opus".into()),
+                effort: None
+            }
+        );
+    }
+}

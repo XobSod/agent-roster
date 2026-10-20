@@ -3,6 +3,7 @@
 //! returns here.
 
 mod app;
+mod form;
 mod list;
 mod theme;
 mod ui;
@@ -22,7 +23,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::text::Text;
 
 use crate::agent;
-use crate::engine::Roster;
+use crate::engine::{Defaults, NewSession, Roster};
 use crate::keys::{Action, Keymap, Menu};
 use app::{App, Mode, Op};
 use list::{Entry, EntryKey, Group};
@@ -192,20 +193,86 @@ fn perform(
             project,
             agent,
             name,
+            model,
+            effort,
+            prompt,
         } => {
             busy(terminal, app, format!("Starting {agent} in {project}…"))?;
-            roster
-                .new_session(&project, name.as_deref(), &agent)
-                .map(|s| {
-                    app.select(EntryKey::Session(s.id.clone()));
-                    let key = app.keymap.label(Action::Confirm).unwrap_or("?");
-                    format!("Started {}; {key} attaches", s.label())
-                })
+            let prompted = prompt.is_some();
+            let request = NewSession {
+                project,
+                name,
+                agent: Some(agent),
+                model,
+                effort,
+                prompt,
+            };
+            roster.new_session(request).map(|s| {
+                app.select(EntryKey::Session(s.id.clone()));
+                let key = app.keymap.label(Action::Confirm).unwrap_or("?");
+                let prompt = if prompted {
+                    "; the prompt is typed in once it's ready"
+                } else {
+                    ""
+                };
+                format!("Started {}{prompt}; {key} attaches", s.label())
+            })
         }
-        Op::AddProject { name, path } => roster.add_project(&name, Path::new(&path)).map(|p| {
-            let chord = app.chord(Menu::Session, Action::NewSession);
-            format!("Added project {}; {chord} starts a session in it", p.name)
+        Op::EditSession {
+            id,
+            name,
+            model,
+            effort,
+        } => roster.update_session(&id, &name, model, effort).map(|s| {
+            if s.state == crate::model::State::Stopped {
+                format!("Saved {}", s.label())
+            } else {
+                let chord = app.chord(Menu::Session, Action::Restart);
+                format!(
+                    "Saved {}; a new model or effort applies after a restart ({chord})",
+                    s.label()
+                )
+            }
         }),
+        Op::AddProject {
+            name,
+            path,
+            agent,
+            model,
+            effort,
+        } => roster
+            .add_project(
+                &name,
+                Path::new(&path),
+                Defaults {
+                    agent,
+                    model,
+                    effort,
+                },
+            )
+            .map(|p| {
+                let chord = app.chord(Menu::Session, Action::NewSession);
+                format!("Added project {}; {chord} starts a session in it", p.name)
+            }),
+        Op::EditProject {
+            id,
+            name,
+            path,
+            agent,
+            model,
+            effort,
+        } => roster
+            .update_project(
+                id,
+                &name,
+                Path::new(&path),
+                Defaults {
+                    agent,
+                    model,
+                    effort,
+                },
+            )
+            .map(|p| format!("Saved project {}", p.name)),
         Op::RemoveProject(name) => roster
             .remove_project(&name)
             .map(|_| format!("Removed project {name}")),

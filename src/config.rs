@@ -60,6 +60,7 @@ pub struct Keys {
 pub struct SessionKeys {
     pub menu: KeyList,
     pub new: KeyList,
+    pub edit: KeyList,
     pub start: KeyList,
     pub stop: KeyList,
     pub restart: KeyList,
@@ -72,6 +73,7 @@ pub struct SessionKeys {
 pub struct ProjectKeys {
     pub menu: KeyList,
     pub new: KeyList,
+    pub edit: KeyList,
     pub remove: KeyList,
     pub filter: KeyList,
 }
@@ -111,6 +113,7 @@ impl Default for SessionKeys {
         SessionKeys {
             menu: keys(&["s"]),
             new: keys(&["n"]),
+            edit: keys(&["e"]),
             start: keys(&["s"]),
             stop: keys(&["x"]),
             restart: keys(&["r"]),
@@ -125,6 +128,7 @@ impl Default for ProjectKeys {
         ProjectKeys {
             menu: keys(&["p"]),
             new: keys(&["n"]),
+            edit: keys(&["e"]),
             remove: keys(&["d"]),
             filter: keys(&["f"]),
         }

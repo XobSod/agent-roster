@@ -226,8 +226,9 @@ fn heading(
     left
 }
 
-/// A session's two lines; `with_badge` unless its project heading is right above.
-fn card(s: &Session, with_badge: bool, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
+/// A session's lines: its project (badge and name) unless the project's heading
+/// is right above; the title and state; name, model and effort, age and agent.
+fn card(s: &Session, with_project: bool, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
     let working = s.state == State::Working;
     let title_style = match (s.state, s.unread) {
         (State::NeedsInput, _) | (State::Idle, true) => Style::new().add_modifier(Modifier::BOLD),
@@ -235,11 +236,14 @@ fn card(s: &Session, with_badge: bool, width: usize, now: i64) -> Vec<Vec<Span<'
         _ => Style::new(),
     };
     let meta_color = if working { FAINT } else { MUTED };
+    let mut lines = Vec::new();
+    if with_project {
+        lines.push(fit(width, project_name(&s.project), Vec::new()));
+    }
     let first = fit(
         width,
         vec![
-            project_mark(&s.project, with_badge),
-            Span::raw(" "),
+            Span::raw("   "),
             Span::styled(s.display_title().to_string(), title_style),
         ],
         [status(s, now), vec![Span::raw(" ")]].concat(),
@@ -259,7 +263,8 @@ fn card(s: &Session, with_badge: bool, width: usize, now: i64) -> Vec<Vec<Span<'
             Span::raw(" "),
         ],
     );
-    vec![first, second]
+    lines.extend([first, second]);
+    lines
 }
 
 fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
@@ -272,29 +277,34 @@ fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
     } else {
         [status(s, now), vec![Span::raw(" ")]].concat()
     };
-    let title = if app.mode == Mode::Deleted {
-        s.label()
-    } else {
-        s.display_title().to_string()
+    let title = Span::styled(
+        if app.mode == Mode::Deleted {
+            s.label()
+        } else {
+            s.display_title().to_string()
+        },
+        Style::new().fg(MUTED),
+    );
+    let left = match (app.mode, app.grouped) {
+        // The label says the project.
+        (Mode::Deleted, _) => vec![badge(&s.project), Span::raw(" "), title],
+        // The project's heading is right above.
+        (_, true) => vec![Span::raw("   "), title],
+        (_, false) => [project_name(&s.project), vec![Span::raw("  "), title]].concat(),
     };
-    fit(
-        width,
-        vec![
-            project_mark(&s.project, !app.grouped || app.mode == Mode::Deleted),
-            Span::raw(" "),
-            Span::styled(title, Style::new().fg(MUTED)),
-        ],
-        right,
-    )
+    fit(width, left, right)
 }
 
-/// The badge, or blank space of the same width.
-fn project_mark(project: &str, badge_shown: bool) -> Span<'static> {
-    if badge_shown {
-        badge(project)
-    } else {
-        Span::raw("  ")
-    }
+/// The project's badge and name, in its colour.
+fn project_name(project: &str) -> Vec<Span<'static>> {
+    vec![
+        badge(project),
+        Span::raw(" "),
+        Span::styled(
+            project.to_string(),
+            Style::new().fg(theme::project_color(project)),
+        ),
+    ]
 }
 
 /// The colored two-letter project badge.
@@ -1077,7 +1087,9 @@ mod tests {
         let screen = render(&app(), 120, 16);
         assert!(screen.contains("1 need you · 1 working"), "{screen}");
         assert!(screen.contains("Needs you (1)"), "{screen}");
-        assert!(screen.contains("RO Fix scrollback"), "{screen}");
+        // Without project headings, each card names its project first.
+        assert!(screen.contains("RO roster"), "{screen}");
+        assert!(screen.contains("   Fix scrollback"), "{screen}");
         assert!(screen.contains("Input"), "{screen}");
         assert!(screen.contains("api · opus high"), "{screen}");
         assert!(screen.contains("Working (1)"), "{screen}");
@@ -1086,6 +1098,32 @@ mod tests {
         assert!(screen.contains("needs input"), "{screen}");
         assert!(screen.contains("agent screen line"), "{screen}");
         assert!(screen.contains("Enter attach"), "{screen}");
+    }
+
+    #[test]
+    fn grouped_cards_leave_the_project_to_its_heading() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 16);
+        // The heading and the header; no project line in the cards.
+        assert_eq!(screen.matches("RO roster").count(), 2, "{screen}");
+        assert!(screen.contains("RO roster (2)"), "{screen}");
+        assert!(screen.contains("   Fix scrollback"), "{screen}");
+    }
+
+    #[test]
+    fn stopped_rows_name_their_project_too() {
+        let mut app = app();
+        let mut sessions = app.sessions.clone();
+        sessions[1].state = State::Stopped;
+        app.set_data(app.projects.clone(), sessions);
+        // Unfold the Stopped shelf.
+        let stopped = app.entries.len() - 1;
+        app.selected = stopped;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 16);
+        assert!(screen.contains("RO roster  db"), "{screen}");
     }
 
     #[test]

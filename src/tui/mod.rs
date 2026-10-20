@@ -186,7 +186,10 @@ fn perform(
     op: Op,
 ) -> Result<()> {
     let outcome: Result<String> = match op {
-        Op::Attach(id) => attach(terminal, roster, &id)?.map(|()| String::new()),
+        Op::Attach(id) => {
+            app.attaching(&id);
+            attach(terminal, roster, &id)?.map(|()| String::new())
+        }
         Op::Start(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Starting {label}…"))?;

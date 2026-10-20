@@ -22,7 +22,9 @@ your own tmux shows that pane's older output, not the agent's.
 
 Run `roster` for the TUI: sessions on the left, the selected agent's screen on the right.
 
-Navigate with `h j k l` (or arrows); `Enter` attaches (or folds a heading); `q` quits
+Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds
+a heading); coming back from an agent you gave a task, the cursor stays where it was,
+on the next one waiting. `q` quits
 and `?` shows every key. Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |

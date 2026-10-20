@@ -156,6 +156,8 @@ pub struct App {
     /// Live and deleted.
     pub sessions: Vec<Session>,
     select_next: Option<EntryKey>,
+    /// Where the cursor was when attaching: its row, the session, its group.
+    attached: Option<(usize, String, Group)>,
     /// Suggested origin for a new project.
     default_path: String,
     /// Agents that can be started, and whether each resumes its conversations.
@@ -192,6 +194,7 @@ impl App {
             projects: Vec::new(),
             sessions: Vec::new(),
             select_next: None,
+            attached: None,
             default_path,
             agents,
             model_names: Default::default(),
@@ -254,6 +257,35 @@ impl App {
         self.selected = found
             .unwrap_or(fallback)
             .min(self.entries.len().saturating_sub(1));
+        // Back from a session that moved to another group (given a task, or
+        // read): the cursor keeps its row, so it's on whatever took the
+        // session's place, e.g. the next one waiting. One that stayed is followed.
+        if let Some((row, id, group)) = self.attached.take()
+            && self.mode == Mode::Live
+            && !self.entries.is_empty()
+            && self
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .is_some_and(|s| list::group_of(s, self.grouped) != group)
+        {
+            let n = self.entries.len();
+            let row = row.min(n - 1);
+            // A heading there: the session below it (or above, at the end).
+            self.selected = (row..n)
+                .chain((0..row).rev())
+                .find(|&i| self.entries[i].session().is_some())
+                .unwrap_or(row);
+        }
+    }
+
+    /// Notes where the cursor is before attaching to session `id`, the selected
+    /// one (see `rebuild`).
+    pub fn attaching(&mut self, id: &str) {
+        if let Some(s) = self.selected_session().filter(|s| s.id == id) {
+            let group = list::group_of(s, self.grouped);
+            self.attached = Some((self.selected, s.id.clone(), group));
+        }
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -444,12 +476,9 @@ impl App {
             return op;
         }
         match action {
-            Action::Up => self.selected = self.selected.saturating_sub(1),
-            Action::Down => {
-                if self.selected + 1 < self.entries.len() {
-                    self.selected += 1;
-                }
-            }
+            // The list wraps around.
+            Action::Up => self.selected = wrap(self.selected, self.entries.len(), false),
+            Action::Down => self.selected = wrap(self.selected, self.entries.len(), true),
             Action::Collapse => self.fold(true),
             Action::Expand => self.fold(false),
             Action::Confirm => return self.confirm_selected(),
@@ -506,12 +535,8 @@ impl App {
     /// selected row).
     fn act_in_projects_view(&mut self, action: Action) -> Option<Option<Op>> {
         match action {
-            Action::Up => self.project_row = self.project_row.saturating_sub(1),
-            Action::Down => {
-                if self.project_row + 1 < self.projects.len() {
-                    self.project_row += 1;
-                }
-            }
+            Action::Up => self.project_row = wrap(self.project_row, self.projects.len(), false),
+            Action::Down => self.project_row = wrap(self.project_row, self.projects.len(), true),
             Action::Confirm | Action::FilterProject => match self.projects.get(self.project_row) {
                 Some(p) => {
                     self.filter = Some(p.id);
@@ -1018,6 +1043,16 @@ impl App {
     }
 }
 
+/// The next (or previous) of `len` rows after `row`, past the end back to the
+/// start and the other way round.
+fn wrap(row: usize, len: usize, down: bool) -> usize {
+    match (len, down) {
+        (0, _) => 0,
+        (_, true) => (row + 1) % len,
+        (_, false) => (row + len - 1) % len,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,6 +1173,59 @@ mod tests {
         // Enter on a heading folds or unfolds it too.
         app.on_key(key(KeyCode::Enter));
         assert!(!shown(&app).contains(&EntryKey::Session("s2".into())));
+    }
+
+    #[test]
+    fn the_list_wraps_around() {
+        let mut app = app();
+        assert_eq!(app.selected, 1);
+        keys(&mut app, "k");
+        assert_eq!(app.selected, 0);
+        keys(&mut app, "k");
+        assert_eq!(app.selected, app.entries.len() - 1);
+        keys(&mut app, "j");
+        assert_eq!(app.selected, 0);
+        // The projects view too.
+        keys(&mut app, "pl");
+        app.project_row = 0;
+        keys(&mut app, "k");
+        assert_eq!(app.project_row, app.projects.len() - 1);
+        keys(&mut app, "j");
+        assert_eq!(app.project_row, 0);
+    }
+
+    #[test]
+    fn back_from_a_session_given_a_task_the_cursor_keeps_its_row() {
+        let mut app = app();
+        // s2 needs input; answered, it goes to work, off its shelf.
+        select(&mut app, "s2");
+        let row = app.selected;
+        app.attaching("s2");
+        let mut sessions = app.sessions.clone();
+        let s2 = sessions.iter_mut().find(|s| s.id == "s2").unwrap();
+        (s2.state, s2.unread, s2.state_since) = (State::Working, false, Some(50));
+        app.set_data(app.projects.clone(), sessions);
+        // Its row now holds the next one waiting.
+        assert_eq!(app.selected_session().unwrap().id, "s1");
+        assert_eq!(app.selected, row);
+        // Later moves are followed as before.
+        let mut sessions = app.sessions.clone();
+        sessions.iter_mut().find(|s| s.id == "s1").unwrap().unread = true;
+        app.set_data(app.projects.clone(), sessions);
+        assert_eq!(app.selected_session().unwrap().id, "s1");
+    }
+
+    #[test]
+    fn back_from_a_session_that_stayed_the_cursor_stays_on_it() {
+        let mut app = app();
+        select(&mut app, "s1");
+        app.attaching("s1");
+        // Meanwhile another one needs input and lands above it.
+        let mut sessions = app.sessions.clone();
+        let s4 = sessions.iter_mut().find(|s| s.id == "s4").unwrap();
+        (s4.state, s4.unread, s4.state_since) = (State::NeedsInput, true, Some(60));
+        app.set_data(app.projects.clone(), sessions);
+        assert_eq!(app.selected_session().unwrap().id, "s1");
     }
 
     #[test]

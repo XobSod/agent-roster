@@ -44,7 +44,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Add, list or remove projects
+    /// Add, edit, list or remove projects
     #[command(subcommand)]
     Project(ProjectCmd),
     /// Start a new agent session in a project

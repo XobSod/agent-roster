@@ -16,6 +16,14 @@ pub const CLAUDE: &str = "claude";
 /// Model aliases Claude accepts (`claude --help`); any full model name works too.
 pub const CLAUDE_MODELS: &[&str] = &["opus", "sonnet", "haiku", "fable"];
 
+/// Current models by full id, offered next to the aliases for pinning a version.
+pub const CLAUDE_PINNED: &[&str] = &[
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
+];
+
 /// Claude's `--effort` levels.
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 

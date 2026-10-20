@@ -7,7 +7,7 @@ use std::path::Path;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::Op;
-use crate::agent::{CLAUDE, CLAUDE_MODELS, EFFORTS};
+use crate::agent::{CLAUDE, CLAUDE_MODELS, CLAUDE_PINNED, EFFORTS};
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
 
@@ -140,12 +140,7 @@ impl Form {
                 "",
             ),
             Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
-            Field::new(
-                Id::Model,
-                "Model",
-                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
-                DEFAULT,
-            ),
+            Field::new(Id::Model, "Model", Kind::Combo(model_options()), DEFAULT),
             Field::new(
                 Id::Effort,
                 "Effort",
@@ -191,7 +186,7 @@ impl Form {
             Field::new(
                 Id::Model,
                 "Model",
-                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                Kind::Combo(model_options()),
                 or_default(&p.model),
             ),
             Field::new(
@@ -232,12 +227,7 @@ impl Form {
                 "",
             ),
             Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
-            Field::new(
-                Id::Model,
-                "Model",
-                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
-                DEFAULT,
-            ),
+            Field::new(Id::Model, "Model", Kind::Combo(model_options()), DEFAULT),
             Field::new(
                 Id::Effort,
                 "Effort",
@@ -282,7 +272,7 @@ impl Form {
             Field::new(
                 Id::Model,
                 "Model",
-                Kind::Combo(options(DEFAULT, CLAUDE_MODELS)),
+                Kind::Combo(model_options()),
                 or_default(&s.model),
             ),
             Field::new(
@@ -317,9 +307,31 @@ impl Form {
     }
 
     /// Adds what each model alias turned out to be, to show next to the choices.
+    /// What each model choice is: an alias as it turned out (`names`, learned
+    /// from sessions) or "latest" until known, a pinned id by its name.
     pub fn with_model_names(mut self, names: &std::collections::HashMap<String, String>) -> Form {
+        let mut notes = std::collections::HashMap::new();
+        notes.insert(
+            DEFAULT.to_string(),
+            names
+                .get(DEFAULT)
+                .cloned()
+                .unwrap_or_else(|| "Claude's default".into()),
+        );
+        for alias in CLAUDE_MODELS {
+            notes.insert(
+                alias.to_string(),
+                names
+                    .get(*alias)
+                    .cloned()
+                    .unwrap_or_else(|| "latest".into()),
+            );
+        }
+        for id in CLAUDE_PINNED {
+            notes.insert(id.to_string(), crate::util::model_name(id));
+        }
         if let Some(field) = self.field_mut(Id::Model) {
-            field.notes = names.clone();
+            field.notes = notes;
         }
         self
     }
@@ -566,6 +578,12 @@ impl Form {
             }
         })
     }
+}
+
+/// The model choices: default, the aliases, then pinned versions.
+fn model_options() -> Vec<String> {
+    let rest: Vec<&str> = CLAUDE_MODELS.iter().chain(CLAUDE_PINNED).copied().collect();
+    options(DEFAULT, &rest)
 }
 
 /// The next (or previous) option after `value`; a typed value goes to the first.

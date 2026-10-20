@@ -38,6 +38,7 @@ impl Roster {
         fs::create_dir_all(&paths.state_dir)
             .with_context(|| format!("can't create {}", paths.state_dir.display()))?;
         let db = Db::open(&paths.db())?;
+        backfill_models(&db)?;
         let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
         // A changed detach key or user tmux.conf also applies to a running server.
         if tmux.write_config(&config.keys.detach, &paths.user_tmux_conf())? {
@@ -605,6 +606,43 @@ fn claude_title(pane_title: &str) -> Option<String> {
     (!title.is_empty() && title != "Claude Code").then(|| title.to_string())
 }
 
+/// Fills in the models of sessions that predate recording them: from recent hook
+/// events, else from the end of their Claude transcript. Then learns what each
+/// alias turned out to be.
+fn backfill_models(db: &Db) -> Result<()> {
+    db.backfill_models_from_events()?;
+    for mut s in db.sessions(true)? {
+        if s.running_model.is_some() || s.agent != agent::CLAUDE {
+            continue;
+        }
+        if let Some(model) = s
+            .transcript_path
+            .as_deref()
+            .and_then(|p| last_model_in(Path::new(p)))
+        {
+            s.running_model = Some(model);
+            db.save_session(&s)?;
+        }
+    }
+    db.learn_model_names()
+}
+
+/// The last `"model":"claude-…"` in (the last megabyte of) a transcript.
+fn last_model_in(transcript: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(transcript).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(1 << 20)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let key = "\"model\":\"claude-";
+    let start = text.rfind(key)? + key.len() - "claude-".len();
+    let end = start + text[start..].find('"')?;
+    Some(text[start..end].to_string())
+}
+
 /// Default agent, model and effort for a project's new sessions.
 #[derive(Clone, Debug, Default)]
 pub struct Defaults {
@@ -661,6 +699,15 @@ mod tests {
         assert_eq!(claude_title("✳ Claude Code"), None);
         assert_eq!(claude_title(""), None);
         assert_eq!(claude_title("computer"), None);
+    }
+
+    #[test]
+    fn finds_the_last_model_in_a_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        fs::write(&path, "{\"model\":\"claude-haiku-5-5\"}\n{\"model\":\"<synthetic>\"}\n{\"message\":{\"model\":\"claude-opus-5-5\"}}\n").unwrap();
+        assert_eq!(last_model_in(&path).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(last_model_in(&dir.path().join("missing")), None);
     }
 
     #[test]

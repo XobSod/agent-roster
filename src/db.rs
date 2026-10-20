@@ -405,6 +405,32 @@ impl Db {
         Ok(names)
     }
 
+    /// Fills in the reported model of sessions that have none yet, from the newest
+    /// hook event that named one (events are kept for a day). For sessions whose
+    /// start was processed before roster recorded models.
+    pub fn backfill_models_from_events(&self) -> Result<usize> {
+        let newest = "SELECT json_extract(e.payload, '$.model') FROM events e
+             WHERE e.session_id = sessions.id AND json_valid(e.payload)
+               AND json_extract(e.payload, '$.model') IS NOT NULL
+             ORDER BY e.id DESC LIMIT 1";
+        Ok(self.conn.execute(
+            &format!("UPDATE sessions SET running_model = ({newest}) WHERE running_model IS NULL AND ({newest}) IS NOT NULL"),
+            [],
+        )?)
+    }
+
+    /// Learns what each alias (or the default) turned out to be from sessions
+    /// that know both; the most recent session wins.
+    pub fn learn_model_names(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value)
+             SELECT 'model:' || coalesce(model, 'default'), running_model FROM sessions
+             WHERE running_model IS NOT NULL ORDER BY coalesce(state_since, created_at)",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -683,6 +709,33 @@ mod tests {
             db.session(&s.id).unwrap().running_model.as_deref(),
             Some("claude-opus-5-5")
         );
+    }
+
+    #[test]
+    fn backfills_models_from_events_processed_earlier() {
+        let (mut db, s) = db_with_session();
+        db.insert_event(
+            &s.id,
+            "session",
+            10,
+            Some(r#"{"model":"claude-opus-5-5[1m]"}"#),
+        )
+        .unwrap();
+        db.fold_events(100).unwrap();
+        // As if an older roster processed it: the model wasn't kept.
+        let mut lost = db.session(&s.id).unwrap();
+        lost.running_model = None;
+        db.save_session(&lost).unwrap();
+        db.conn
+            .execute("DELETE FROM meta WHERE key LIKE 'model:%'", [])
+            .unwrap();
+        assert_eq!(db.backfill_models_from_events().unwrap(), 1);
+        db.learn_model_names().unwrap();
+        assert_eq!(
+            db.session(&s.id).unwrap().running_model.as_deref(),
+            Some("claude-opus-5-5[1m]")
+        );
+        assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
     }
 
     #[test]

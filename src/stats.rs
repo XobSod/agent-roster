@@ -136,17 +136,14 @@ impl ClaudeTranscript {
 
     /// The totals so far; `model` (as Claude reports it) gives the context window.
     pub fn stats(&self, model: Option<&str>) -> AgentStats {
-        let window = model.map(|m| {
-            if m.ends_with("[1m]") {
-                1_000_000
-            } else {
-                200_000
-            }
-        });
+        // A window smaller than what's in use is the wrong one.
+        let window = self
+            .context
+            .and_then(|used| model.and_then(context_window).filter(|w| *w >= used));
         AgentStats {
             prompts: Some(self.prompts),
             context_used: self.context,
-            context_limit: self.context.and(window),
+            context_limit: window,
             output_tokens: (!self.outputs.is_empty()).then(|| self.outputs.values().sum()),
             cost_usd: self.cost.map(|c| c.0),
             lines_added: self.cost.map(|c| c.1),
@@ -159,6 +156,53 @@ impl ClaudeTranscript {
     pub fn recent_prompts(&self) -> Vec<String> {
         self.recent.iter().cloned().collect()
     }
+}
+
+/// Context windows of Claude's models, from the model catalog built into Claude
+/// Code 2.1.304 (it writes the window nowhere roster could read it).
+const CLAUDE_WINDOWS: &[(&str, u64)] = &[
+    ("claude-3-5-haiku", 200_000),
+    ("claude-3-5-sonnet", 200_000),
+    ("claude-3-7-sonnet", 200_000),
+    ("claude-haiku-4-5", 200_000),
+    ("claude-sonnet-4-0", 200_000),
+    ("claude-sonnet-4-5", 200_000),
+    ("claude-sonnet-4-6", 200_000),
+    ("claude-opus-4-0", 200_000),
+    ("claude-opus-4-1", 200_000),
+    ("claude-opus-4-5", 200_000),
+    ("claude-opus-4-6", 200_000),
+    ("claude-opus-4-7", 1_000_000),
+    ("claude-opus-4-8", 1_000_000),
+    ("claude-opus-5", 1_000_000),
+    ("claude-opus-5-5", 1_000_000),
+    ("claude-sonnet-5", 1_000_000),
+    ("claude-sonnet-5-5", 1_000_000),
+    ("claude-haiku-5-5", 1_000_000),
+    ("claude-fable-5", 1_000_000),
+    ("claude-fable-5-1", 1_000_000),
+    ("claude-mythos-5", 1_000_000),
+    ("claude-mythos-5-1", 1_000_000),
+];
+
+/// The context window of a model as Claude reports it: 1M with the `[1m]`
+/// marker, else the catalog's (a dated id like `claude-sonnet-4-5-20250929`
+/// counts as its model). None for a model the catalog doesn't know.
+pub fn context_window(model: &str) -> Option<u64> {
+    if model.ends_with("[1m]") {
+        return Some(1_000_000);
+    }
+    CLAUDE_WINDOWS
+        .iter()
+        .find(|(id, _)| {
+            model.strip_prefix(id).is_some_and(|rest| {
+                rest.is_empty()
+                    || rest.strip_prefix('-').is_some_and(|date| {
+                        date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+                    })
+            })
+        })
+        .map(|(_, window)| *window)
 }
 
 /// A session's statistics as short parts, for the header and `roster info`:
@@ -268,7 +312,7 @@ mod tests {
         let (a, b) = half.split_at(20);
         std::fs::write(&path, format!("{text}{more}{a}")).unwrap();
         t.update().unwrap();
-        let s = t.stats(Some("claude-haiku-5-5"));
+        let s = t.stats(Some("claude-sonnet-4-6"));
         assert_eq!(
             (s.prompts, s.output_tokens, s.context_limit),
             (Some(2), Some(800), Some(200_000))
@@ -285,6 +329,31 @@ mod tests {
             (Some(900), Some(6012), true)
         );
         assert_eq!(t.recent_prompts(), ["fix the tests", "now add a retry"]);
+    }
+
+    #[test]
+    fn context_windows_come_from_the_model() {
+        // Claude 5's models have 1M without the "[1m]" marker (found in real use:
+        // "claude-opus-5-5" was shown as 200k while Claude's /context said 1m).
+        assert_eq!(context_window("claude-opus-5-5"), Some(1_000_000));
+        assert_eq!(context_window("claude-opus-5"), Some(1_000_000));
+        assert_eq!(context_window("claude-opus-4-6"), Some(200_000));
+        assert_eq!(context_window("claude-opus-4-6[1m]"), Some(1_000_000));
+        assert_eq!(context_window("claude-sonnet-4-5-20250929"), Some(200_000));
+        assert_eq!(context_window("claude-opus-5-55"), None);
+        assert_eq!(context_window("claude-new-6"), None);
+        // Unknown, or smaller than what's in use: no limit rather than a wrong one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(&path, reply("m1", 10, 300_000)).unwrap();
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        assert_eq!(t.stats(Some("claude-new-6")).context_limit, None);
+        assert_eq!(t.stats(Some("claude-opus-4-6")).context_limit, None);
+        assert_eq!(
+            t.stats(Some("claude-opus-5-5")).context_limit,
+            Some(1_000_000)
+        );
     }
 
     #[test]

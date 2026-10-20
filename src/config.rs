@@ -10,8 +10,11 @@
 //! delete = ""
 //!
 //! [agents.claude]
-//! command = "claude"              # default: found on PATH
+//! command = "claude"              # default: the agent's name, found on PATH
 //! args = ["--model", "haiku"]     # added to every launch
+//!
+//! [agents.aider]                  # any other agent: state from its screen
+//! idle_after = 4                  # seconds without screen changes = idle
 //! ```
 
 use std::collections::BTreeMap;
@@ -97,6 +100,8 @@ impl<'de> Deserialize<'de> for KeyList {
 pub struct AgentConfig {
     pub command: Option<String>,
     pub args: Vec<String>,
+    /// Seconds without screen changes after which an agent without hooks is idle.
+    pub idle_after: Option<u64>,
 }
 
 impl Config {
@@ -120,6 +125,11 @@ impl Config {
             bail!("keys.detach must be a tmux key name such as \"C-q\", not {key:?}");
         }
         crate::keys::Keymap::new(&config.keys)?;
+        for (name, agent) in &config.agents {
+            if agent.idle_after == Some(0) {
+                bail!("agents.{name}.idle_after must be at least 1 (seconds)");
+            }
+        }
         Ok(config)
     }
 

@@ -64,6 +64,9 @@ pub struct Session {
     pub screen_changed_at: Option<i64>,
     pub created_at: i64,
     pub deleted_at: Option<i64>,
+    /// Screen activity up to this time has been seen by the user (or is the agent
+    /// starting up); only later activity can make a session unread.
+    pub baseline_at: Option<i64>,
 }
 
 /// A status change reported by an agent hook through `roster report <kind>`.
@@ -148,6 +151,47 @@ impl Session {
         }
         false
     }
+
+    /// Screen-only status for agents without hooks: a changing screen means
+    /// working, a screen still for `idle_after` ms means idle. A turn that ends
+    /// after activity past the baseline marks the session unread. The first
+    /// capture is only a baseline: there's nothing to compare it with.
+    pub fn observe_generic(&mut self, hash: &str, now: i64, idle_after: i64) {
+        if self.screen_hash.as_deref() != Some(hash) {
+            let first = self.screen_hash.is_none();
+            self.screen_hash = Some(hash.to_string());
+            self.screen_changed_at = Some(now);
+            if !first {
+                if self.baseline_at.is_none_or(|b| now > b) {
+                    self.last_event_at = Some(now);
+                }
+                self.state = State::Working;
+            }
+        } else if self.state == State::Working
+            && self
+                .screen_changed_at
+                .is_some_and(|t| now - t >= idle_after)
+        {
+            self.state = State::Idle;
+            if self
+                .last_event_at
+                .is_some_and(|t| self.baseline_at.is_none_or(|b| t > b))
+            {
+                self.unread = true;
+            }
+        }
+    }
+
+    /// The user has just seen the session (detached from it, or marked it read):
+    /// its current screen becomes the baseline.
+    pub fn mark_seen(&mut self, screen_hash: Option<String>, now: i64) {
+        self.unread = false;
+        self.baseline_at = Some(now);
+        if let Some(hash) = screen_hash {
+            self.screen_hash = Some(hash);
+            self.screen_changed_at = Some(now);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +216,7 @@ pub mod tests {
             screen_changed_at: None,
             created_at: 0,
             deleted_at: None,
+            baseline_at: None,
         }
     }
 
@@ -250,6 +295,55 @@ pub mod tests {
         s.observe_screen("h2", 8000);
         assert!(s.correct_stale_working(4500 + QUIET_MS));
         assert_eq!((s.state, s.unread), (State::Idle, false));
+    }
+
+    /// A generic session as `start` leaves it: working, startup output ignored
+    /// until `boot_end`.
+    fn generic(boot_end: i64) -> Session {
+        let mut s = session("g");
+        s.baseline_at = Some(boot_end);
+        s
+    }
+
+    #[test]
+    fn generic_startup_ends_idle_but_not_unread() {
+        let mut s = generic(5000);
+        s.observe_generic("banner", 0, 1000);
+        s.observe_generic("banner+prompt", 2000, 1000);
+        assert_eq!(s.state, State::Working);
+        s.observe_generic("banner+prompt", 3500, 1000);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+    }
+
+    #[test]
+    fn generic_turns_are_working_then_idle_and_unread() {
+        let mut s = generic(0);
+        s.observe_generic("prompt", 1000, 1000);
+        s.state = State::Idle;
+        s.observe_generic("answering", 2000, 1000);
+        assert_eq!(s.state, State::Working);
+        s.observe_generic("answer", 2500, 1000);
+        s.observe_generic("answer", 3000, 1000);
+        assert_eq!(s.state, State::Working);
+        s.observe_generic("answer", 3500, 1000);
+        assert_eq!((s.state, s.unread), (State::Idle, true));
+    }
+
+    #[test]
+    fn generic_activity_seen_while_attached_isnt_unread() {
+        let mut s = generic(0);
+        s.observe_generic("prompt", 1000, 1000);
+        s.state = State::Idle;
+        // The user typed while attached; on detach the refresh sees the change...
+        s.observe_generic("typed + answer", 9000, 1000);
+        // ...and the detach makes it the baseline.
+        s.mark_seen(Some("typed + answer".into()), 9000);
+        s.observe_generic("typed + answer", 10_500, 1000);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+        // Output after detaching is unseen.
+        s.observe_generic("more output", 11_000, 1000);
+        s.observe_generic("more output", 12_500, 1000);
+        assert_eq!((s.state, s.unread), (State::Idle, true));
     }
 
     #[test]

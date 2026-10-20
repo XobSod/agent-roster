@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::agent::Kind;
 use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
@@ -19,6 +20,8 @@ use crate::{agent, launch};
 const DEFAULT_SIZE: (u16, u16) = (160, 48);
 /// How long `stop` waits after SIGTERM before SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Screen changes this soon after a start are the agent starting up, not a turn.
+const BOOT_GRACE_MS: i64 = 5000;
 
 pub struct Roster {
     pub paths: Paths,
@@ -36,7 +39,10 @@ impl Roster {
             .with_context(|| format!("can't create {}", paths.state_dir.display()))?;
         let db = Db::open(&paths.db())?;
         let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
-        tmux.write_config(&config.keys.detach, &paths.user_tmux_conf())?;
+        // A changed detach key or user tmux.conf also applies to a running server.
+        if tmux.write_config(&config.keys.detach, &paths.user_tmux_conf())? {
+            tmux.reload_config()?;
+        }
         let exe = std::env::current_exe().context("can't find roster's own path")?;
         Ok(Roster {
             paths,
@@ -70,11 +76,21 @@ impl Roster {
                     if s.state == State::Stopped {
                         s.state = State::Idle;
                     }
-                    if s.needs_screen_check(now)
-                        && let Ok(screen) = self.tmux.capture(&s.tmux_name(), false, 0)
-                    {
-                        s.observe_screen(&util::fnv1a(screen.as_bytes()), now);
-                        s.correct_stale_working(now);
+                    match self.kind(&s) {
+                        Kind::Claude => {
+                            if s.needs_screen_check(now)
+                                && let Some(hash) = self.screen_hash(&s)
+                            {
+                                s.observe_screen(&hash, now);
+                                s.correct_stale_working(now);
+                            }
+                        }
+                        Kind::Generic => {
+                            if let Some(hash) = self.screen_hash(&s) {
+                                let idle_after = agent::idle_after_ms(&s.agent, &self.config);
+                                s.observe_generic(&hash, now, idle_after);
+                            }
+                        }
                     }
                 }
             }
@@ -86,18 +102,28 @@ impl Roster {
     }
 
     /// `refresh` for one-shot commands. The TUI polls anyway; a single command has
-    /// to watch for a moment when a session claims to be working without recent
-    /// hook events: until its screen changes (still working) or has stayed still
-    /// for QUIET_MS (idle).
+    /// to watch for a moment when only the screen can tell whether a session that
+    /// looks busy still is: until its screen changes (working) or has stayed still
+    /// long enough (idle).
     pub fn settle(&mut self) -> Result<()> {
         self.refresh()?;
         let start = now_ms();
+        let longest = self
+            .db
+            .sessions(false)?
+            .iter()
+            .map(|s| agent::idle_after_ms(&s.agent, &self.config))
+            .fold(QUIET_MS, i64::max);
         loop {
             let now = now_ms();
             let unresolved = self.db.sessions(false)?.iter().any(|s| {
-                s.needs_screen_check(now) && s.screen_changed_at.is_some_and(|t| t <= start)
+                let watched = match self.kind(s) {
+                    Kind::Claude => s.needs_screen_check(now),
+                    Kind::Generic => s.state == State::Working,
+                };
+                watched && s.screen_changed_at.is_some_and(|t| t <= start)
             });
-            if !unresolved || now - start > QUIET_MS + 1000 {
+            if !unresolved || now - start > longest + 1000 {
                 return Ok(());
             }
             sleep(Duration::from_millis(500));
@@ -179,7 +205,7 @@ impl Roster {
         name: Option<&str>,
         agent: &str,
     ) -> Result<Session> {
-        agent::check(agent)?;
+        agent::kind(agent, &self.config)?;
         let project = self.db.project(project)?.with_context(|| {
             format!("no project {project:?} (add it with `roster project add`)")
         })?;
@@ -223,6 +249,7 @@ impl Roster {
             screen_changed_at: None,
             created_at: now_ms(),
             deleted_at: None,
+            baseline_at: None,
         };
         self.db.insert_session(&s)?;
         self.start(&s.id)?;
@@ -246,7 +273,7 @@ impl Roster {
             .into_iter()
             .find(|p| p.id == s.project_id)
             .with_context(|| format!("{} has no project", s.label()))?;
-        let launch = agent::launch(&s, &self.config.agent(&s.agent), &self.exe)?;
+        let launch = agent::launch(&s, &self.config, &self.exe)?;
         let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
         let argv = launch::wrap(
             &shell,
@@ -266,13 +293,23 @@ impl Roster {
             self.tmux
                 .new_session(&name, &s.workdir, size, &env, &argv)?;
         }
-        s.conversation_id = Some(launch.conversation_id);
+        let now = now_ms();
+        if launch.conversation_id.is_some() {
+            s.conversation_id = launch.conversation_id;
+        }
         s.state = State::Working;
         s.unread = false;
         s.exit_status = None;
-        s.last_event_at = Some(now_ms());
         s.screen_hash = None;
         s.screen_changed_at = None;
+        match self.kind(&s) {
+            // Counts as a hook event, so the screen isn't consulted right away.
+            Kind::Claude => s.last_event_at = Some(now),
+            Kind::Generic => {
+                s.last_event_at = None;
+                s.baseline_at = Some(now + BOOT_GRACE_MS);
+            }
+        }
         self.db.save_session(&s)
     }
 
@@ -370,12 +407,35 @@ impl Roster {
         self.set_unread(id, false)
     }
 
+    /// Marks a session unread, or read: then everything on its screen so far
+    /// counts as seen.
     pub fn set_unread(&mut self, id: &str, unread: bool) -> Result<()> {
         // Events reported before this must not be applied after it.
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
-        s.unread = unread;
+        if unread {
+            s.unread = true;
+        } else {
+            let hash = self.screen_hash(&s);
+            s.mark_seen(hash, now_ms());
+        }
         self.db.save_session(&s)
+    }
+
+    /// Whether starting `s` again resumes its conversation; if not, the CLI and
+    /// TUI ask first.
+    pub fn can_resume(&self, s: &Session) -> bool {
+        self.kind(s).can_resume()
+    }
+
+    /// Agents removed from the config are still watched, by their screen.
+    fn kind(&self, s: &Session) -> Kind {
+        agent::kind(&s.agent, &self.config).unwrap_or(Kind::Generic)
+    }
+
+    fn screen_hash(&self, s: &Session) -> Option<String> {
+        let screen = self.tmux.capture(&s.tmux_name(), false, 0).ok()?;
+        Some(util::fnv1a(screen.as_bytes()))
     }
 
     /// The session's current screen, also after its agent exited.

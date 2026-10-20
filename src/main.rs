@@ -49,6 +49,7 @@ enum Cmd {
         project: String,
         #[arg(short, long)]
         name: Option<String>,
+        /// claude, or an agent from [agents] in config.toml
         #[arg(long, default_value = "claude")]
         agent: String,
         /// Attach to it right away
@@ -66,9 +67,19 @@ enum Cmd {
     /// Print a session's current screen
     Show { session: String },
     /// Attach to a session (starting it if stopped); the back key (Ctrl+Q) returns and marks it read
-    Attach { session: String },
+    Attach {
+        session: String,
+        /// Start a stopped agent that can't resume without asking
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Start a stopped session, resuming its conversation
-    Start { session: String },
+    Start {
+        session: String,
+        /// Don't ask before starting a new conversation for agents that can't resume
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Stop a session's agent, keeping the session
     Stop { session: String },
     /// Stop and start a session, resuming its conversation
@@ -176,12 +187,19 @@ fn run(cli: Cli) -> Result<()> {
             let s = r.resolve(&session, false)?;
             print!("{}", r.screen(&s.id, io::stdout().is_terminal())?);
         }
-        Cmd::Attach { session } => {
+        Cmd::Attach { session, yes } => {
+            r.refresh()?;
             let s = r.resolve(&session, false)?;
+            if s.state == State::Stopped && !confirm_new_conversation(&r, &s, yes)? {
+                return Ok(());
+            }
             r.attach(&s.id)?;
         }
-        Cmd::Start { session } => {
+        Cmd::Start { session, yes } => {
             let s = r.resolve(&session, false)?;
+            if !confirm_new_conversation(&r, &s, yes)? {
+                return Ok(());
+            }
             r.start(&s.id)?;
             println!("Started {}", s.label());
         }
@@ -196,9 +214,14 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Restart { session, yes } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
-            if s.state == State::Working
-                && !confirm(&format!("{} is working. Restart it?", s.label()), yes)?
-            {
+            let asked = if !r.can_resume(&s) {
+                confirm_new_conversation(&r, &s, yes)?
+            } else if s.state == State::Working {
+                confirm(&format!("{} is working. Restart it?", s.label()), yes)?
+            } else {
+                true
+            };
+            if !asked {
                 return Ok(());
             }
             r.restart(&s.id)?;
@@ -237,6 +260,19 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Report { .. } => {}
     }
     Ok(())
+}
+
+/// Asks before (re)starting an agent that can't resume its conversation.
+fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> {
+    if r.can_resume(s) {
+        return Ok(true);
+    }
+    let question = format!(
+        "{} ({}) can't resume its conversation. Start a new one?",
+        s.label(),
+        s.agent
+    );
+    confirm(&question, yes)
 }
 
 fn confirm(question: &str, yes: bool) -> Result<bool> {

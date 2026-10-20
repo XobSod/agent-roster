@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{Event, Project, Session, State};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -35,7 +35,8 @@ CREATE TABLE sessions (
     screen_hash       TEXT,
     screen_changed_at INTEGER,
     created_at        INTEGER NOT NULL,
-    deleted_at        INTEGER
+    deleted_at        INTEGER,
+    baseline_at       INTEGER
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -50,7 +51,7 @@ CREATE TABLE events (
 const SESSION_COLUMNS: &str =
     "s.id, s.project_id, p.name, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
-    s.screen_changed_at, s.created_at, s.deleted_at";
+    s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at";
 
 /// Applied events older than this are deleted.
 const EVENT_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
@@ -77,12 +78,13 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
-            0 => {
-                conn.execute_batch(SCHEMA)?;
-                conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
+            0 => conn.execute_batch(SCHEMA)?,
+            1 => conn.execute_batch("ALTER TABLE sessions ADD COLUMN baseline_at INTEGER")?,
             SCHEMA_VERSION => {}
             v => bail!("the database is from a newer roster (schema {v}); upgrade roster"),
+        }
+        if version != SCHEMA_VERSION {
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Db { conn })
     }
@@ -325,7 +327,8 @@ fn load_session(conn: &Connection, id: &str) -> Result<Option<Session>> {
 fn save_session(conn: &Connection, s: &Session) -> Result<()> {
     conn.execute(
         "UPDATE sessions SET name = ?2, conversation_id = ?3, transcript_path = ?4, state = ?5, unread = ?6,
-             exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11
+             exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
+             baseline_at = ?12
          WHERE id = ?1",
         params![
             s.id,
@@ -339,6 +342,7 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             s.screen_hash,
             s.screen_changed_at,
             s.deleted_at,
+            s.baseline_at,
         ],
     )
     .map_err(|e| match e {
@@ -376,6 +380,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         screen_changed_at: r.get(13)?,
         created_at: r.get(14)?,
         deleted_at: r.get(15)?,
+        baseline_at: r.get(16)?,
     })
 }
 
@@ -396,6 +401,33 @@ mod tests {
         s.project_id = project.id;
         db.insert_session(&s).unwrap();
         (db, s)
+    }
+
+    #[test]
+    fn migrates_a_version_1_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        let v1 = SCHEMA.replace(",\n    baseline_at       INTEGER", "");
+        conn.execute_batch(&v1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, origin, created_at) VALUES ('p', '/p', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, project_id, name, agent, workdir, state, created_at)
+             VALUES ('old', 1, 'n', 'claude', '/p', 'idle', 0)",
+            [],
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let s = db.session("old").unwrap();
+        assert_eq!((s.state, s.baseline_at), (State::Idle, None));
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

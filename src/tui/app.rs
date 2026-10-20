@@ -56,7 +56,8 @@ pub enum Dialog {
 
 #[derive(Clone, Debug)]
 pub enum Purpose {
-    NewSession { project: String },
+    ChooseAgent { project: String },
+    NewSession { project: String, agent: String },
     ProjectName,
     ProjectPath { name: String },
     RestoreName { id: String },
@@ -77,6 +78,7 @@ pub enum Op {
     SetUnread(String, bool),
     NewSession {
         project: String,
+        agent: String,
         name: Option<String>,
     },
     AddProject {
@@ -108,10 +110,12 @@ pub struct App {
     select_next: Option<RowKey>,
     /// Suggested origin for a new project.
     default_path: String,
+    /// Agents that can be started, and whether each resumes its conversations.
+    agents: Vec<(String, bool)>,
 }
 
 impl App {
-    pub fn new(keymap: Keymap, default_path: String) -> App {
+    pub fn new(keymap: Keymap, default_path: String, agents: Vec<(String, bool)>) -> App {
         App {
             keymap,
             view: View::Live,
@@ -125,7 +129,15 @@ impl App {
             sessions: Vec::new(),
             select_next: None,
             default_path,
+            agents,
         }
+    }
+
+    /// Whether starting a session of `agent` again resumes its conversation.
+    pub fn resumes(&self, agent: &str) -> bool {
+        self.agents
+            .iter()
+            .any(|(name, resumes)| name == agent && *resumes)
     }
 
     /// Replaces the data, keeping the selection on the same project or session.
@@ -294,21 +306,29 @@ impl App {
                     Some(
                         Row::Project(Project { name, .. })
                         | Row::Session(Session { project: name, .. }),
-                    ) => {
-                        let prompt =
-                            format!("New Claude session in {name}. Name (empty for automatic):");
-                        self.input(
-                            &prompt,
-                            String::new(),
-                            Purpose::NewSession { project: name },
-                        );
-                    }
+                    ) => self.ask_new_session(name),
                     None => self.fail("Add a project first"),
                 }
                 None
             }
             (_, None) => None,
+            // Starting an agent that can't resume loses its conversation: ask.
+            (Action::Attach, Some(Row::Session(s)))
+                if s.state == State::Stopped && !self.resumes(&s.agent) =>
+            {
+                self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
+                None
+            }
             (Action::Attach, Some(Row::Session(s))) => Some(Op::Attach(s.id)),
+            (Action::Start | Action::Restart, Some(Row::Session(s))) if !self.resumes(&s.agent) => {
+                let op = if action == Action::Start {
+                    Op::Start(s.id.clone())
+                } else {
+                    Op::Restart(s.id.clone())
+                };
+                self.confirm(self.new_conversation_question(&s), op);
+                None
+            }
             (Action::Start, Some(Row::Session(s))) => Some(Op::Start(s.id)),
             (Action::Stop, Some(Row::Session(s))) => Some(Op::Stop(s.id)),
             (Action::Restart, Some(Row::Session(s))) if s.state == State::Working => {
@@ -349,6 +369,45 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Asks for the agent if there's a choice, then for the name.
+    fn ask_new_session(&mut self, project: String) {
+        if self.agents.len() > 1 {
+            let names: Vec<&str> = self.agents.iter().map(|(n, _)| n.as_str()).collect();
+            let prompt = format!(
+                "Agent for the new session in {project} ({}):",
+                names.join(", ")
+            );
+            self.input(
+                &prompt,
+                names[0].to_string(),
+                Purpose::ChooseAgent { project },
+            );
+        } else {
+            let agent = self
+                .agents
+                .first()
+                .map_or("claude".to_string(), |(n, _)| n.clone());
+            self.ask_session_name(project, agent);
+        }
+    }
+
+    fn ask_session_name(&mut self, project: String, agent: String) {
+        let prompt = format!("New {agent} session in {project}. Name (empty for automatic):");
+        self.input(
+            &prompt,
+            String::new(),
+            Purpose::NewSession { project, agent },
+        );
+    }
+
+    fn new_conversation_question(&self, s: &Session) -> String {
+        format!(
+            "{} ({}) can't resume its conversation. Start a new one?",
+            s.label(),
+            s.agent
+        )
     }
 
     fn on_deleted_action(&mut self, action: Action) -> Option<Op> {
@@ -419,8 +478,19 @@ impl App {
     fn submit(&mut self, value: String, purpose: Purpose) -> Option<Op> {
         let value = value.trim().to_string();
         match purpose {
-            Purpose::NewSession { project } => Some(Op::NewSession {
+            Purpose::ChooseAgent { project } => {
+                if self.agents.iter().any(|(n, _)| *n == value) {
+                    self.ask_session_name(project, value);
+                } else {
+                    self.fail(format!(
+                        "No agent {value:?}; configure it under [agents] in config.toml"
+                    ));
+                }
+                None
+            }
+            Purpose::NewSession { project, agent } => Some(Op::NewSession {
                 project,
+                agent,
                 name: (!value.is_empty()).then_some(value),
             }),
             Purpose::ProjectName if value.is_empty() => None,
@@ -481,7 +551,7 @@ impl App {
             format!("sessions  {live} (deleted: {deleted})").into(),
             format!("env file  {} ({env_state})", env.display()).into(),
             "".into(),
-            format!("Press {new_key} to start a Claude session here.").into(),
+            format!("Press {new_key} to start a session here.").into(),
         ])
     }
 
@@ -531,7 +601,12 @@ mod tests {
     use crate::model::tests::session;
 
     fn app() -> App {
-        let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/work".into());
+        let agents = vec![("claude".to_string(), true)];
+        let mut app = App::new(
+            Keymap::new(&Keys::default()).unwrap(),
+            "/work".into(),
+            agents,
+        );
         let projects = vec![
             Project {
                 id: 1,
@@ -619,6 +694,7 @@ mod tests {
             app.on_key(key(KeyCode::Enter)),
             Some(Op::NewSession {
                 project: "alpha".into(),
+                agent: "claude".into(),
                 name: Some("api".into())
             })
         );
@@ -722,6 +798,63 @@ mod tests {
                 name: Some("again".into())
             })
         );
+    }
+
+    #[test]
+    fn with_several_agents_new_asks_which_first() {
+        let mut app = app();
+        app.agents.push(("aider".into(), false));
+        app.on_key(chr('n'));
+        // Prefilled with the first agent (claude); replace it.
+        for _ in 0.."claude".len() {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "aider");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Input { prompt, .. }) if prompt.starts_with("New aider session"))
+        );
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Some(Op::NewSession {
+                project: "alpha".into(),
+                agent: "aider".into(),
+                name: None
+            })
+        );
+        // An unknown agent is an error, not a session.
+        app.on_key(chr('n'));
+        type_text(&mut app, "x");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert!(app.dialog.is_none() && app.message().unwrap().error);
+    }
+
+    #[test]
+    fn agents_that_cant_resume_ask_before_a_new_conversation() {
+        let mut app = app();
+        app.agents.push(("aider".into(), false));
+        let mut generic = session("g1");
+        generic.agent = "aider".into();
+        generic.name = "g".into();
+        generic.state = State::Stopped;
+        let mut sessions = app.sessions.clone();
+        sessions.push(generic);
+        app.set_data(app.projects.clone(), sessions);
+        app.select(RowKey::Session("g1".into()));
+        app.rebuild_rows();
+        for (press, op) in [
+            ('s', Op::Start("g1".into())),
+            ('R', Op::Restart("g1".into())),
+        ] {
+            assert_eq!(app.on_key(chr(press)), None);
+            let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+                panic!("no confirmation")
+            };
+            assert!(question.contains("can't resume"), "{question}");
+            assert_eq!(app.on_key(chr('y')), Some(op));
+        }
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(app.on_key(chr('y')), Some(Op::Attach("g1".into())));
     }
 
     #[test]

@@ -237,7 +237,11 @@ mod tests {
 
     #[test]
     fn shows_projects_sessions_states_and_hints() {
-        let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/".into());
+        let mut app = App::new(
+            Keymap::new(&Keys::default()).unwrap(),
+            "/".into(),
+            Vec::new(),
+        );
         let mut s = session("s1");
         s.name = "api".into();
         s.unread = true;
@@ -260,7 +264,11 @@ mod tests {
 
     #[test]
     fn preview_shows_the_bottom_of_a_tall_screen() {
-        let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/".into());
+        let mut app = App::new(
+            Keymap::new(&Keys::default()).unwrap(),
+            "/".into(),
+            Vec::new(),
+        );
         app.preview = Text::from(
             (1..=40)
                 .map(|i| Line::from(format!("line {i}")))

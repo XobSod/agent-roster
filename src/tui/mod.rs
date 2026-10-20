@@ -19,6 +19,7 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::text::{Line, Text};
 
+use crate::agent;
 use crate::engine::Roster;
 use crate::keys::{Action, Keymap};
 use app::{App, Op, Row, RowKey, View};
@@ -31,7 +32,14 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_default();
-    let mut app = App::new(keymap, cwd);
+    let agents = agent::available(&roster.config)
+        .into_iter()
+        .map(|name| {
+            let resumes = agent::kind(&name, &roster.config).is_ok_and(|k| k.can_resume());
+            (name, resumes)
+        })
+        .collect();
+    let mut app = App::new(keymap, cwd, agents);
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
@@ -94,9 +102,12 @@ fn update_preview(roster: &Roster, app: &mut App) {
                 Ok(screen) => screen_text(&screen),
                 Err(_) => {
                     let key = app.keymap.label(Action::Start).unwrap_or("?");
-                    Text::from(format!(
-                        "Not running. Press {key} to start it; it resumes its conversation."
-                    ))
+                    let then = if app.resumes(&s.agent) {
+                        "it resumes its conversation"
+                    } else {
+                        "it starts a new conversation"
+                    };
+                    Text::from(format!("Not running. Press {key} to start it; {then}."))
                 }
             };
             (title, text)
@@ -165,10 +176,14 @@ fn perform(
             format!("Restored {} (stopped)", s.label())
         }),
         Op::SetUnread(id, unread) => roster.set_unread(&id, unread).map(|()| String::new()),
-        Op::NewSession { project, name } => {
-            busy(terminal, app, format!("Starting a session in {project}…"))?;
+        Op::NewSession {
+            project,
+            agent,
+            name,
+        } => {
+            busy(terminal, app, format!("Starting {agent} in {project}…"))?;
             roster
-                .new_session(&project, name.as_deref(), "claude")
+                .new_session(&project, name.as_deref(), &agent)
                 .map(|s| {
                     app.select(RowKey::Session(s.id.clone()));
                     let key = app.keymap.label(Action::Attach).unwrap_or("?");

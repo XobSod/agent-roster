@@ -1,39 +1,82 @@
-//! Agent adapters: the command line that starts an agent with roster's hooks
-//! injected for this run only. The MVP has Claude Code.
+//! Agent adapters: Claude Code, with hooks injected for this
+//! run only, and a generic adapter for any other CLI agent, whose state comes from
+//! its screen alone.
 
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use serde_json::json;
 
-use crate::config::AgentConfig;
-use crate::model::Session;
+use crate::config::Config;
+use crate::model::{QUIET_MS, Session};
 use crate::util::sh_quote;
 
-pub const AGENTS: &[&str] = &["claude"];
+pub const CLAUDE: &str = "claude";
 
-pub fn check(agent: &str) -> Result<()> {
-    if !AGENTS.contains(&agent) {
-        bail!("unknown agent {agent:?} (available: {})", AGENTS.join(", "));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Hooks report its state, and its conversations resume.
+    Claude,
+    /// Any other command: state from screen changes, no resume.
+    Generic,
+}
+
+impl Kind {
+    pub fn can_resume(self) -> bool {
+        self == Kind::Claude
     }
-    Ok(())
+}
+
+/// What kind of agent `name` is: Claude, or one configured under `[agents.<name>]`.
+pub fn kind(name: &str, config: &Config) -> Result<Kind> {
+    if name == CLAUDE {
+        Ok(Kind::Claude)
+    } else if config.agents.contains_key(name) {
+        Ok(Kind::Generic)
+    } else {
+        bail!(
+            "unknown agent {name:?} (available: {})",
+            available(config).join(", ")
+        )
+    }
+}
+
+/// Agents that can be started: Claude, then the others from the config.
+pub fn available(config: &Config) -> Vec<String> {
+    let mut names = vec![CLAUDE.to_string()];
+    names.extend(config.agents.keys().filter(|n| *n != CLAUDE).cloned());
+    names
+}
+
+/// How long an agent without hooks must show a still screen to count as idle.
+pub fn idle_after_ms(name: &str, config: &Config) -> i64 {
+    config
+        .agent(name)
+        .idle_after
+        .map_or(QUIET_MS, |secs| secs as i64 * 1000)
 }
 
 pub struct Launch {
     pub argv: Vec<String>,
     /// The conversation the agent will use, to store with the session.
-    pub conversation_id: String,
+    pub conversation_id: Option<String>,
 }
 
-/// How to start `s` now: a new conversation, or resuming its existing one.
-pub fn launch(s: &Session, config: &AgentConfig, roster_exe: &Path) -> Result<Launch> {
-    check(&s.agent)?;
-    Ok(claude(s, config, roster_exe))
+/// How to start `s` now: for Claude a new conversation or its existing one resumed.
+pub fn launch(s: &Session, config: &Config, roster_exe: &Path) -> Result<Launch> {
+    let agent = config.agent(&s.agent);
+    let mut argv = vec![agent.command.clone().unwrap_or_else(|| s.agent.clone())];
+    argv.extend(agent.args.iter().cloned());
+    Ok(match kind(&s.agent, config)? {
+        Kind::Claude => claude(s, argv, roster_exe),
+        Kind::Generic => Launch {
+            argv,
+            conversation_id: None,
+        },
+    })
 }
 
-fn claude(s: &Session, config: &AgentConfig, roster_exe: &Path) -> Launch {
-    let mut argv = vec![config.command.clone().unwrap_or_else(|| "claude".into())];
-    argv.extend(config.args.iter().cloned());
+fn claude(s: &Session, mut argv: Vec<String>, roster_exe: &Path) -> Launch {
     // --session-id fails once the conversation has messages, i.e. once its
     // transcript exists; from then on it has to be --resume.
     let has_transcript = s
@@ -56,7 +99,7 @@ fn claude(s: &Session, config: &AgentConfig, roster_exe: &Path) -> Launch {
     argv.extend(["--settings".into(), claude_settings(roster_exe)]);
     Launch {
         argv,
-        conversation_id,
+        conversation_id: Some(conversation_id),
     }
 }
 
@@ -77,6 +120,7 @@ fn claude_settings(roster_exe: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AgentConfig;
     use crate::model::tests::session;
 
     fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -85,14 +129,20 @@ mod tests {
             .map(|i| argv[i + 1].as_str())
     }
 
+    fn config_with(name: &str, agent: AgentConfig) -> Config {
+        let mut config = Config::default();
+        config.agents.insert(name.into(), agent);
+        config
+    }
+
     #[test]
     fn first_start_assigns_a_conversation_id() {
         let s = session("a");
-        let l = launch(&s, &AgentConfig::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
         assert_eq!(l.argv[0], "claude");
         assert_eq!(
             arg_after(&l.argv, "--session-id"),
-            Some(l.conversation_id.as_str())
+            l.conversation_id.as_deref()
         );
         assert!(!l.argv.contains(&"--resume".to_string()));
     }
@@ -106,22 +156,28 @@ mod tests {
         s.transcript_path = Some(transcript.to_string_lossy().into());
 
         // No transcript yet (e.g. right after /clear): reuse the ID as a new conversation.
-        let l = launch(&s, &AgentConfig::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
         assert_eq!(arg_after(&l.argv, "--session-id"), Some("c-1"));
 
         std::fs::write(&transcript, "{}").unwrap();
-        let l = launch(&s, &AgentConfig::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
         assert_eq!(arg_after(&l.argv, "--resume"), Some("c-1"));
-        assert_eq!(l.conversation_id, "c-1");
+        assert_eq!(l.conversation_id.as_deref(), Some("c-1"));
     }
 
     #[test]
     fn uses_configured_command_and_args() {
-        let config = AgentConfig {
+        let agent = AgentConfig {
             command: Some("/opt/claude".into()),
             args: vec!["--model".into(), "haiku".into()],
+            idle_after: None,
         };
-        let l = launch(&session("a"), &config, Path::new("/bin/roster")).unwrap();
+        let l = launch(
+            &session("a"),
+            &config_with("claude", agent),
+            Path::new("/bin/roster"),
+        )
+        .unwrap();
         assert_eq!(l.argv[..3], ["/opt/claude", "--model", "haiku"]);
     }
 
@@ -129,7 +185,7 @@ mod tests {
     fn hooks_report_through_the_quoted_roster_path() {
         let l = launch(
             &session("a"),
-            &AgentConfig::default(),
+            &Config::default(),
             Path::new("/my tools/roster"),
         )
         .unwrap();
@@ -144,9 +200,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_agents() {
+    fn configured_agents_are_generic() {
         let mut s = session("a");
         s.agent = "codex".into();
-        assert!(launch(&s, &AgentConfig::default(), Path::new("/bin/roster")).is_err());
+        assert!(launch(&s, &Config::default(), Path::new("/bin/roster")).is_err());
+
+        let agent = AgentConfig {
+            args: vec!["--quiet".into()],
+            idle_after: Some(2),
+            ..AgentConfig::default()
+        };
+        let config = config_with("codex", agent);
+        let l = launch(&s, &config, Path::new("/bin/roster")).unwrap();
+        // The command defaults to the agent's name; no hooks, no conversation.
+        assert_eq!(l.argv, ["codex", "--quiet"]);
+        assert_eq!(l.conversation_id, None);
+        assert_eq!(kind("codex", &config).unwrap(), Kind::Generic);
+        assert!(!Kind::Generic.can_resume() && Kind::Claude.can_resume());
+        assert_eq!(available(&config), ["claude", "codex"]);
+        assert_eq!(idle_after_ms("codex", &config), 2000);
+        assert_eq!(idle_after_ms("claude", &config), QUIET_MS);
     }
 }

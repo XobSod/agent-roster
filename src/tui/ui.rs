@@ -313,7 +313,7 @@ fn meta(s: &Session) -> String {
     if s.agent != crate::agent::CLAUDE {
         meta.push_str(&format!(" · {}", s.agent));
     }
-    match (&s.model, &s.effort) {
+    match (s.model_label(), s.effort_label()) {
         (Some(m), Some(e)) => meta.push_str(&format!(" · {m} {e}")),
         (Some(m), None) => meta.push_str(&format!(" · {m}")),
         (None, Some(e)) => meta.push_str(&format!(" · {e}")),
@@ -414,9 +414,9 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
                 Span::raw(" "),
                 Span::styled(s.agent.clone(), Style::new().fg(MUTED)),
             ];
-            for value in [&s.model, &s.effort].into_iter().flatten() {
+            for value in [s.model_label(), s.effort_label()].into_iter().flatten() {
                 right.push(sep());
-                right.push(Span::styled(value.clone(), Style::new().fg(MUTED)));
+                right.push(Span::styled(value, Style::new().fg(MUTED)));
             }
             right.push(sep());
             if s.deleted_at.is_some() {
@@ -761,6 +761,10 @@ fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
                 } else {
                     left.push(Span::styled(shown, style));
                 }
+                // What a model alias turned out to be, e.g. "opus · Opus 5.5".
+                if let Some(note) = field.notes.get(&field.value).filter(|n| **n != field.value) {
+                    left.push(Span::styled(format!("  {note}"), Style::new().fg(MUTED)));
+                }
             }
             Kind::Info => left.push(Span::styled(shown, Style::new().fg(MUTED))),
         }
@@ -993,6 +997,26 @@ mod tests {
         assert!(screen.contains("Enter kill orphans"), "{screen}");
         assert!(screen.contains("Esc back"), "{screen}");
         assert!(!screen.contains("Needs you"), "{screen}");
+    }
+
+    #[test]
+    fn cards_and_forms_show_the_model_claude_reports() {
+        let mut app = app();
+        let mut sessions = app.sessions.clone();
+        sessions[0].running_model = Some("claude-opus-5-5[1m]".into());
+        app.set_data(app.projects.clone(), sessions);
+        app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
+        let screen = render(&app, 120, 16);
+        assert!(screen.contains("api · Opus 5.5 (1M) high"), "{screen}");
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        // From the name: agent, then model.
+        for _ in 0..2 {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let screen = render(&app, 120, 24);
+        assert!(screen.contains("‹ opus ›  Opus 5.5"), "{screen}");
     }
 
     #[test]

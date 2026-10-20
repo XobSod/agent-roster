@@ -127,6 +127,8 @@ pub struct App {
     default_path: String,
     /// Agents that can be started, and whether each resumes its conversations.
     agents: Vec<(String, bool)>,
+    /// What each model alias last turned out to be, for the forms.
+    pub model_names: std::collections::HashMap<String, String>,
 }
 
 impl App {
@@ -154,6 +156,7 @@ impl App {
             select_next: None,
             default_path,
             agents,
+            model_names: Default::default(),
         }
     }
 
@@ -385,18 +388,28 @@ impl App {
             }
             Action::NewProject => {
                 let agents = self.agent_names();
-                self.dialog = Some(Dialog::Form(Form::new_project(&self.default_path, &agents)));
+                self.dialog = Some(Dialog::Form(
+                    Form::new_project(&self.default_path, &agents)
+                        .with_model_names(&self.model_names),
+                ));
             }
             Action::EditProject => match self.selected_project() {
                 Some(p) => {
-                    self.dialog = Some(Dialog::Form(Form::edit_project(&p, &self.agent_names())))
+                    self.dialog = Some(Dialog::Form(
+                        Form::edit_project(&p, &self.agent_names())
+                            .with_model_names(&self.model_names),
+                    ))
                 }
                 None => {
                     self.fail("Select a project (group by project) or one of its sessions first")
                 }
             },
             Action::EditSession => match self.selected_session().cloned() {
-                Some(s) => self.dialog = Some(Dialog::Form(Form::edit_session(&s))),
+                Some(s) => {
+                    self.dialog = Some(Dialog::Form(
+                        Form::edit_session(&s).with_model_names(&self.model_names),
+                    ))
+                }
                 None => self.fail("Select a session first"),
             },
             Action::FilterProject => self.toggle_filter(),
@@ -543,7 +556,8 @@ impl App {
             return;
         }
         let selected = self.selected_project();
-        let form = Form::new_session(&self.projects, selected.as_ref(), &self.agent_names());
+        let form = Form::new_session(&self.projects, selected.as_ref(), &self.agent_names())
+            .with_model_names(&self.model_names);
         self.dialog = Some(Dialog::Form(form));
     }
 

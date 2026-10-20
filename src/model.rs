@@ -80,6 +80,9 @@ pub struct Session {
     pub state_since: Option<i64>,
     /// A first prompt to type into the agent once it's ready.
     pub pending_prompt: Option<String>,
+    /// The model and effort the agent reports using (Claude's hook payloads).
+    pub running_model: Option<String>,
+    pub running_effort: Option<String>,
 }
 
 /// A status change reported by an agent hook through `roster report <kind>`.
@@ -122,6 +125,20 @@ impl Session {
         }
     }
 
+    /// The model to show: what the agent reports, as it names it, else what was
+    /// asked for.
+    pub fn model_label(&self) -> Option<String> {
+        self.running_model
+            .as_deref()
+            .map(crate::util::model_name)
+            .or_else(|| self.model.clone())
+    }
+
+    /// The effort to show: what was asked for, else what the agent reports.
+    pub fn effort_label(&self) -> Option<String> {
+        self.effort.clone().or_else(|| self.running_effort.clone())
+    }
+
     /// The title if the agent has set one, else the session's name.
     pub fn display_title(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.name)
@@ -148,6 +165,13 @@ impl Session {
             // A cleared conversation is a new task.
             if payload.get("source").and_then(|v| v.as_str()) == Some("clear") {
                 self.title = None;
+            }
+            // SessionStart names the model, Stop the effort.
+            if let Some(model) = payload.get("model").and_then(|v| v.as_str()) {
+                self.running_model = Some(model.to_string());
+            }
+            if let Some(effort) = payload.pointer("/effort/level").and_then(|v| v.as_str()) {
+                self.running_effort = Some(effort.to_string());
             }
         }
         match e.kind.as_str() {
@@ -263,6 +287,8 @@ pub mod tests {
             effort: None,
             state_since: None,
             pending_prompt: None,
+            running_model: None,
+            running_effort: None,
         }
     }
 
@@ -317,6 +343,21 @@ pub mod tests {
         ));
         assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
         assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn remembers_the_model_and_effort_claude_reports() {
+        let mut s = session("a");
+        s.model = Some("opus".into());
+        assert_eq!(s.model_label().as_deref(), Some("opus"));
+        s.apply(&event(
+            "session",
+            10,
+            Some(r#"{"model":"claude-opus-5-5[1m]"}"#),
+        ));
+        s.apply(&event("idle", 20, Some(r#"{"effort":{"level":"xhigh"}}"#)));
+        assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
+        assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
     }
 
     #[test]

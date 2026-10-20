@@ -318,6 +318,8 @@ impl Roster {
             effort,
             state_since: Some(now_ms()),
             pending_prompt: prompt,
+            running_model: None,
+            running_effort: None,
         };
         self.db.insert_session(&s)?;
         self.start(&s.id)?;

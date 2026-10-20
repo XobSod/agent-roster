@@ -101,6 +101,9 @@ fn reload(roster: &mut Roster, app: &mut App) {
         (Ok(projects), Ok(sessions)) => app.set_data(projects, sessions),
         (Err(e), _) | (_, Err(e)) => app.fail(format!("{e:#}")),
     }
+    if let Ok(names) = roster.db.model_names() {
+        app.model_names = names;
+    }
     update_preview(roster, app);
 }
 

@@ -45,6 +45,8 @@ pub struct Field {
     pub kind: Kind,
     pub value: String,
     pub hidden: bool,
+    /// Shown after a value: what a model alias turns out to be.
+    pub notes: std::collections::HashMap<String, String>,
     /// Changed by the user, so no longer filled in from other fields.
     edited: bool,
 }
@@ -57,6 +59,7 @@ impl Field {
             kind,
             value: value.into(),
             hidden: false,
+            notes: Default::default(),
             edited: false,
         }
     }
@@ -311,6 +314,14 @@ impl Form {
         };
         form.update();
         form
+    }
+
+    /// Adds what each model alias turned out to be, to show next to the choices.
+    pub fn with_model_names(mut self, names: &std::collections::HashMap<String, String>) -> Form {
+        if let Some(field) = self.field_mut(Id::Model) {
+            field.notes = names.clone();
+        }
+        self
     }
 
     /// Enter's verb, for the hint.

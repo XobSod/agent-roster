@@ -316,10 +316,14 @@ impl Tmux {
     }
 
     /// Types a line into the pane, as if the user typed it and pressed Enter.
+    /// Enter is sent as C-m: with extended keys on, Claude (2.1.304) takes tmux's
+    /// `Enter` key for a newline but C-m for a submit. The pause keeps a long
+    /// line from looking like a paste that the Enter belongs to.
     pub fn type_line(&self, name: &str, text: &str) -> Result<()> {
         let target = pane_target(name);
         self.run(["send-keys", "-t", target.as_str(), "-l", "--", text])?;
-        self.run(["send-keys", "-t", target.as_str(), "Enter"])
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        self.run(["send-keys", "-t", target.as_str(), "C-m"])
             .map(drop)
     }
 

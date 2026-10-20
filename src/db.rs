@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{Event, Project, Session, State};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -44,7 +44,9 @@ CREATE TABLE sessions (
     model             TEXT,
     effort            TEXT,
     state_since       INTEGER,
-    pending_prompt    TEXT
+    pending_prompt    TEXT,
+    running_model     TEXT,
+    running_effort    TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -60,7 +62,7 @@ const SESSION_COLUMNS: &str =
     "s.id, s.project_id, p.name, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
-    s.state_since, s.pending_prompt";
+    s.state_since, s.pending_prompt, s.running_model, s.running_effort";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
 
@@ -77,6 +79,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE sessions ADD COLUMN effort TEXT;
          ALTER TABLE sessions ADD COLUMN state_since INTEGER;
          ALTER TABLE sessions ADD COLUMN pending_prompt TEXT;",
+    ),
+    (
+        4,
+        "ALTER TABLE sessions ADD COLUMN running_model TEXT;
+         ALTER TABLE sessions ADD COLUMN running_effort TEXT;",
     ),
 ];
 
@@ -316,6 +323,19 @@ impl Db {
             }
             if let Some(s) = touched.get_mut(&e.session_id) {
                 s.apply(e);
+                // Learn what the model asked for (or the default) turned out to be.
+                let model = e
+                    .payload
+                    .as_deref()
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+                if let Some(model) = model.as_ref().and_then(|v| v.get("model")?.as_str()) {
+                    let asked = s.model.clone().unwrap_or_else(|| "default".into());
+                    tx.execute(
+                        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        [format!("model:{asked}"), model.to_string()],
+                    )?;
+                }
             }
         }
         for s in touched.values() {
@@ -365,6 +385,24 @@ impl Db {
             .conn
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
         Ok((waiting, kept))
+    }
+
+    /// What each model alias (and "default") last turned out to be, as Claude
+    /// names it: {"opus": "Opus 5.5", "default": "Opus 5.5 (1M)"}.
+    pub fn model_names(&self) -> Result<HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM meta WHERE key LIKE 'model:%'")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut names = HashMap::new();
+        for row in rows {
+            let (key, model) = row?;
+            names.insert(
+                key["model:".len()..].to_string(),
+                crate::util::model_name(&model),
+            );
+        }
+        Ok(names)
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -447,7 +485,7 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
         "UPDATE sessions SET name = ?2, conversation_id = ?3, transcript_path = ?4, state = ?5, unread = ?6,
              exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
              baseline_at = ?12, title = ?13, model = ?14, effort = ?15, state_since = ?16,
-             pending_prompt = ?17
+             pending_prompt = ?17, running_model = ?18, running_effort = ?19
          WHERE id = ?1",
         params![
             s.id,
@@ -467,6 +505,8 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             s.effort,
             s.state_since,
             s.pending_prompt,
+            s.running_model,
+            s.running_effort,
         ],
     )
     .map_err(|e| match e {
@@ -513,6 +553,8 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         effort: r.get(19)?,
         state_since: r.get(20)?,
         pending_prompt: r.get(21)?,
+        running_model: r.get(22)?,
+        running_effort: r.get(23)?,
     })
 }
 
@@ -625,6 +667,22 @@ mod tests {
         db.save_session(&read).unwrap();
         assert_eq!(db.fold_events(200).unwrap(), 0);
         assert!(!db.session(&s.id).unwrap().unread);
+    }
+
+    #[test]
+    fn learns_what_model_aliases_turn_out_to_be() {
+        let (mut db, s) = db_with_session();
+        let mut opus = db.session(&s.id).unwrap();
+        opus.model = Some("opus".into());
+        db.save_session(&opus).unwrap();
+        db.insert_event(&s.id, "session", 10, Some(r#"{"model":"claude-opus-5-5"}"#))
+            .unwrap();
+        db.fold_events(100).unwrap();
+        assert_eq!(db.model_names().unwrap()["opus"], "Opus 5.5");
+        assert_eq!(
+            db.session(&s.id).unwrap().running_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
     }
 
     #[test]

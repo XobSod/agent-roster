@@ -488,12 +488,18 @@ fn list_projects(r: &Roster) -> Result<()> {
         return Ok(());
     }
     let sessions = r.sessions(false)?;
+    let models = r.db.model_names()?;
     let rows: Vec<Vec<String>> = projects
         .iter()
         .map(|p| {
             let count = sessions.iter().filter(|s| s.project_id == p.id).count();
             let agent = p.agent.as_deref().unwrap_or(agent::CLAUDE);
-            let defaults = [Some(agent), p.model.as_deref(), p.effort.as_deref()]
+            // An alias with what it last turned out to be: "opus (Opus 5.5)".
+            let model = p.model.as_ref().map(|m| match models.get(m) {
+                Some(name) if name != m => format!("{m} ({name})"),
+                _ => m.clone(),
+            });
+            let defaults = [Some(agent.to_string()), model, p.effort.clone()]
                 .into_iter()
                 .flatten();
             vec![
@@ -538,6 +544,7 @@ fn list_sessions(
                     "conversation_id": s.conversation_id, "workdir": s.workdir, "deleted_at": s.deleted_at,
                     "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
                     "pending_prompt": s.pending_prompt.is_some(),
+                    "running_model": s.running_model, "running_effort": s.running_effort,
                 })
             })
             .collect();
@@ -569,13 +576,9 @@ fn list_sessions(
                 ),
             };
             let marker = if s.unread { "●" } else { " " };
-            let agent = [
-                Some(s.agent.as_str()),
-                s.model.as_deref(),
-                s.effort.as_deref(),
-            ]
-            .into_iter()
-            .flatten();
+            let agent = [Some(s.agent.clone()), s.model_label(), s.effort_label()]
+                .into_iter()
+                .flatten();
             vec![
                 s.project.clone(),
                 s.name.clone(),

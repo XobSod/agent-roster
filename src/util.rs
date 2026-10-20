@@ -41,6 +41,44 @@ pub fn fnv1a(data: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+/// A model id as Claude shows it: "claude-opus-5-5[1m]" → "Opus 5.5 (1M)",
+/// "claude-3-5-sonnet-20241022" → "Sonnet 3.5". Anything else stays as it is.
+pub fn model_name(id: &str) -> String {
+    let (base, long) = match id.strip_suffix("[1m]") {
+        Some(base) => (base, true),
+        None => (id, false),
+    };
+    let Some(rest) = base.strip_prefix("claude-") else {
+        return id.to_string();
+    };
+    let mut family = Vec::new();
+    let mut version = Vec::new();
+    for part in rest.split('-') {
+        if part.chars().all(|c| c.is_ascii_digit()) {
+            // Version numbers, not dates.
+            if part.len() <= 2 {
+                version.push(part);
+            }
+        } else {
+            let mut chars = part.chars();
+            family.push(chars.next().map_or(String::new(), |c| {
+                c.to_uppercase().collect::<String>() + chars.as_str()
+            }));
+        }
+    }
+    if family.is_empty() {
+        return id.to_string();
+    }
+    let mut name = family.join(" ");
+    if !version.is_empty() {
+        name = format!("{name} {}", version.join("."));
+    }
+    if long {
+        name.push_str(" (1M)");
+    }
+    name
+}
+
 /// Local wall-clock time of `ms` as HH:MM:SS.
 pub fn local_time(ms: i64) -> String {
     let secs = (ms / 1000) as libc::time_t;
@@ -91,6 +129,16 @@ mod tests {
         assert_eq!(ago(50 * 3_600_000), "2d");
         assert_eq!(clock(12_000), "12s");
         assert_eq!(clock(62 * 60_000), "1h 2m");
+    }
+
+    #[test]
+    fn model_names() {
+        assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_name("claude-opus-5-5[1m]"), "Opus 5.5 (1M)");
+        assert_eq!(model_name("claude-haiku-5-5"), "Haiku 5.5");
+        assert_eq!(model_name("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
+        assert_eq!(model_name("opus"), "opus");
+        assert_eq!(model_name("claude-5"), "claude-5");
     }
 
     #[test]

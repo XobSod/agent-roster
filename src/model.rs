@@ -48,6 +48,40 @@ pub struct Project {
     pub effort: Option<String>,
 }
 
+impl Project {
+    /// Its defaults for new sessions, e.g. "claude · opus (Opus 5.5) · high": an
+    /// alias with what it last turned out to be (`models`).
+    pub fn defaults_label(&self, models: &std::collections::HashMap<String, String>) -> String {
+        let agent = self.agent.as_deref().unwrap_or(crate::agent::CLAUDE);
+        let model = self.model.as_ref().map(|m| match models.get(m) {
+            Some(name) if name != m => format!("{m} ({name})"),
+            _ => m.clone(),
+        });
+        [Some(agent.to_string()), model, self.effort.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// How many of `sessions` are its: "2 live · 1 archived", "1 live", "none".
+    pub fn sessions_label(&self, sessions: &[Session]) -> String {
+        let mine = sessions.iter().filter(|s| s.project_id == self.id);
+        let (archived, live): (Vec<&Session>, Vec<&Session>) =
+            mine.partition(|s| s.deleted_at.is_some());
+        let parts: Vec<String> = [(live.len(), "live"), (archived.len(), "archived")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect();
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(" · ")
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
     pub id: String,

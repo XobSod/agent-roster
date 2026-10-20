@@ -64,14 +64,7 @@ impl Report {
     }
 }
 
-/// `~` instead of the home directory, for shorter paths.
-fn short(path: &std::path::Path) -> String {
-    let path = path.display().to_string();
-    match dirs::home_dir().map(|h| h.display().to_string()) {
-        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
-        _ => path,
-    }
-}
+use util::short_path as short;
 
 impl Roster {
     pub fn diagnose(&mut self) -> Result<Diagnosis> {

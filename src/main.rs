@@ -707,30 +707,20 @@ fn list_projects(r: &Roster) -> Result<()> {
         println!("No projects. Add one with `roster project add <name> <path>`.");
         return Ok(());
     }
-    let sessions = r.sessions(false)?;
+    let sessions = r.sessions(true)?;
     let models = r.db.model_names()?;
     let rows: Vec<Vec<String>> = projects
         .iter()
         .map(|p| {
-            let count = sessions.iter().filter(|s| s.project_id == p.id).count();
-            let agent = p.agent.as_deref().unwrap_or(agent::CLAUDE);
-            // An alias with what it last turned out to be: "opus (Opus 5.5)".
-            let model = p.model.as_ref().map(|m| match models.get(m) {
-                Some(name) if name != m => format!("{m} ({name})"),
-                _ => m.clone(),
-            });
-            let defaults = [Some(agent.to_string()), model, p.effort.clone()]
-                .into_iter()
-                .flatten();
             vec![
                 p.name.clone(),
                 p.origin.display().to_string(),
-                count.to_string(),
-                defaults.collect::<Vec<_>>().join(" · "),
+                p.sessions_label(&sessions),
+                p.defaults_label(&models),
             ]
         })
         .collect();
-    print_table(&["PROJECT", "ORIGIN", "SESSIONS", "DEFAULTS"], &rows);
+    print_table(&["PROJECT", "DIRECTORY", "SESSIONS", "DEFAULTS"], &rows);
     Ok(())
 }
 

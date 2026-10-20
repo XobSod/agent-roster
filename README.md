@@ -28,8 +28,8 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 | Menu | Keys |
 |---|---|
 | `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
-| `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
-| `v` view | `p` group by project · `t` tmux server and database |
+| `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` all projects |
+| `v` view | `g` group by project · `p` all projects · `t` tmux server and database |
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom

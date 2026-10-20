@@ -20,6 +20,8 @@ const MESSAGE_TTL: Duration = Duration::from_secs(6);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Live,
+    /// Every project, to add, edit, remove, or pick one.
+    Projects,
     /// The tmux server and database report.
     Server,
 }
@@ -141,6 +143,10 @@ pub struct App {
     pub orphans: usize,
     pub problems: usize,
     pub report_scroll: usize,
+    /// The selected row of the projects view.
+    pub project_row: usize,
+    /// A project to select there once it shows up (after adding or renaming it).
+    select_project: Option<String>,
     message: Option<Message>,
     pub projects: Vec<Project>,
     /// Live and deleted.
@@ -175,6 +181,8 @@ impl App {
             orphans: 0,
             problems: 0,
             report_scroll: 0,
+            project_row: 0,
+            select_project: None,
             message: None,
             projects: Vec::new(),
             sessions: Vec::new(),
@@ -196,6 +204,12 @@ impl App {
     pub fn set_data(&mut self, projects: Vec<Project>, sessions: Vec<Session>) {
         self.projects = projects;
         self.sessions = sessions;
+        if let Some(name) = self.select_project.take()
+            && let Some(row) = self.projects.iter().position(|p| p.name == name)
+        {
+            self.project_row = row;
+        }
+        self.project_row = self.project_row.min(self.projects.len().saturating_sub(1));
         if self
             .filter
             .is_some_and(|f| !self.projects.iter().any(|p| p.id == f))
@@ -266,9 +280,20 @@ impl App {
         self.select_next = Some(key);
     }
 
+    /// Selects project `name` in the projects view once it shows up.
+    pub fn select_project(&mut self, name: &str) {
+        self.select_project = Some(name.to_string());
+    }
+
     pub fn set_mode(&mut self, mode: Mode) {
         if self.mode != mode {
             let keep = self.selected_key();
+            // The projects view starts on the selection's project.
+            if mode == Mode::Projects
+                && let Some(p) = self.selected_project()
+            {
+                self.project_row = self.projects.iter().position(|q| q.id == p.id).unwrap_or(0);
+            }
             self.mode = mode;
             self.report_scroll = 0;
             if self.select_next.is_none() {
@@ -320,6 +345,12 @@ impl App {
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
                 actions
             }
+            Mode::Projects => vec![
+                (Action::Confirm, "show its sessions"),
+                (Action::Open(Menu::Project), "project"),
+                (Action::Open(Menu::Session), "session"),
+                (Action::Open(Menu::View), "view"),
+            ],
             Mode::Server if self.orphans > 0 => {
                 vec![(Action::Confirm, "kill orphans"), (Action::Down, "scroll")]
             }
@@ -364,6 +395,11 @@ impl App {
         if self.mode == Mode::Server {
             return self.act_in_server_view(action);
         }
+        if self.mode == Mode::Projects
+            && let Some(op) = self.act_in_projects_view(action)
+        {
+            return op;
+        }
         match action {
             Action::Up => self.selected = self.selected.saturating_sub(1),
             Action::Down => {
@@ -383,6 +419,7 @@ impl App {
                 self.rebuild();
             }
             Action::ShowServer => self.set_mode(Mode::Server),
+            Action::ShowProjects => self.set_mode(Mode::Projects),
             Action::NewProject => {
                 let agents = self.agent_names();
                 self.dialog = Some(Dialog::Form(
@@ -419,6 +456,45 @@ impl App {
         None
     }
 
+    /// In the projects view: move, pick a project to see its sessions, or leave.
+    /// None for what works as anywhere else (the project menu acts on the
+    /// selected row).
+    fn act_in_projects_view(&mut self, action: Action) -> Option<Option<Op>> {
+        match action {
+            Action::Up => self.project_row = self.project_row.saturating_sub(1),
+            Action::Down => {
+                if self.project_row + 1 < self.projects.len() {
+                    self.project_row += 1;
+                }
+            }
+            Action::Confirm | Action::FilterProject => match self.projects.get(self.project_row) {
+                Some(p) => {
+                    self.filter = Some(p.id);
+                    self.set_mode(Mode::Live);
+                    self.rebuild();
+                }
+                None => {
+                    let key = self.chord(Menu::Project, Action::NewProject);
+                    self.fail(format!("No projects yet; {key} adds one"));
+                }
+            },
+            Action::ShowProjects => self.set_mode(Mode::Live),
+            Action::Collapse | Action::Expand => {}
+            Action::NewProject
+            | Action::EditProject
+            | Action::RemoveProject
+            | Action::NewSession
+            | Action::Adopt
+            | Action::ToggleGroup
+            | Action::ShowServer
+            | Action::Open(_)
+            | Action::Help
+            | Action::Quit => return None,
+            _ => self.fail("This is the projects view: Esc goes back to the sessions"),
+        }
+        Some(None)
+    }
+
     /// In the server view: scroll, kill orphans, or leave.
     fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
         match action {
@@ -439,6 +515,7 @@ impl App {
             Action::Help => self.help = true,
             Action::Open(menu) => self.menu = Some(menu),
             Action::ShowServer => self.set_mode(Mode::Live),
+            Action::ShowProjects => self.set_mode(Mode::Projects),
             Action::ToggleGroup => {
                 self.grouped = !self.grouped;
                 self.set_mode(Mode::Live);
@@ -565,6 +642,9 @@ impl App {
 
     /// The project the selection belongs to; with only one project, that one.
     fn selected_project(&self) -> Option<Project> {
+        if self.mode == Mode::Projects {
+            return self.projects.get(self.project_row).cloned();
+        }
         let id = match self.selected_entry() {
             Some(Entry::Heading {
                 group: Group::Project(id),
@@ -679,7 +759,7 @@ impl App {
     /// "s n"-style text for a menu key, for hints in messages.
     pub fn chord(&self, menu: Menu, action: Action) -> String {
         let open = self.keymap.label(Action::Open(menu)).unwrap_or("?");
-        let key = self.keymap.label(action).unwrap_or("?");
+        let key = self.keymap.menu_label(menu, action).unwrap_or("?");
         format!("{open} {key}")
     }
 
@@ -788,16 +868,6 @@ impl App {
 
     /// Preview for a project heading.
     pub fn project_info(&self, p: &Project) -> Text<'static> {
-        let live = self
-            .sessions
-            .iter()
-            .filter(|s| s.project_id == p.id && s.deleted_at.is_none())
-            .count();
-        let archived = self
-            .sessions
-            .iter()
-            .filter(|s| s.project_id == p.id && s.deleted_at.is_some())
-            .count();
         let env = p.origin.join(PROJECT_ENV);
         let env_state = if env.exists() {
             "sourced before every start"
@@ -806,7 +876,7 @@ impl App {
         };
         Text::from(vec![
             format!("origin    {}", p.origin.display()).into(),
-            format!("sessions  {live} (archived: {archived})").into(),
+            format!("sessions  {}", p.sessions_label(&self.sessions)).into(),
             format!("env file  {} ({env_state})", env.display()).into(),
             "".into(),
             format!(
@@ -864,7 +934,7 @@ impl App {
     /// Preview when there's nothing to select.
     pub fn empty_info(&self) -> Text<'static> {
         match self.mode {
-            Mode::Live if self.projects.is_empty() => Text::from(format!(
+            Mode::Live | Mode::Projects if self.projects.is_empty() => Text::from(format!(
                 "No projects yet. Press {} to add one: a name and its directory.",
                 self.chord(Menu::Project, Action::NewProject)
             )),
@@ -872,7 +942,7 @@ impl App {
                 "No sessions yet. Press {} to start one.",
                 self.chord(Menu::Session, Action::NewSession)
             )),
-            Mode::Server => Text::default(),
+            Mode::Projects | Mode::Server => Text::default(),
         }
     }
 }
@@ -1087,7 +1157,7 @@ mod tests {
     fn archived_sessions_restore_or_go_for_good() {
         let mut app = app();
         // Grouped by project, the archived ones still come last, on their shelf.
-        keys(&mut app, "vp");
+        keys(&mut app, "vg");
         assert!(app.grouped);
         assert_eq!(shown(&app)[0], EntryKey::Group(Group::Project(1)));
         let archived = EntryKey::Group(Group::Shelf(Shelf::Archived));
@@ -1112,6 +1182,46 @@ mod tests {
         };
         assert!(question.contains("for good"), "{question}");
         assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s3".into())));
+    }
+
+    #[test]
+    fn the_projects_view_lists_and_manages_projects() {
+        let mut app = app();
+        select(&mut app, "s4");
+        // p l opens it on the selection's project.
+        keys(&mut app, "pl");
+        assert_eq!((app.mode, app.project_row), (Mode::Projects, 1));
+        assert_eq!(app.hints()[0], ("Enter".to_string(), "show its sessions"));
+        keys(&mut app, "k");
+        assert_eq!(app.project_row, 0);
+        // The project menu acts on the row.
+        keys(&mut app, "pe");
+        assert!(matches!(&app.dialog, Some(Dialog::Form(f)) if f.title == "Edit project alpha"));
+        app.on_key(key(KeyCode::Esc));
+        keys(&mut app, "pd");
+        assert!(app.dialog.is_none() && app.message().unwrap().error);
+        // Session actions don't work here.
+        keys(&mut app, "sx");
+        assert!(app.message().unwrap().error);
+        assert_eq!(app.mode, Mode::Projects);
+        // Enter goes back to the sessions, only that project's.
+        keys(&mut app, "j");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert_eq!((app.mode, app.filter), (Mode::Live, Some(2)));
+        // v p opens it too, and closes it again.
+        keys(&mut app, "vp");
+        assert_eq!(app.mode, Mode::Projects);
+        keys(&mut app, "vp");
+        assert_eq!(app.mode, Mode::Live);
+        // A new (or renamed) project is selected once it shows up.
+        keys(&mut app, "pl");
+        app.select_project("gamma");
+        let mut projects = app.projects.clone();
+        projects.push(project(3, "gamma"));
+        app.set_data(projects, app.sessions.clone());
+        assert_eq!(app.project_row, 2);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Live);
     }
 
     #[test]

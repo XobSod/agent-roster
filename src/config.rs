@@ -81,6 +81,8 @@ pub struct ProjectKeys {
     pub edit: KeyList,
     pub remove: KeyList,
     pub filter: KeyList,
+    /// The projects view.
+    pub list: KeyList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +90,8 @@ pub struct ProjectKeys {
 pub struct ViewKeys {
     pub menu: KeyList,
     pub group: KeyList,
+    /// The projects view (also in the project menu).
+    pub projects: KeyList,
     pub server: KeyList,
 }
 
@@ -139,6 +143,7 @@ impl Default for ProjectKeys {
             edit: keys(&["e"]),
             remove: keys(&["d"]),
             filter: keys(&["f"]),
+            list: keys(&["l"]),
         }
     }
 }
@@ -147,7 +152,8 @@ impl Default for ViewKeys {
     fn default() -> Self {
         ViewKeys {
             menu: keys(&["v"]),
-            group: keys(&["p"]),
+            group: keys(&["g"]),
+            projects: keys(&["p"]),
             server: keys(&["t"]),
         }
     }

@@ -81,6 +81,15 @@ pub fn model_name(id: &str) -> String {
 
 /// A project name from a directory: its last part, with anything a name can't
 /// hold replaced by '-'.
+/// `~` instead of the home directory, for shorter paths.
+pub fn short_path(path: &std::path::Path) -> String {
+    let path = path.display().to_string();
+    match dirs::home_dir().map(|h| h.display().to_string()) {
+        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
+        _ => path,
+    }
+}
+
 pub fn directory_name(directory: &std::path::Path) -> String {
     let base = directory
         .file_name()

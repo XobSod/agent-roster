@@ -31,6 +31,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     .areas(main);
     if app.mode == Mode::Server {
         draw_server(f, app, main);
+    } else if app.mode == Mode::Projects {
+        draw_projects(f, app, main);
     } else {
         draw_sidebar(f, app, side, now);
         f.render_widget(
@@ -506,6 +508,105 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The tmux server and database report, full width.
+/// Every project: name, directory, sessions, defaults; the selected one's
+/// details below.
+fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+    let [head, _, table, details] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(7),
+    ])
+    .areas(area);
+    let count = match app.projects.len() {
+        1 => "1 project".to_string(),
+        n => format!("{n} projects"),
+    };
+    let title = vec![
+        Span::raw(" "),
+        "roster".bold(),
+        Span::styled("  projects", Style::new().fg(MUTED)),
+    ];
+    f.render_widget(
+        Paragraph::new(Line::from(fit(
+            width,
+            title,
+            vec![Span::styled(count, Style::new().fg(MUTED)), Span::raw(" ")],
+        ))),
+        head,
+    );
+    if app.projects.is_empty() {
+        f.render_widget(Paragraph::new(app.empty_info()), table);
+        return;
+    }
+
+    // Columns: badge and name, directory, sessions, defaults (and the env file).
+    let rows: Vec<[String; 3]> = app
+        .projects
+        .iter()
+        .map(|p| {
+            let mut defaults = p.defaults_label(&app.model_names);
+            if p.origin.join(crate::paths::PROJECT_ENV).exists() {
+                defaults.push_str(" · env file");
+            }
+            [
+                crate::util::short_path(&p.origin),
+                p.sessions_label(&app.sessions),
+                defaults,
+            ]
+        })
+        .collect();
+    let widest = |of: &dyn Fn(usize) -> usize, cap: usize| {
+        (0..app.projects.len()).map(of).max().unwrap_or(0).min(cap)
+    };
+    let name_w = widest(&|i| app.projects[i].name.width(), 24).max(7);
+    let dir_w = widest(&|i| rows[i][0].width(), width * 2 / 5).max(9);
+    let sessions_w = widest(&|i| rows[i][1].width(), 24).max(8);
+    let pad = |s: &str, w: usize| format!("{:<w$}  ", truncate(s, w), w = w);
+    let header = Line::styled(
+        format!(
+            "    {}{}{}DEFAULTS",
+            pad("PROJECT", name_w),
+            pad("DIRECTORY", dir_w),
+            pad("SESSIONS", sessions_w)
+        ),
+        Style::new().fg(FAINT),
+    );
+    let height = (table.height as usize).saturating_sub(1);
+    let first = app.project_row.saturating_sub(height.saturating_sub(1));
+    let mut lines = vec![header];
+    for (i, p) in app.projects.iter().enumerate().skip(first).take(height) {
+        let [dir, sessions, defaults] = &rows[i];
+        let content = vec![
+            badge(&p.name),
+            Span::raw(" "),
+            Span::styled(
+                pad(&p.name, name_w),
+                Style::new().fg(theme::project_color(&p.name)),
+            ),
+            Span::styled(pad(dir, dir_w), Style::new().fg(MUTED)),
+            Span::raw(pad(sessions, sessions_w)),
+            Span::styled(defaults.clone(), Style::new().fg(MUTED)),
+        ];
+        let content = fit(width.saturating_sub(1), content, Vec::new());
+        lines.push(framed(content, i == app.project_row, width));
+    }
+    f.render_widget(Paragraph::new(lines), table);
+
+    if let Some(p) = app.projects.get(app.project_row) {
+        let mut text = vec![Line::styled(
+            format!(" {}", p.name),
+            Style::new().add_modifier(Modifier::BOLD),
+        )];
+        text.extend(app.project_info(p).lines.into_iter().map(|mut l| {
+            l.spans.insert(0, Span::raw(" "));
+            l
+        }));
+        f.render_widget(Paragraph::new(text).style(Style::new().fg(MUTED)), details);
+    }
+}
+
 fn draw_server(f: &mut Frame, app: &App, area: Rect) {
     use crate::doctor::Level;
     let inner = Rect {
@@ -626,9 +727,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         )
     };
     let title = |t: String| Line::styled(t, Style::new().add_modifier(Modifier::BOLD));
-    let mut lines = vec![title("Anywhere".into())];
+    // Sections: anywhere, each menu, attached.
+    let mut sections = vec![vec![title("Anywhere".into())]];
     for (k, action) in keymap.top_items() {
-        lines.push(Line::from(vec![
+        sections[0].push(Line::from(vec![
             key(k.to_string()),
             Span::raw(action.describe()),
         ]));
@@ -637,30 +739,64 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         let Some(open) = keymap.label(Action::Open(menu)) else {
             continue;
         };
-        lines.push(Line::default());
-        lines.push(title(format!(
+        let mut section = vec![title(format!(
             "{} menu ({open} …)",
             capitalize(menu.name())
-        )));
+        ))];
         for (k, action) in keymap.menu_items(menu) {
-            lines.push(Line::from(vec![
+            section.push(Line::from(vec![
                 key(format!("{open} {k}")),
                 Span::raw(action.describe()),
             ]));
         }
+        sections.push(section);
     }
-    lines.push(Line::default());
-    lines.push(title("Attached to an agent".into()));
-    lines.push(Line::from(vec![
-        key(keymap.detach.clone()),
-        Span::raw("back to roster (marks it read)"),
-    ]));
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let rect = centered(area, 46, height);
+    sections.push(vec![
+        title("Attached to an agent".into()),
+        Line::from(vec![
+            key(keymap.detach.clone()),
+            Span::raw("back to roster (marks it read)"),
+        ]),
+    ]);
+    let joined = |sections: &[Vec<Line<'static>>]| -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for (i, s) in sections.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::default());
+            }
+            lines.extend(s.iter().cloned());
+        }
+        lines
+    };
+    const COLUMN: u16 = 46;
+    let one = joined(&sections);
+    // Too tall for the terminal: two columns, split where they're most even.
+    let columns = if one.len() as u16 + 2 > area.height && area.width > COLUMN * 2 {
+        let split = (1..sections.len())
+            .min_by_key(|&i| {
+                joined(&sections[..i])
+                    .len()
+                    .abs_diff(joined(&sections[i..]).len())
+            })
+            .unwrap_or(1);
+        vec![joined(&sections[..split]), joined(&sections[split..])]
+    } else {
+        vec![one]
+    };
+    let tallest = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
+    let width = COLUMN * columns.len() as u16 + (columns.len() as u16 - 1);
+    let rect = centered(area, width, (tallest + 2).min(area.height));
     let block = popup_block("keys")
         .title_bottom(Line::styled(" any key closes ", Style::new().fg(MUTED)).right_aligned());
+    let inner = block.inner(rect);
     f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(block), rect);
+    f.render_widget(block, rect);
+    let areas = Layout::horizontal(vec![Constraint::Length(COLUMN - 1); columns.len()])
+        .spacing(2)
+        .split(inner);
+    for (column, area) in columns.into_iter().zip(areas.iter()) {
+        f.render_widget(Paragraph::new(column), *area);
+    }
 }
 
 fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
@@ -1109,7 +1245,7 @@ mod tests {
     fn grouped_cards_leave_the_project_to_its_heading() {
         let mut app = app();
         app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         let screen = render(&app, 120, 16);
         // The heading and the header; no project line in the cards.
         assert_eq!(screen.matches("RO roster").count(), 2, "{screen}");
@@ -1158,6 +1294,38 @@ mod tests {
         let screen = render(&app, 120, 10);
         assert!(screen.contains("Needs input (1)"), "{screen}");
         assert!(!screen.contains("Archived"), "{screen}");
+    }
+
+    #[test]
+    fn the_projects_view_shows_each_project() {
+        let mut app = app();
+        app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
+        let mut projects = app.projects.clone();
+        projects[0].model = Some("opus".into());
+        projects.push(Project {
+            id: 2,
+            name: "scratch".into(),
+            origin: "/tmp/scratch".into(),
+            agent: None,
+            model: None,
+            effort: None,
+        });
+        app.set_data(projects, app.sessions.clone());
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let screen = render(&app, 120, 20);
+        assert!(screen.contains("roster  projects"), "{screen}");
+        assert!(screen.contains("2 projects"), "{screen}");
+        assert!(screen.contains("PROJECT"), "{screen}");
+        assert!(screen.contains("RO roster"), "{screen}");
+        assert!(screen.contains("2 live"), "{screen}");
+        assert!(screen.contains("claude · opus (Opus 5.5)"), "{screen}");
+        assert!(screen.contains("/tmp/scratch"), "{screen}");
+        assert!(screen.contains("none"), "{screen}");
+        // The selected one's details, and the keys that act here.
+        assert!(screen.contains("origin    /r"), "{screen}");
+        assert!(screen.contains("Enter show its sessions"), "{screen}");
+        assert!(screen.contains("Esc back"), "{screen}");
     }
 
     #[test]
@@ -1230,10 +1398,15 @@ mod tests {
     fn help_lists_every_key() {
         let mut app = app();
         app.help = true;
-        let screen = render(&app, 120, 40);
-        assert!(screen.contains("Session menu (s …)"), "{screen}");
-        assert!(screen.contains("s n  new"), "{screen}");
-        assert!(screen.contains("C-q  back to roster"), "{screen}");
+        // Tall enough: one column. Not: two, with nothing cut off.
+        for height in [60, 30] {
+            let screen = render(&app, 120, height);
+            assert!(screen.contains("Session menu (s …)"), "{screen}");
+            assert!(screen.contains("s n  new"), "{screen}");
+            assert!(screen.contains("v p  projects"), "{screen}");
+            assert!(screen.contains("p l  projects"), "{screen}");
+            assert!(screen.contains("C-q  back to roster"), "{screen}");
+        }
     }
 
     #[test]

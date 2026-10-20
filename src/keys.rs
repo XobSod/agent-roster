@@ -57,6 +57,7 @@ pub enum Action {
     RemoveProject,
     FilterProject,
     ToggleGroup,
+    ShowProjects,
     ShowServer,
 }
 
@@ -84,7 +85,8 @@ impl Action {
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
-            Action::ToggleGroup => "group by project",
+            Action::ToggleGroup => "group by project / shelves",
+            Action::ShowProjects => "projects",
             Action::ShowServer => "tmux server",
         }
     }
@@ -183,9 +185,18 @@ impl Key {
 struct Table {
     keys: HashMap<Key, Action>,
     order: Vec<Action>,
+    /// Each action's first key here (an action can be in several menus).
+    labels: HashMap<Action, String>,
 }
 
 impl Table {
+    fn items(&self) -> Vec<(&str, Action)> {
+        self.order
+            .iter()
+            .filter_map(|a| Some((self.labels.get(a)?.as_str(), *a)))
+            .collect()
+    }
+
     fn bind(
         &mut self,
         table: &str,
@@ -205,6 +216,7 @@ impl Table {
                 );
             }
             labels.entry(action).or_insert_with(|| key.label());
+            self.labels.entry(action).or_insert_with(|| key.label());
         }
         Ok(())
     }
@@ -277,10 +289,18 @@ impl Keymap {
         project.bind(t, "edit", &k.edit, Action::EditProject, &mut labels)?;
         project.bind(t, "filter", &k.filter, Action::FilterProject, &mut labels)?;
         project.bind(t, "remove", &k.remove, Action::RemoveProject, &mut labels)?;
+        project.bind(t, "list", &k.list, Action::ShowProjects, &mut labels)?;
 
         let mut view = Table::default();
         let (t, k) = ("keys.view", &keys.view);
         view.bind(t, "group", &k.group, Action::ToggleGroup, &mut labels)?;
+        view.bind(
+            t,
+            "projects",
+            &k.projects,
+            Action::ShowProjects,
+            &mut labels,
+        )?;
         view.bind(t, "server", &k.server, Action::ShowServer, &mut labels)?;
 
         let menus = HashMap::from([
@@ -311,22 +331,19 @@ impl Keymap {
         self.labels.get(&action).map(String::as_str)
     }
 
+    /// The first key bound to `action` inside `menu`, if any.
+    pub fn menu_label(&self, menu: Menu, action: Action) -> Option<&str> {
+        self.menus[&menu].labels.get(&action).map(String::as_str)
+    }
+
     /// A menu's bound actions with their keys, in display order.
     pub fn menu_items(&self, menu: Menu) -> Vec<(&str, Action)> {
-        self.menus[&menu]
-            .order
-            .iter()
-            .filter_map(|a| Some((self.label(*a)?, *a)))
-            .collect()
+        self.menus[&menu].items()
     }
 
     /// The top level's bound actions with their keys, in display order.
     pub fn top_items(&self) -> Vec<(&str, Action)> {
-        self.top
-            .order
-            .iter()
-            .filter_map(|a| Some((self.label(*a)?, *a)))
-            .collect()
+        self.top.items()
     }
 }
 
@@ -380,7 +397,22 @@ mod tests {
             map.menu(Menu::Project, &chr('d')),
             Some(Action::RemoveProject)
         );
-        assert_eq!(map.menu(Menu::View, &chr('p')), Some(Action::ToggleGroup));
+        assert_eq!(map.menu(Menu::View, &chr('g')), Some(Action::ToggleGroup));
+        // One action in two menus, under its key in each.
+        assert_eq!(map.menu(Menu::View, &chr('p')), Some(Action::ShowProjects));
+        assert_eq!(
+            map.menu(Menu::Project, &chr('l')),
+            Some(Action::ShowProjects)
+        );
+        assert_eq!(map.menu_label(Menu::View, Action::ShowProjects), Some("p"));
+        assert_eq!(
+            map.menu_label(Menu::Project, Action::ShowProjects),
+            Some("l")
+        );
+        assert!(
+            map.menu_items(Menu::View)
+                .contains(&("p", Action::ShowProjects))
+        );
         let items: Vec<&str> = map
             .menu_items(Menu::Session)
             .iter()

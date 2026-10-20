@@ -287,6 +287,7 @@ fn perform(
                 },
             )
             .map(|p| {
+                app.select_project(&p.name);
                 let chord = app.chord(Menu::Session, Action::NewSession);
                 format!("Added project {}; {chord} starts a session in it", p.name)
             }),
@@ -308,7 +309,10 @@ fn perform(
                     effort,
                 },
             )
-            .map(|p| format!("Saved project {}", p.name)),
+            .map(|p| {
+                app.select_project(&p.name);
+                format!("Saved project {}", p.name)
+            }),
         Op::RetitleSession(id) => {
             let label = app.session_label(&id);
             busy(

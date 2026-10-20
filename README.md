@@ -27,7 +27,7 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `d` delete |
+| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `d` delete |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
 | `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) · `t` tmux server and database |
 
@@ -46,6 +46,9 @@ roster project add myproj ~/src/myproj --model opus --effort high
 roster new myproj --name api --attach   # start Claude and go into it; Ctrl+Q comes back
 roster new myproj --prompt "fix the failing tests"   # typed in once Claude is ready
 roster edit api --model sonnet          # applies on the next start
+roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
+roster retitle api                      # a fresh title from Haiku, from the recent prompts
+roster info api                         # created, prompts, time worked, context, tokens, cost
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
 roster ls --project myproj --sort attention   # like the TUI's shelves

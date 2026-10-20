@@ -23,6 +23,7 @@ pub enum Id {
     Model,
     Effort,
     Prompt,
+    Title,
     EnvFile,
 }
 
@@ -267,6 +268,19 @@ impl Form {
                     placeholder: String::new(),
                 },
                 &s.name,
+            ),
+            Field::new(
+                Id::Title,
+                "Title",
+                Kind::Text {
+                    path: false,
+                    placeholder: format!(
+                        "{}'s: {}",
+                        s.agent,
+                        s.title.as_deref().unwrap_or("none yet")
+                    ),
+                },
+                s.title_override.clone().unwrap_or_default(),
             ),
             Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
             Field::new(
@@ -564,6 +578,7 @@ impl Form {
                 Op::EditSession {
                     id: id.clone(),
                     name: required(Id::Name, "The name")?,
+                    title: self.setting(Id::Title),
                     model: if claude {
                         self.setting(Id::Model)
                     } else {
@@ -855,6 +870,7 @@ mod tests {
             Op::EditSession {
                 id: "s1".into(),
                 name: "ap2".into(),
+                title: None,
                 model: Some("opus".into()),
                 effort: None
             }

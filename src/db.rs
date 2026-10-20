@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{Event, Project, Session, State};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -46,7 +46,10 @@ CREATE TABLE sessions (
     state_since       INTEGER,
     pending_prompt    TEXT,
     running_model     TEXT,
-    running_effort    TEXT
+    running_effort    TEXT,
+    title_override    TEXT,
+    turns             INTEGER NOT NULL DEFAULT 0,
+    worked_ms         INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -62,7 +65,8 @@ const SESSION_COLUMNS: &str =
     "s.id, s.project_id, p.name, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
-    s.state_since, s.pending_prompt, s.running_model, s.running_effort";
+    s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
+    s.worked_ms";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
 
@@ -84,6 +88,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         "ALTER TABLE sessions ADD COLUMN running_model TEXT;
          ALTER TABLE sessions ADD COLUMN running_effort TEXT;",
+    ),
+    (
+        5,
+        "ALTER TABLE sessions ADD COLUMN title_override TEXT;
+         ALTER TABLE sessions ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE sessions ADD COLUMN worked_ms INTEGER NOT NULL DEFAULT 0;",
     ),
 ];
 
@@ -511,7 +521,8 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
         "UPDATE sessions SET name = ?2, conversation_id = ?3, transcript_path = ?4, state = ?5, unread = ?6,
              exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
              baseline_at = ?12, title = ?13, model = ?14, effort = ?15, state_since = ?16,
-             pending_prompt = ?17, running_model = ?18, running_effort = ?19
+             pending_prompt = ?17, running_model = ?18, running_effort = ?19, title_override = ?20,
+             turns = ?21, worked_ms = ?22
          WHERE id = ?1",
         params![
             s.id,
@@ -533,6 +544,9 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             s.pending_prompt,
             s.running_model,
             s.running_effort,
+            s.title_override,
+            s.turns,
+            s.worked_ms,
         ],
     )
     .map_err(|e| match e {
@@ -581,6 +595,9 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         pending_prompt: r.get(21)?,
         running_model: r.get(22)?,
         running_effort: r.get(23)?,
+        title_override: r.get(24)?,
+        turns: r.get(25)?,
+        worked_ms: r.get(26)?,
     })
 }
 

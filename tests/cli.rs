@@ -543,3 +543,68 @@ fn ls_shows_titles_models_and_filters() {
         "{by_attention}"
     );
 }
+
+#[test]
+fn titles_and_statistics() {
+    let Some(t) = TestEnv::new("titles") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A transcript like Claude's: two prompts, a reply written twice, cost so far.
+    let transcript = t.path("conv.jsonl");
+    let lines = [
+        r#"{"type":"user","message":{"content":"fix the login tests"}}"#,
+        r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_read_input_tokens":117000,"cache_creation_input_tokens":0,"output_tokens":900}}}"#,
+        r#"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_read_input_tokens":117000,"cache_creation_input_tokens":0,"output_tokens":900}}}"#,
+        r#"{"type":"cost-state","totalCostUSD":3.2,"totalLinesAdded":420,"totalLinesRemoved":35}"#,
+        r#"{"type":"user","message":{"content":"and add a retry"}}"#,
+    ];
+    fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    let payload = format!(
+        r#"{{"session_id":"c","transcript_path":"{}","model":"claude-opus-5-5[1m]"}}"#,
+        transcript.display()
+    );
+    t.report(&id, "session", &payload);
+    t.report(&id, "working", "{}");
+    t.report(&id, "idle", "{}");
+
+    let info = t.ok(&["info", "one"]);
+    assert!(info.contains("claude · Opus 5.5 (1M)"), "{info}");
+    assert!(info.contains("created now · 2 prompts"), "{info}");
+    assert!(
+        info.contains("context 117k/1M (12%) · 900 out · $3.20 · +420 −35"),
+        "{info}"
+    );
+
+    // A title of your own wins; "" follows the agent's again.
+    t.ok(&["edit", "one", "--title", "My own title"]);
+    assert_eq!(
+        t.session("one", false).unwrap()["title_override"],
+        "My own title"
+    );
+    assert!(t.ok(&["info", "one"]).contains("My own title (yours)"));
+    t.ok(&["edit", "one", "--title", ""]);
+    assert_eq!(
+        t.session("one", false).unwrap()["title_override"],
+        Value::Null
+    );
+
+    // retitle asks "claude -p" (here the stand-in, which echoes its arguments).
+    let title = t.ok(&["retitle", "one"]);
+    assert!(
+        title.starts_with("fake agent: -p --no-session-persistence"),
+        "{title}"
+    );
+    assert!(
+        t.session("one", false).unwrap()["title_override"]
+            .as_str()
+            .unwrap()
+            .starts_with("fake agent: -p")
+    );
+}

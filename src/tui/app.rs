@@ -66,9 +66,12 @@ pub enum Op {
     EditSession {
         id: String,
         name: String,
+        /// None follows the agent's title.
+        title: Option<String>,
         model: Option<String>,
         effort: Option<String>,
     },
+    RetitleSession(String),
     AddProject {
         name: String,
         path: String,
@@ -113,6 +116,10 @@ pub struct App {
     pub dialog: Option<Dialog>,
     /// The selected session's screen, or information about the selection.
     pub preview: Text<'static>,
+    /// What the selected session's agent can tell about it.
+    pub stats: Option<crate::stats::AgentStats>,
+    /// Transcript readers by session, kept so each read only takes what's new.
+    pub transcripts: std::collections::HashMap<String, crate::stats::ClaudeTranscript>,
     /// The server view's report, its orphan count, and how far it's scrolled.
     pub report: Vec<crate::doctor::Line>,
     pub orphans: usize,
@@ -146,6 +153,8 @@ impl App {
             help: false,
             dialog: None,
             preview: Text::default(),
+            stats: None,
+            transcripts: Default::default(),
             report: Vec::new(),
             orphans: 0,
             problems: 0,
@@ -419,7 +428,8 @@ impl App {
             | Action::Stop
             | Action::Restart
             | Action::Delete
-            | Action::ToggleRead => {
+            | Action::ToggleRead
+            | Action::Retitle => {
                 return self.session_action(action);
             }
         }
@@ -528,6 +538,7 @@ impl App {
                 None
             }
             Action::ToggleRead => Some(Op::SetUnread(s.id, !s.unread)),
+            Action::Retitle => Some(Op::RetitleSession(s.id)),
             _ => None,
         }
     }

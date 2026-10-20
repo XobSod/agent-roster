@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
 use crate::paths::{self, PROJECT_ENV, Paths};
+use crate::stats::{AgentStats, ClaudeTranscript};
 use crate::tmux::Tmux;
 use crate::util::{self, now_ms};
 use crate::{agent, launch};
@@ -321,6 +322,9 @@ impl Roster {
             pending_prompt: prompt,
             running_model: None,
             running_effort: None,
+            title_override: None,
+            turns: 0,
+            worked_ms: 0,
         };
         self.db.insert_session(&s)?;
         self.start(&s.id)?;
@@ -480,10 +484,12 @@ impl Roster {
 
     /// Renames a session or changes its model and effort; the agent picks those up
     /// on its next start.
+    /// `title`: None follows the agent's title.
     pub fn update_session(
         &mut self,
         id: &str,
         name: &str,
+        title: Option<String>,
         model: Option<String>,
         effort: Option<String>,
     ) -> Result<Session> {
@@ -505,12 +511,76 @@ impl Roster {
             );
         }
         s.name = name.to_string();
+        s.title_override = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         if self.kind(&s) == Kind::Claude {
             s.model = model;
             s.effort = effort;
         }
         self.db.save_session(&s)?;
         Ok(s)
+    }
+
+    /// What the session's agent can tell about it (for Claude, from its
+    /// transcript); None if it can't.
+    pub fn agent_stats(&self, s: &Session) -> Option<AgentStats> {
+        if self.kind(s) != Kind::Claude {
+            return None;
+        }
+        let mut transcript = ClaudeTranscript::new(Path::new(s.transcript_path.as_deref()?));
+        transcript.update().ok()?;
+        Some(transcript.stats(s.running_model.as_deref()))
+    }
+
+    /// Asks Haiku for a title from the session's recent prompts and keeps it as
+    /// the session's title (the agent's own stays the same otherwise).
+    pub fn generate_title(&mut self, id: &str) -> Result<String> {
+        let mut s = self.db.session(id)?;
+        if self.kind(&s) != Kind::Claude {
+            bail!("only Claude sessions can get a generated title; set one with edit");
+        }
+        let path = s.transcript_path.clone().filter(|p| Path::new(p).exists());
+        let path =
+            path.with_context(|| format!("{} has no conversation to title yet", s.label()))?;
+        let mut transcript = ClaudeTranscript::new(Path::new(&path));
+        transcript.update()?;
+        let prompts = transcript.recent_prompts();
+        if prompts.is_empty() {
+            bail!("{} has no prompts to title yet", s.label());
+        }
+        let mut argv = agent::claude_oneoff(&self.config);
+        argv.push(title_request(&prompts, s.display_title()));
+        let project = self
+            .db
+            .projects()?
+            .into_iter()
+            .find(|p| p.id == s.project_id);
+        let project_env = project.map_or_else(PathBuf::new, |p| p.origin.join(PROJECT_ENV));
+        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
+        let argv = launch::wrap(&shell, &self.paths.global_env(), &project_env, &argv);
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .current_dir(&s.workdir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for var in crate::tmux::LEAKY_ENV {
+            cmd.env_remove(var);
+        }
+        let output = run_with_timeout(cmd, TITLE_TIMEOUT)?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "claude couldn't make a title: {}",
+                err.lines().next().unwrap_or("no output")
+            );
+        }
+        let title = clean_title(&String::from_utf8_lossy(&output.stdout))
+            .context("claude gave no title")?;
+        s.title_override = Some(title.clone());
+        self.db.save_session(&s)?;
+        Ok(title)
     }
 
     /// Waits (refreshing) until a session's first prompt has been typed in, for
@@ -643,6 +713,46 @@ fn last_model_in(transcript: &Path) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
+/// How long a title may take.
+const TITLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn title_request(prompts: &[String], current: &str) -> String {
+    let mut request =
+        String::from("These are the latest requests in a coding session, oldest first:\n\n");
+    for p in prompts {
+        let p: String = p.chars().take(300).collect();
+        request.push_str(&format!("- {}\n", p.replace('\n', " ")));
+    }
+    request.push_str(&format!(
+        "\nIts title so far: {current}\n\nGive a short title (3 to 7 words) for what the session is working on now. Reply with the title only."
+    ));
+    request
+}
+
+/// The first line of the reply, without quotes or markdown, at most 80 characters.
+fn clean_title(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '#' | ' '));
+    let title: String = line.chars().take(80).collect();
+    (!title.is_empty()).then_some(title)
+}
+
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut child = cmd.spawn().context("can't run claude")?;
+    let deadline = Instant::now() + timeout;
+    while child.try_wait()?.is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            bail!("claude took longer than {}s", timeout.as_secs());
+        }
+        sleep(Duration::from_millis(100));
+    }
+    Ok(child.wait_with_output()?)
+}
+
 /// Default agent, model and effort for a project's new sessions.
 #[derive(Clone, Debug, Default)]
 pub struct Defaults {
@@ -708,6 +818,21 @@ mod tests {
         fs::write(&path, "{\"model\":\"claude-haiku-5-5\"}\n{\"model\":\"<synthetic>\"}\n{\"message\":{\"model\":\"claude-opus-5-5\"}}\n").unwrap();
         assert_eq!(last_model_in(&path).as_deref(), Some("claude-opus-5-5"));
         assert_eq!(last_model_in(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn titles_are_one_clean_line() {
+        assert_eq!(
+            clean_title("\n  \"Fix Login Tests\"  \nmore").as_deref(),
+            Some("Fix Login Tests")
+        );
+        assert_eq!(
+            clean_title("# **Retry uploads**").as_deref(),
+            Some("Retry uploads")
+        );
+        assert_eq!(clean_title("  \n "), None);
+        let request = title_request(&["fix\nthe tests".into()], "Old");
+        assert!(request.contains("- fix the tests") && request.contains("Its title so far: Old"));
     }
 
     #[test]

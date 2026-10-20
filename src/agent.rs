@@ -84,6 +84,28 @@ pub struct Launch {
 }
 
 /// How to start `s` now: for Claude a new conversation or its existing one resumed.
+/// A one-off `claude -p` call for small jobs such as a title: Haiku, no tools,
+/// no settings (so no hooks), nothing saved. The prompt goes last.
+pub fn claude_oneoff(config: &Config) -> Vec<String> {
+    let command = config
+        .agent(CLAUDE)
+        .command
+        .unwrap_or_else(|| CLAUDE.to_string());
+    [
+        command.as_str(),
+        "-p",
+        "--no-session-persistence",
+        "--setting-sources",
+        "",
+        "--tools",
+        "",
+        "--model",
+        "haiku",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
 pub fn launch(s: &Session, config: &Config, roster_exe: &Path) -> Result<Launch> {
     let agent = config.agent(&s.agent);
     let mut argv = vec![agent.command.clone().unwrap_or_else(|| s.agent.clone())];

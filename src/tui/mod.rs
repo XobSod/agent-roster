@@ -136,6 +136,29 @@ fn update_preview(roster: &Roster, app: &mut App) {
             }
         },
     };
+    app.stats = app
+        .selected_session()
+        .cloned()
+        .and_then(|s| agent_stats(app, &s));
+}
+
+/// What the agent can tell about a session, read incrementally (for Claude,
+/// from its transcript).
+fn agent_stats(app: &mut App, s: &crate::model::Session) -> Option<crate::stats::AgentStats> {
+    if s.agent != agent::CLAUDE || s.deleted_at.is_some() {
+        return None;
+    }
+    let path = std::path::Path::new(s.transcript_path.as_deref()?);
+    let reader = app
+        .transcripts
+        .entry(s.id.clone())
+        .or_insert_with(|| crate::stats::ClaudeTranscript::new(path));
+    // After /clear the conversation, and its transcript, change.
+    if reader.path() != path {
+        *reader = crate::stats::ClaudeTranscript::new(path);
+    }
+    reader.update().ok()?;
+    Some(reader.stats(s.running_model.as_deref()))
 }
 
 /// A captured screen as styled text, without the empty lines below the content.
@@ -229,19 +252,22 @@ fn perform(
         Op::EditSession {
             id,
             name,
+            title,
             model,
             effort,
-        } => roster.update_session(&id, &name, model, effort).map(|s| {
-            if s.state == crate::model::State::Stopped {
-                format!("Saved {}", s.label())
-            } else {
-                let chord = app.chord(Menu::Session, Action::Restart);
-                format!(
-                    "Saved {}; a new model or effort applies after a restart ({chord})",
-                    s.label()
-                )
-            }
-        }),
+        } => roster
+            .update_session(&id, &name, title, model, effort)
+            .map(|s| {
+                if s.state == crate::model::State::Stopped {
+                    format!("Saved {}", s.label())
+                } else {
+                    let chord = app.chord(Menu::Session, Action::Restart);
+                    format!(
+                        "Saved {}; a new model or effort applies after a restart ({chord})",
+                        s.label()
+                    )
+                }
+            }),
         Op::AddProject {
             name,
             path,
@@ -281,6 +307,17 @@ fn perform(
                 },
             )
             .map(|p| format!("Saved project {}", p.name)),
+        Op::RetitleSession(id) => {
+            let label = app.session_label(&id);
+            busy(
+                terminal,
+                app,
+                format!("Asking Haiku for a title for {label}…"),
+            )?;
+            roster
+                .generate_title(&id)
+                .map(|title| format!("New title: {title}"))
+        }
         Op::KillOrphans => roster
             .kill_orphans()
             .map(|n| format!("Killed {n} orphaned tmux session(s)")),

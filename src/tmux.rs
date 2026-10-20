@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 /// Variables never passed into roster's tmux: the ones that make tmux think it's
 /// nested, and Claude Code's per-session ones, which leak in
 /// when roster itself is run from inside Claude Code.
-const LEAKY_ENV: &[&str] = &[
+pub(crate) const LEAKY_ENV: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
     "CLAUDECODE",

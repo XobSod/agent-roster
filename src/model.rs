@@ -83,6 +83,11 @@ pub struct Session {
     /// The model and effort the agent reports using (Claude's hook payloads).
     pub running_model: Option<String>,
     pub running_effort: Option<String>,
+    /// A title the user set (or had generated); wins over the agent's.
+    pub title_override: Option<String>,
+    /// Turns started and time spent working, counted by roster for any agent.
+    pub turns: i64,
+    pub worked_ms: i64,
 }
 
 /// A status change reported by an agent hook through `roster report <kind>`.
@@ -106,12 +111,30 @@ impl Session {
         format!("{}/{}", self.project, self.name)
     }
 
-    /// Changes the state, noting when it changed.
+    /// Changes the state, noting when it changed, the time spent working, and
+    /// turns (working again after idling; after a question, it's the same turn).
     pub fn set_state(&mut self, state: State, at: i64) {
-        if self.state != state {
-            self.state = state;
-            self.state_since = Some(at);
+        if self.state == state {
+            return;
         }
+        if self.state == State::Working {
+            self.worked_ms += (at - self.state_since.unwrap_or(at)).max(0);
+        }
+        if state == State::Working && self.state == State::Idle {
+            self.turns += 1;
+        }
+        self.state = state;
+        self.state_since = Some(at);
+    }
+
+    /// Time spent working, including a turn in progress.
+    pub fn worked(&self, now: i64) -> i64 {
+        let current = if self.state == State::Working {
+            now - self.state_since.unwrap_or(now)
+        } else {
+            0
+        };
+        self.worked_ms + current.max(0)
     }
 
     /// Attention order: blocked on the user, then unread, idle, working, stopped.
@@ -139,9 +162,12 @@ impl Session {
         self.effort.clone().or_else(|| self.running_effort.clone())
     }
 
-    /// The title if the agent has set one, else the session's name.
+    /// The user's title, else the agent's, else the session's name.
     pub fn display_title(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.name)
+        self.title_override
+            .as_deref()
+            .or(self.title.as_deref())
+            .unwrap_or(&self.name)
     }
 
     /// Applies a reported event.
@@ -289,6 +315,9 @@ pub mod tests {
             pending_prompt: None,
             running_model: None,
             running_effort: None,
+            title_override: None,
+            turns: 0,
+            worked_ms: 0,
         }
     }
 
@@ -358,6 +387,31 @@ pub mod tests {
         s.apply(&event("idle", 20, Some(r#"{"effort":{"level":"xhigh"}}"#)));
         assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
         assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn counts_turns_and_time_worked() {
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.state_since = Some(0);
+        s.apply(&event("working", 1_000, None));
+        s.apply(&event("working", 2_000, None));
+        s.apply(&event("needs-input", 4_000, None));
+        s.apply(&event("working", 9_000, None));
+        s.apply(&event("idle", 10_000, None));
+        assert_eq!((s.turns, s.worked_ms), (1, 4_000));
+        s.apply(&event("working", 20_000, None));
+        assert_eq!((s.turns, s.worked(25_000)), (2, 9_000));
+    }
+
+    #[test]
+    fn a_users_title_wins() {
+        let mut s = session("a");
+        assert_eq!(s.display_title(), "s-a");
+        s.title = Some("Claude's".into());
+        assert_eq!(s.display_title(), "Claude's");
+        s.title_override = Some("Mine".into());
+        assert_eq!(s.display_title(), "Mine");
     }
 
     #[test]

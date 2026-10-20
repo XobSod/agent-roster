@@ -10,6 +10,7 @@ mod launch;
 mod model;
 mod paths;
 mod report;
+mod stats;
 mod tmux;
 mod tui;
 mod util;
@@ -66,11 +67,14 @@ enum Cmd {
         #[arg(short, long)]
         attach: bool,
     },
-    /// Rename a session or change its model and effort (applies on its next start)
+    /// Rename a session, set its title, or change its model and effort (applies on its next start)
     Edit {
         session: String,
         #[arg(long)]
         name: Option<String>,
+        /// A title of your own ("" follows the agent's title again)
+        #[arg(long)]
+        title: Option<String>,
         /// Claude model ("default" for Claude's own)
         #[arg(long)]
         model: Option<String>,
@@ -129,6 +133,10 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
+    Info { session: String },
+    /// Give a Claude session a fresh title, made by Haiku from its recent prompts
+    Retitle { session: String },
     /// Mark a session read
     Read { session: String },
     /// Mark a session unread
@@ -380,6 +388,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Edit {
             session,
             name,
+            title,
             model,
             effort,
         } => {
@@ -387,6 +396,7 @@ fn run(cli: Cli) -> Result<()> {
             let s = r.update_session(
                 &s.id,
                 name.as_deref().unwrap_or(&s.name),
+                title.or(s.title_override.clone()),
                 setting(model).unwrap_or(s.model.clone()),
                 setting(effort).unwrap_or(s.effort.clone()),
             )?;
@@ -397,6 +407,17 @@ fn run(cli: Cli) -> Result<()> {
                     s.label()
                 );
             }
+        }
+        Cmd::Info { session } => {
+            r.refresh()?;
+            let s = r
+                .resolve(&session, false)
+                .or_else(|_| r.resolve(&session, true))?;
+            print_info(&r, &s);
+        }
+        Cmd::Retitle { session } => {
+            let s = r.resolve(&session, false)?;
+            println!("{}", r.generate_title(&s.id)?);
         }
         Cmd::Read { session } => {
             let s = r.resolve(&session, false)?;
@@ -430,6 +451,53 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Report { .. } => {}
     }
     Ok(())
+}
+
+fn print_info(r: &Roster, s: &Session) {
+    let now = util::now_ms();
+    let title = match (&s.title_override, &s.title) {
+        (Some(t), _) => format!("{t} (yours)"),
+        (None, Some(t)) => format!("{t} ({}'s)", s.agent),
+        (None, None) => "-".to_string(),
+    };
+    let agent = [Some(s.agent.clone()), s.model_label(), s.effort_label()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let state = match s.deleted_at {
+        Some(t) => format!("deleted {} ago", util::ago(now - t)),
+        None => format!(
+            "{} {}",
+            s.state.as_str(),
+            util::ago(now - s.state_since.unwrap_or(s.created_at))
+        ),
+    };
+    let rows = [
+        ("session", format!("{} ({})", s.label(), s.id)),
+        ("title", title),
+        ("agent", agent.join(" · ")),
+        ("state", state),
+        ("directory", s.workdir.display().to_string()),
+        (
+            "conversation",
+            s.conversation_id.clone().unwrap_or_else(|| "-".into()),
+        ),
+    ];
+    for (name, value) in rows {
+        println!("{name:<13}{value}");
+    }
+    let stats = r.agent_stats(s);
+    println!(
+        "{:<13}{}",
+        "statistics",
+        stats::summary(s, stats.as_ref(), now).join(" · ")
+    );
+    if stats.as_ref().is_some_and(|a| a.partial) {
+        println!(
+            "{:<13}≥: cost and lines are Claude's totals up to its last restart",
+            ""
+        );
+    }
 }
 
 /// A diagnosis line for a terminal (coloured) or a pipe (plain, with markers).
@@ -545,6 +613,8 @@ fn list_sessions(
                     "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
                     "pending_prompt": s.pending_prompt.is_some(),
                     "running_model": s.running_model, "running_effort": s.running_effort,
+                    "title_override": s.title_override, "created_at": s.created_at,
+                    "turns": s.turns, "worked_ms": s.worked(util::now_ms()),
                 })
             })
             .collect();

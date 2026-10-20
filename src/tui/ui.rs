@@ -249,7 +249,14 @@ fn card(s: &Session, with_badge: bool, width: usize, now: i64) -> Vec<Vec<Span<'
             Span::raw("   "),
             Span::styled(meta(s), Style::new().fg(meta_color)),
         ],
-        vec![glyph(&s.agent), Span::raw(" ")],
+        vec![
+            Span::styled(
+                format!("{} ", theme::ago(now - s.created_at)),
+                Style::new().fg(FAINT),
+            ),
+            glyph(&s.agent),
+            Span::raw(" "),
+        ],
     );
     vec![first, second]
 }
@@ -379,7 +386,8 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         width: area.width.saturating_sub(1),
         ..area
     };
-    let [head, _, body] = Layout::vertical([
+    let [head, stats, _, body] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
@@ -389,6 +397,15 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         Paragraph::new(Line::from(header(app, head.width as usize, now))),
         head,
     );
+    // The session's statistics: what roster counts and what the agent can tell.
+    if let Some(s) = app.selected_session().filter(|s| s.deleted_at.is_none()) {
+        let parts = crate::stats::summary(s, app.stats.as_ref(), now);
+        let line = truncate(&parts.join(" · "), stats.width as usize);
+        f.render_widget(
+            Paragraph::new(Line::styled(line, Style::new().fg(MUTED))),
+            stats,
+        );
+    }
     // The bottom of an agent's screen is where its prompt is; long lines are cut.
     let lines = &app.preview.lines;
     let skip = lines.len().saturating_sub(body.height as usize);
@@ -884,6 +901,7 @@ mod tests {
         let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/".into(), agents);
         let now = now_ms();
         let mut a = session("a1");
+        a.created_at = now - 2 * 86_400_000;
         a.name = "api".into();
         a.project = "roster".into();
         a.title = Some("Fix scrollback".into());
@@ -893,6 +911,7 @@ mod tests {
         a.effort = Some("high".into());
         a.state_since = Some(now - 120_000);
         let mut b = session("b1");
+        b.created_at = now - 2 * 86_400_000;
         b.name = "db".into();
         b.project = "roster".into();
         b.state = State::Working;
@@ -1006,8 +1025,20 @@ mod tests {
         sessions[0].running_model = Some("claude-opus-5-5[1m]".into());
         app.set_data(app.projects.clone(), sessions);
         app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
+        app.stats = Some(crate::stats::AgentStats {
+            prompts: Some(5),
+            output_tokens: Some(92_000),
+            ..Default::default()
+        });
         let screen = render(&app, 120, 16);
-        assert!(screen.contains("api · Opus 5.5 (1M) high"), "{screen}");
+        assert!(
+            screen.contains("api · Opus 5.5 (1M) high") && screen.contains("2d ✱"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("created 2d · 5 prompts · 92k out"),
+            "{screen}"
+        );
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         // From the name: agent, then model.

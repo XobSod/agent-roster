@@ -315,15 +315,26 @@ impl Tmux {
         self.run(args).map(drop)
     }
 
-    /// Types a line into the pane, as if the user typed it and pressed Enter.
-    /// Enter is sent as C-m: with extended keys on, Claude (2.1.304) takes tmux's
-    /// `Enter` key for a newline but C-m for a submit. The pause keeps a long
-    /// line from looking like a paste that the Enter belongs to.
+    /// Puts a line into the pane as a bracketed paste, then presses Enter. A plain
+    /// carriage return right after a burst of typed text is taken by Claude as
+    /// part of a paste (a newline, not a submit); the paste markers and a pause
+    /// make the Enter a key press. Programs that don't use bracketed paste get the
+    /// plain text.
     pub fn type_line(&self, name: &str, text: &str) -> Result<()> {
         let target = pane_target(name);
-        self.run(["send-keys", "-t", target.as_str(), "-l", "--", text])?;
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        self.run(["send-keys", "-t", target.as_str(), "C-m"])
+        let buffer = format!("roster-{name}");
+        self.run(["set-buffer", "-b", buffer.as_str(), "--", text])?;
+        self.run([
+            "paste-buffer",
+            "-p",
+            "-d",
+            "-b",
+            buffer.as_str(),
+            "-t",
+            target.as_str(),
+        ])?;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        self.run(["send-keys", "-t", target.as_str(), "Enter"])
             .map(drop)
     }
 

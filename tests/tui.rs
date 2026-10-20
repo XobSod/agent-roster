@@ -84,5 +84,8 @@ fn tui_walkthrough() {
 
     term.keys(&["q"]);
     term.wait_for("the TUI to exit", "TUI-EXIT=0");
+    // tmux's "[detached (from session …)]" isn't left behind, once per attach.
+    let screen = term.screen();
+    assert!(!screen.contains("[detached"), "{screen}");
     assert_eq!(t.session("one", false).unwrap()["state"], "stopped");
 }

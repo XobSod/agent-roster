@@ -361,9 +361,13 @@ impl Tmux {
     }
 
     /// Attaches the current terminal until the user detaches (or the session ends).
+    /// The client draws through the terminal it opens itself; its stdout only
+    /// gets the message it prints on leaving ("[detached (from session …)]"),
+    /// which would pile up behind the TUI, one per attach. Errors still show.
     pub fn attach(&self, name: &str) -> Result<ExitStatus> {
         self.command()
             .args(["attach-session", "-t", &format!("={name}")])
+            .stdout(std::process::Stdio::null())
             .status()
             .context("can't run tmux (is it installed?)")
     }

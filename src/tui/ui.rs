@@ -682,7 +682,7 @@ fn draw_menu(f: &mut Frame, app: &App, menu: Menu, area: Rect) {
                     key.to_string(),
                     Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!(" {}", action.describe())),
+                Span::raw(format!(" {}", action.describe_in(menu))),
             ]
         })
         .collect();
@@ -752,7 +752,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         for (k, action) in keymap.menu_items(menu) {
             section.push(Line::from(vec![
                 key(format!("{open} {k}")),
-                Span::raw(action.describe()),
+                Span::raw(action.describe_in(menu)),
             ]));
         }
         sections.push(section);
@@ -1414,7 +1414,7 @@ mod tests {
             assert!(screen.contains("Session menu (s …)"), "{screen}");
             assert!(screen.contains("s n  new"), "{screen}");
             assert!(screen.contains("v p  projects"), "{screen}");
-            assert!(screen.contains("p l  projects"), "{screen}");
+            assert!(screen.contains("p l  list"), "{screen}");
             assert!(
                 screen.contains("in the projects view, without p"),
                 "{screen}"

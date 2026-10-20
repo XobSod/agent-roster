@@ -62,6 +62,15 @@ pub enum Action {
 }
 
 impl Action {
+    /// How `menu`'s popup and the help describe it there: in the project menu
+    /// the projects view is the (p)roject (l)ist.
+    pub fn describe_in(self, menu: Menu) -> &'static str {
+        match (menu, self) {
+            (Menu::Project, Action::ShowProjects) => "list",
+            _ => self.describe(),
+        }
+    }
+
     /// How the help and the menu popups describe it.
     pub fn describe(self) -> &'static str {
         match self {
@@ -438,6 +447,8 @@ mod tests {
             map.menu_items(Menu::View)
                 .contains(&("p", Action::ShowProjects))
         );
+        assert_eq!(Action::ShowProjects.describe_in(Menu::Project), "list");
+        assert_eq!(Action::ShowProjects.describe_in(Menu::View), "projects");
         let items: Vec<&str> = map
             .menu_items(Menu::Session)
             .iter()

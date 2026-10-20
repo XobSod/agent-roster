@@ -42,6 +42,32 @@ pub struct Tmux {
     conf: PathBuf,
 }
 
+/// The running server, for diagnostics.
+#[derive(Clone, Debug)]
+pub struct Server {
+    pub pid: i64,
+    pub version: String,
+    /// Unix time in seconds.
+    pub started: i64,
+    pub socket_path: String,
+}
+
+/// One pane with everything diagnostics show about it.
+#[derive(Clone, Debug)]
+pub struct PaneDetail {
+    pub session: String,
+    pub clients: u32,
+    pub dead: bool,
+    pub dead_status: Option<i32>,
+    /// The signal that killed it, if one did (tmux 3.3+).
+    pub dead_signal: Option<i32>,
+    pub pid: Option<i32>,
+    pub command: String,
+    pub width: u16,
+    pub height: u16,
+    pub history: u64,
+}
+
 impl Tmux {
     pub fn new(socket: String, conf: PathBuf) -> Tmux {
         Tmux { socket, conf }
@@ -124,6 +150,109 @@ impl Tmux {
             }
         }
         Ok(panes)
+    }
+
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
+    pub fn conf_path(&self) -> &Path {
+        &self.conf
+    }
+
+    /// Runs a query; None if the server isn't running.
+    fn query(&self, args: &[&str]) -> Result<Option<String>> {
+        match self.run(args) {
+            Err(e) if is_missing(&e) => Ok(None),
+            other => other.map(Some),
+        }
+    }
+
+    pub fn server(&self) -> Result<Option<Server>> {
+        let Some(out) = self.query(&[
+            "list-sessions",
+            "-F",
+            "#{pid}\t#{version}\t#{start_time}\t#{socket_path}",
+        ])?
+        else {
+            return Ok(None);
+        };
+        Ok(out.lines().next().and_then(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            match f[..] {
+                [pid, version, started, path] => Some(Server {
+                    pid: pid.parse().ok()?,
+                    version: version.to_string(),
+                    started: started.parse().unwrap_or(0),
+                    socket_path: path.to_string(),
+                }),
+                _ => None,
+            }
+        }))
+    }
+
+    pub fn pane_details(&self) -> Result<Vec<PaneDetail>> {
+        let format = "#{session_name}\t#{session_attached}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{history_size}";
+        let Some(out) = self.query(&["list-panes", "-a", "-F", format])? else {
+            return Ok(Vec::new());
+        };
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let f: Vec<&str> = line.split('\t').collect();
+                match f[..] {
+                    [
+                        session,
+                        clients,
+                        dead,
+                        status,
+                        signal,
+                        pid,
+                        command,
+                        width,
+                        height,
+                        history,
+                    ] => Some(PaneDetail {
+                        session: session.to_string(),
+                        clients: clients.parse().unwrap_or(0),
+                        dead: dead == "1",
+                        dead_status: status.parse().ok(),
+                        dead_signal: signal.parse().ok(),
+                        pid: pid.parse().ok(),
+                        command: command.to_string(),
+                        width: width.parse().unwrap_or(0),
+                        height: height.parse().unwrap_or(0),
+                        history: history.parse().unwrap_or(0),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+
+    /// Whether `key` is bound to detach-client in the root table.
+    pub fn detach_bound(&self, key: &str) -> Result<Option<bool>> {
+        let Some(out) = self.query(&["list-keys", "-T", "root"])? else {
+            return Ok(None);
+        };
+        Ok(Some(out.lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            words.contains(&"detach-client") && words.get(3) == Some(&key)
+        })))
+    }
+
+    /// The server's global environment variables (names), e.g. to spot TMUX leaks.
+    pub fn global_env(&self) -> Result<Option<Vec<String>>> {
+        let Some(out) = self.query(&["show-environment", "-g"])? else {
+            return Ok(None);
+        };
+        // Removed variables show as "-NAME".
+        Ok(Some(
+            out.lines()
+                .filter(|l| !l.starts_with('-'))
+                .filter_map(|l| l.split('=').next().map(String::from))
+                .collect(),
+        ))
     }
 
     /// Starts a detached session running `argv` (no shell in between, so arguments

@@ -69,6 +69,13 @@ fn tui_walkthrough() {
     term.keys(&["Enter"]);
     term.wait_for("the restore", "Restored demo/one");
 
+    // The view menu's server view shows tmux and the database; Esc goes back.
+    term.keys(&["v", "t"]);
+    term.wait_for("the server view", "tmux server and database");
+    term.wait_for("the verdict", "problems (0)");
+    term.keys(&["Escape"]);
+    term.wait_for("the list again", "Enter attach");
+
     // Help lists the menus; any key closes it.
     term.keys(&["?"]);
     term.wait_for("the help", "Session menu (s …)");

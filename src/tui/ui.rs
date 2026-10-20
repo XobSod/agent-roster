@@ -28,13 +28,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         Constraint::Min(1),
     ])
     .areas(main);
-    draw_sidebar(f, app, side, now);
-    f.render_widget(
-        Paragraph::new(vec![Line::from("│"); divider.height as usize])
-            .style(Style::new().fg(FAINT)),
-        divider,
-    );
-    draw_main(f, app, right, now);
+    if app.mode == Mode::Server {
+        draw_server(f, app, main);
+    } else {
+        draw_sidebar(f, app, side, now);
+        f.render_widget(
+            Paragraph::new(vec![Line::from("│"); divider.height as usize])
+                .style(Style::new().fg(FAINT)),
+            divider,
+        );
+        draw_main(f, app, right, now);
+    }
     draw_footer(f, app, footer);
     if let Some(menu) = app.menu {
         draw_menu(f, app, menu, main);
@@ -466,6 +470,58 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         }
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// The tmux server and database report, full width.
+fn draw_server(f: &mut Frame, app: &App, area: Rect) {
+    use crate::doctor::Level;
+    let inner = Rect {
+        x: area.x + 1,
+        width: area.width.saturating_sub(2),
+        ..area
+    };
+    let [head, _, body] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    let state = match app.problems {
+        0 => Span::styled("no problems", Style::new().fg(UNREAD)),
+        1 => Span::styled("1 problem", Style::new().fg(ERROR)),
+        n => Span::styled(format!("{n} problems"), Style::new().fg(ERROR)),
+    };
+    let title = vec![
+        "roster".bold(),
+        Span::styled("  tmux server and database", Style::new().fg(MUTED)),
+    ];
+    f.render_widget(
+        Paragraph::new(Line::from(fit(head.width as usize, title, vec![state]))),
+        head,
+    );
+    let lines: Vec<Line> = app
+        .report
+        .iter()
+        .skip(app.report_scroll)
+        .map(|line| {
+            let (mark, style) = match line.level {
+                Level::Heading => ("", Style::new().add_modifier(Modifier::BOLD)),
+                Level::Info => (" ", Style::new()),
+                Level::Ok => ("✓", Style::new().fg(UNREAD)),
+                Level::Note => ("·", Style::new().fg(MUTED)),
+                Level::Problem => ("✗", Style::new().fg(ERROR)),
+            };
+            match line.level {
+                Level::Heading => Line::styled(line.text.clone(), style),
+                _ if line.text.is_empty() => Line::default(),
+                _ => Line::from(vec![
+                    Span::styled(mark, style),
+                    Span::styled(line.text[1..].to_string(), style),
+                ]),
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), body);
 }
 
 // Popups
@@ -910,6 +966,33 @@ mod tests {
         assert!(screen.contains("▸ Agent      ‹ claude ›"), "{screen}");
         assert!(screen.contains("←→ change"), "{screen}");
         assert_eq!(tail("/a/very/long/path", 8), "…ng/path");
+    }
+
+    #[test]
+    fn server_view_shows_the_report() {
+        use crate::doctor::{Diagnosis, Level, Line};
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let line = |level, text: &str| Line {
+            level,
+            text: text.into(),
+        };
+        app.set_report(Diagnosis {
+            lines: vec![
+                line(Level::Heading, "tmux sessions (1)"),
+                line(Level::Problem, "  r-x  -  alive  ← orphan"),
+            ],
+            orphans: vec!["r-x".into()],
+            problems: 1,
+        });
+        let screen = render(&app, 120, 12);
+        assert!(screen.contains("tmux server and database"), "{screen}");
+        assert!(screen.contains("tmux sessions (1)"), "{screen}");
+        assert!(screen.contains("✗ r-x"), "{screen}");
+        assert!(screen.contains("Enter kill orphans"), "{screen}");
+        assert!(screen.contains("Esc back"), "{screen}");
+        assert!(!screen.contains("Needs you"), "{screen}");
     }
 
     #[test]

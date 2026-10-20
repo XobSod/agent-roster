@@ -52,6 +52,27 @@ pub fn local_time(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// How long ago, briefly: `now`, `5m`, `3h`, `2d`.
+pub fn ago(elapsed_ms: i64) -> String {
+    let secs = elapsed_ms.max(0) / 1000;
+    match secs {
+        0..60 => "now".into(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+/// A running clock: `12s`, `5m`, `1h 2m`.
+pub fn clock(elapsed_ms: i64) -> String {
+    let secs = elapsed_ms.max(0) / 1000;
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +81,16 @@ mod tests {
     fn quotes_single_quotes() {
         assert_eq!(sh_quote("/a b/roster"), "'/a b/roster'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn times() {
+        assert_eq!(ago(30_000), "now");
+        assert_eq!(ago(5 * 60_000), "5m");
+        assert_eq!(ago(3 * 3_600_000), "3h");
+        assert_eq!(ago(50 * 3_600_000), "2d");
+        assert_eq!(clock(12_000), "12s");
+        assert_eq!(clock(62 * 60_000), "1h 2m");
     }
 
     #[test]

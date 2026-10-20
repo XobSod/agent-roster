@@ -29,7 +29,7 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 |---|---|
 | `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `d` delete |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
-| `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) |
+| `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) · `t` tmux server and database |
 
 Sessions sit on shelves by attention: *Needs you* (questions, finished turns you
 haven't seen), *Idle*, *Working* (dimmed) and *Stopped*. In an agent, Ctrl+Q comes
@@ -48,11 +48,13 @@ roster new myproj --prompt "fix the failing tests"   # typed in once Claude is r
 roster edit api --model sonnet          # applies on the next start
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
+roster ls --project myproj --sort attention   # like the TUI's shelves
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
 roster rm api && roster restore api     # deleted sessions keep their conversation
 roster events --follow                  # what the agents' hooks report
+roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
 ```
 
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`

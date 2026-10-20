@@ -448,3 +448,98 @@ fn projects_and_sessions_can_be_edited() {
         t.ok(&["show", "t"]).contains("--model haiku --effort max")
     });
 }
+
+#[test]
+fn doctor_finds_orphans_and_fixes_them() {
+    let Some(t) = TestEnv::new("doctor") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "api"]);
+    t.ok(&["new", "demo", "--name", "old"]);
+    t.ok(&["stop", "old"]);
+    let report = t.ok(&["doctor"]);
+    assert!(report.contains("✓ back key    C-q, bound"), "{report}");
+    assert!(report.contains("✓ environment clean"), "{report}");
+    assert!(
+        report.contains("demo/api") && report.contains("(stopped; last screen kept)"),
+        "{report}"
+    );
+    assert!(report.contains("problems (0)"), "{report}");
+
+    // A tmux session no roster session owns.
+    Command::new("tmux")
+        .args([
+            "-L",
+            &t.socket,
+            "new-session",
+            "-d",
+            "-s",
+            "r-deadbeef",
+            "sleep 600",
+        ])
+        .env_remove("TMUX")
+        .output()
+        .unwrap();
+    let out = t.run(&["doctor"]);
+    assert!(!out.status.success());
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains("r-deadbeef") && report.contains("← orphan"),
+        "{report}"
+    );
+    assert!(report.contains("belongs to no roster session"), "{report}");
+    assert!(
+        !t.run(&["doctor", "--fix"]).status.success(),
+        "fixed without --yes"
+    );
+    let fixed = t.ok(&["doctor", "--fix", "--yes"]);
+    assert!(
+        fixed.contains("Killed 1 orphaned tmux session(s)") && fixed.contains("problems (0)"),
+        "{fixed}"
+    );
+}
+
+#[test]
+fn ls_shows_titles_models_and_filters() {
+    let Some(t) = TestEnv::new("ls") else { return };
+    t.ok(&[
+        "project",
+        "add",
+        "a",
+        t.path("proj").to_str().unwrap(),
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+    ]);
+    fs::create_dir_all(t.path("other")).unwrap();
+    t.ok(&["project", "add", "b", t.path("other").to_str().unwrap()]);
+    assert!(t.ok(&["project", "ls"]).contains("claude · opus · high"));
+    t.ok(&["new", "a", "--name", "one"]);
+    t.ok(&["new", "b", "--name", "two"]);
+    let id = t.session("two", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    t.report(&id, "idle", "{}");
+
+    let all = t.ok(&["ls"]);
+    assert!(
+        all.contains("TITLE") && all.contains("claude · opus · high"),
+        "{all}"
+    );
+    let only_a = t.ok(&["ls", "--project", "a"]);
+    assert!(
+        only_a.contains("one") && !only_a.contains("two"),
+        "{only_a}"
+    );
+    assert!(!t.run(&["ls", "--project", "nope"]).status.success());
+    // By attention, the unread session comes first.
+    let by_attention = t.ok(&["ls", "--sort", "attention"]);
+    let lines: Vec<&str> = by_attention.lines().collect();
+    assert!(
+        lines[1].contains("two") && lines[1].contains("●"),
+        "{by_attention}"
+    );
+}

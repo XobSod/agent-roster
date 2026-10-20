@@ -3,6 +3,7 @@
 mod agent;
 mod config;
 mod db;
+mod doctor;
 mod engine;
 mod keys;
 mod launch;
@@ -82,6 +83,12 @@ enum Cmd {
         /// List deleted sessions instead
         #[arg(long)]
         deleted: bool,
+        /// Only this project's sessions
+        #[arg(long)]
+        project: Option<String>,
+        /// `project` (default) or `attention`: needs you, idle, working, stopped, like the TUI's shelves
+        #[arg(long, default_value = "project", value_parser = ["project", "attention"])]
+        sort: String,
         #[arg(long)]
         json: bool,
     },
@@ -126,6 +133,14 @@ enum Cmd {
     Read { session: String },
     /// Mark a session unread
     Unread { session: String },
+    /// Check roster's tmux server and database against each other
+    Doctor {
+        /// Kill orphaned tmux sessions
+        #[arg(long)]
+        fix: bool,
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Show status events reported by agent hooks
     Events {
         #[arg(short, long)]
@@ -288,9 +303,14 @@ fn run(cli: Cli) -> Result<()> {
                 r.attach(&s.id)?;
             }
         }
-        Cmd::Ls { deleted, json } => {
+        Cmd::Ls {
+            deleted,
+            project,
+            sort,
+            json,
+        } => {
             r.settle()?;
-            list_sessions(&r, deleted, json)?;
+            list_sessions(&r, deleted, project.as_deref(), sort == "attention", json)?;
         }
         Cmd::Show { session } => {
             r.refresh()?;
@@ -386,11 +406,52 @@ fn run(cli: Cli) -> Result<()> {
             let s = r.resolve(&session, false)?;
             r.set_unread(&s.id, true)?;
         }
+        Cmd::Doctor { fix, yes } => {
+            let mut diagnosis = r.diagnose()?;
+            if fix && !diagnosis.orphans.is_empty() {
+                let question =
+                    format!("Kill {} orphaned tmux session(s)?", diagnosis.orphans.len());
+                if confirm(&question, yes)? {
+                    let killed = r.kill_orphans()?;
+                    println!("Killed {killed} orphaned tmux session(s).\n");
+                    diagnosis = r.diagnose()?;
+                }
+            }
+            let tty = io::stdout().is_terminal();
+            for line in &diagnosis.lines {
+                println!("{}", doctor_line(line, tty));
+            }
+            if diagnosis.problems > 0 {
+                return Err(anyhow::anyhow!("{} problem(s)", diagnosis.problems));
+            }
+        }
         Cmd::Events { follow, session } => events(&r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } => {}
     }
     Ok(())
+}
+
+/// A diagnosis line for a terminal (coloured) or a pipe (plain, with markers).
+fn doctor_line(line: &doctor::Line, tty: bool) -> String {
+    use doctor::Level;
+    let (color, mark) = match line.level {
+        Level::Heading => ("1", ""),
+        Level::Info => ("", " "),
+        Level::Ok => ("32", "✓"),
+        Level::Note => ("2", "·"),
+        Level::Problem => ("31", "✗"),
+    };
+    let text = if line.level == Level::Heading || line.text.is_empty() {
+        line.text.clone()
+    } else {
+        format!("{mark}{}", &line.text[1..])
+    };
+    if tty && !color.is_empty() {
+        format!("\x1b[{color}m{text}\x1b[0m")
+    } else {
+        text
+    }
 }
 
 /// Asks before (re)starting an agent that can't resume its conversation.
@@ -431,23 +492,42 @@ fn list_projects(r: &Roster) -> Result<()> {
         .iter()
         .map(|p| {
             let count = sessions.iter().filter(|s| s.project_id == p.id).count();
+            let agent = p.agent.as_deref().unwrap_or(agent::CLAUDE);
+            let defaults = [Some(agent), p.model.as_deref(), p.effort.as_deref()]
+                .into_iter()
+                .flatten();
             vec![
                 p.name.clone(),
                 p.origin.display().to_string(),
                 count.to_string(),
+                defaults.collect::<Vec<_>>().join(" · "),
             ]
         })
         .collect();
-    print_table(&["PROJECT", "ORIGIN", "SESSIONS"], &rows);
+    print_table(&["PROJECT", "ORIGIN", "SESSIONS", "DEFAULTS"], &rows);
     Ok(())
 }
 
-fn list_sessions(r: &Roster, deleted: bool, json: bool) -> Result<()> {
-    let sessions: Vec<Session> = r
+fn list_sessions(
+    r: &Roster,
+    deleted: bool,
+    project: Option<&str>,
+    by_attention: bool,
+    json: bool,
+) -> Result<()> {
+    if let Some(name) = project
+        && !r.projects()?.iter().any(|p| p.name == name)
+    {
+        bail!("no project {name:?}");
+    }
+    let mut sessions: Vec<Session> = r
         .sessions(deleted)?
         .into_iter()
-        .filter(|s| s.deleted_at.is_some() == deleted)
+        .filter(|s| s.deleted_at.is_some() == deleted && project.is_none_or(|p| s.project == p))
         .collect();
+    if by_attention {
+        sessions.sort_by_key(|s| (s.attention(), std::cmp::Reverse(s.state_since)));
+    }
     if json {
         let items: Vec<_> = sessions
             .iter()
@@ -456,7 +536,8 @@ fn list_sessions(r: &Roster, deleted: bool, json: bool) -> Result<()> {
                     "id": s.id, "project": s.project, "name": s.name, "agent": s.agent,
                     "state": s.state.as_str(), "unread": s.unread, "exit_status": s.exit_status,
                     "conversation_id": s.conversation_id, "workdir": s.workdir, "deleted_at": s.deleted_at,
-                    "title": s.title, "model": s.model, "effort": s.effort,
+                    "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
+                    "pending_prompt": s.pending_prompt.is_some(),
                 })
             })
             .collect();
@@ -471,25 +552,56 @@ fn list_sessions(r: &Roster, deleted: bool, json: bool) -> Result<()> {
         }
         return Ok(());
     }
+    let now = util::now_ms();
     let rows: Vec<Vec<String>> = sessions
         .iter()
         .map(|s| {
             let state = match (s.state, s.exit_status) {
                 (State::Stopped, Some(code)) if code != 0 => format!("stopped (exit {code})"),
-                (state, _) => state.as_str().to_string(),
+                (State::Working, _) => format!(
+                    "working {}",
+                    util::clock(now - s.state_since.unwrap_or(s.created_at))
+                ),
+                (state, _) => format!(
+                    "{} {}",
+                    state.as_str(),
+                    util::ago(now - s.state_since.unwrap_or(s.created_at))
+                ),
             };
             let marker = if s.unread { "●" } else { " " };
+            let agent = [
+                Some(s.agent.as_str()),
+                s.model.as_deref(),
+                s.effort.as_deref(),
+            ]
+            .into_iter()
+            .flatten();
             vec![
                 s.project.clone(),
                 s.name.clone(),
                 format!("{marker} {state}"),
-                s.agent.clone(),
+                cut(s.title.as_deref().unwrap_or("-"), 40),
+                agent.collect::<Vec<_>>().join(" · "),
                 s.id.clone(),
             ]
         })
         .collect();
-    print_table(&["PROJECT", "SESSION", "  STATE", "AGENT", "ID"], &rows);
+    print_table(
+        &["PROJECT", "SESSION", "  STATE", "TITLE", "AGENT", "ID"],
+        &rows,
+    );
     Ok(())
+}
+
+/// `s` cut to `max` characters, with "…" if it was longer.
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars()
+        .take(max - 1)
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 fn print_table(header: &[&str], rows: &[Vec<String>]) {

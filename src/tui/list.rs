@@ -88,21 +88,10 @@ pub struct Options<'a> {
     pub filter: Option<i64>,
 }
 
-/// Attention order: blocked on the user, then unread, idle, working, stopped.
-fn rank(s: &Session) -> u8 {
-    match (s.state, s.unread) {
-        (State::NeedsInput, _) => 0,
-        (State::Idle, true) => 1,
-        (State::Idle, false) => 2,
-        (State::Working, _) => 3,
-        (State::Stopped, _) => 4,
-    }
-}
-
 /// Most attention first, then the most recent state change first. A working
 /// session's state changes only when its turn starts, so cards don't jump around.
 fn sort(sessions: &mut [&Session]) {
-    sessions.sort_by_key(|s| (rank(s), Reverse(s.state_since)));
+    sessions.sort_by_key(|s| (s.attention(), Reverse(s.state_since)));
 }
 
 fn entry(s: &Session) -> Entry {

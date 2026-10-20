@@ -53,6 +53,7 @@ pub enum Action {
     FilterProject,
     ToggleGroup,
     ShowDeleted,
+    ShowServer,
 }
 
 impl Action {
@@ -78,6 +79,7 @@ impl Action {
             Action::FilterProject => "show only this",
             Action::ToggleGroup => "group by project",
             Action::ShowDeleted => "deleted sessions",
+            Action::ShowServer => "tmux server",
         }
     }
 }
@@ -271,6 +273,7 @@ impl Keymap {
         let (t, k) = ("keys.view", &keys.view);
         view.bind(t, "group", &k.group, Action::ToggleGroup, &mut labels)?;
         view.bind(t, "deleted", &k.deleted, Action::ShowDeleted, &mut labels)?;
+        view.bind(t, "server", &k.server, Action::ShowServer, &mut labels)?;
 
         let menus = HashMap::from([
             (Menu::Session, session),

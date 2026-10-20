@@ -111,6 +111,17 @@ impl Session {
         }
     }
 
+    /// Attention order: blocked on the user, then unread, idle, working, stopped.
+    pub fn attention(&self) -> u8 {
+        match (self.state, self.unread) {
+            (State::NeedsInput, _) => 0,
+            (State::Idle, true) => 1,
+            (State::Idle, false) => 2,
+            (State::Working, _) => 3,
+            (State::Stopped, _) => 4,
+        }
+    }
+
     /// The title if the agent has set one, else the session's name.
     pub fn display_title(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.name)

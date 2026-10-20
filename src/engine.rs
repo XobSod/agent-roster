@@ -27,7 +27,7 @@ pub struct Roster {
     pub paths: Paths,
     pub config: Config,
     pub db: Db,
-    tmux: Tmux,
+    pub(crate) tmux: Tmux,
     exe: PathBuf,
 }
 

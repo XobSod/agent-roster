@@ -20,6 +20,8 @@ const MESSAGE_TTL: Duration = Duration::from_secs(6);
 pub enum Mode {
     Live,
     Deleted,
+    /// The tmux server and database report.
+    Server,
 }
 
 pub enum Dialog {
@@ -83,6 +85,7 @@ pub enum Op {
         effort: Option<String>,
     },
     RemoveProject(String),
+    KillOrphans,
     Quit,
 }
 
@@ -110,6 +113,11 @@ pub struct App {
     pub dialog: Option<Dialog>,
     /// The selected session's screen, or information about the selection.
     pub preview: Text<'static>,
+    /// The server view's report, its orphan count, and how far it's scrolled.
+    pub report: Vec<crate::doctor::Line>,
+    pub orphans: usize,
+    pub problems: usize,
+    pub report_scroll: usize,
     message: Option<Message>,
     pub projects: Vec<Project>,
     /// Live and deleted.
@@ -136,6 +144,10 @@ impl App {
             help: false,
             dialog: None,
             preview: Text::default(),
+            report: Vec::new(),
+            orphans: 0,
+            problems: 0,
+            report_scroll: 0,
             message: None,
             projects: Vec::new(),
             sessions: Vec::new(),
@@ -177,6 +189,15 @@ impl App {
                 list::live(&self.projects, &self.sessions, &opts)
             }
             Mode::Deleted => list::deleted(&self.sessions),
+            // The list isn't shown; keep the live one for coming back.
+            Mode::Server => {
+                let opts = list::Options {
+                    grouped: self.grouped,
+                    folded: &self.folded,
+                    filter: self.filter,
+                };
+                list::live(&self.projects, &self.sessions, &opts)
+            }
         };
         let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
         // A selected session that moved into a folded group: select that group.
@@ -235,10 +256,23 @@ impl App {
 
     pub fn set_mode(&mut self, mode: Mode) {
         if self.mode != mode {
+            let keep = self.selected_key();
             self.mode = mode;
-            self.selected = 0;
+            self.report_scroll = 0;
+            if mode == Mode::Deleted {
+                self.selected = 0;
+            } else if self.select_next.is_none() {
+                // Back from another view: where we were.
+                self.select_next = keep;
+            }
             self.rebuild();
         }
+    }
+
+    pub fn set_report(&mut self, diagnosis: crate::doctor::Diagnosis) {
+        self.report = diagnosis.lines;
+        self.orphans = diagnosis.orphans.len();
+        self.problems = diagnosis.problems;
     }
 
     pub fn flash(&mut self, text: impl Into<String>) {
@@ -273,12 +307,16 @@ impl App {
                 actions
             }
             Mode::Deleted => vec![(Action::Confirm, "restore")],
+            Mode::Server if self.orphans > 0 => {
+                vec![(Action::Confirm, "kill orphans"), (Action::Down, "scroll")]
+            }
+            Mode::Server => vec![(Action::Down, "scroll")],
         };
         let mut hints: Vec<(String, &'static str)> = actions
             .into_iter()
             .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
             .collect();
-        if self.mode == Mode::Deleted {
+        if self.mode != Mode::Live {
             hints.push(("Esc".into(), "back"));
         }
         for (a, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
@@ -301,7 +339,7 @@ impl App {
             // Anything that isn't one of the menu's keys just closes it.
             return self.keymap.menu(menu, &e).and_then(|a| self.act(a));
         }
-        if self.mode == Mode::Deleted && e.code == KeyCode::Esc {
+        if self.mode != Mode::Live && e.code == KeyCode::Esc {
             self.set_mode(Mode::Live);
             return None;
         }
@@ -310,6 +348,9 @@ impl App {
     }
 
     fn act(&mut self, action: Action) -> Option<Op> {
+        if self.mode == Mode::Server {
+            return self.act_in_server_view(action);
+        }
         match action {
             Action::Up => self.selected = self.selected.saturating_sub(1),
             Action::Down => {
@@ -335,6 +376,7 @@ impl App {
                     Mode::Live
                 });
             }
+            Action::ShowServer => self.set_mode(Mode::Server),
             _ if self.mode == Mode::Deleted => {
                 let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
                 self.fail(format!(
@@ -367,6 +409,36 @@ impl App {
             | Action::ToggleRead => {
                 return self.session_action(action);
             }
+        }
+        None
+    }
+
+    /// In the server view: scroll, kill orphans, or leave.
+    fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
+        match action {
+            Action::Up => self.report_scroll = self.report_scroll.saturating_sub(1),
+            Action::Down => {
+                self.report_scroll =
+                    (self.report_scroll + 1).min(self.report.len().saturating_sub(1))
+            }
+            Action::Confirm if self.orphans > 0 => {
+                let question = format!(
+                    "Kill {} orphaned tmux session(s)? Their programs end.",
+                    self.orphans
+                );
+                self.confirm(question, Op::KillOrphans);
+            }
+            Action::Confirm => self.flash("No orphaned tmux sessions to remove"),
+            Action::Quit => return Some(Op::Quit),
+            Action::Help => self.help = true,
+            Action::Open(menu) => self.menu = Some(menu),
+            Action::ShowServer => self.set_mode(Mode::Live),
+            Action::ShowDeleted => self.set_mode(Mode::Deleted),
+            Action::ToggleGroup => {
+                self.grouped = !self.grouped;
+                self.set_mode(Mode::Live);
+            }
+            _ => self.fail("This is the server view: Esc goes back to the sessions"),
         }
         None
     }
@@ -696,6 +768,7 @@ impl App {
                 self.chord(Menu::Session, Action::NewSession)
             )),
             Mode::Deleted => Text::from("No deleted sessions."),
+            Mode::Server => Text::default(),
         }
     }
 }
@@ -958,6 +1031,35 @@ mod tests {
         }
         assert_eq!(app.on_key(key(KeyCode::Enter)), None);
         assert_eq!(keys(&mut app, "y"), Some(Op::Attach("g1".into())));
+    }
+
+    #[test]
+    fn server_view_scrolls_kills_orphans_and_goes_back() {
+        use crate::doctor::{Diagnosis, Level, Line};
+        let mut app = app();
+        select(&mut app, "s1");
+        keys(&mut app, "vt");
+        assert_eq!(app.mode, Mode::Server);
+        let line = |text: &str| Line {
+            level: Level::Info,
+            text: text.into(),
+        };
+        app.set_report(Diagnosis {
+            lines: vec![line("a"), line("b")],
+            orphans: vec!["r-x".into()],
+            problems: 1,
+        });
+        keys(&mut app, "jjj");
+        assert_eq!(app.report_scroll, 1);
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
+        assert_eq!(keys(&mut app, "y"), Some(Op::KillOrphans));
+        keys(&mut app, "sx");
+        assert!(app.message().unwrap().error);
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Live);
+        // The selection is where it was.
+        assert_eq!(app.selected_session().unwrap().id, "s1");
     }
 
     #[test]

@@ -84,6 +84,7 @@ pub struct ViewKeys {
     pub menu: KeyList,
     pub group: KeyList,
     pub deleted: KeyList,
+    pub server: KeyList,
 }
 
 fn keys(names: &[&str]) -> KeyList {
@@ -141,6 +142,7 @@ impl Default for ViewKeys {
             menu: keys(&["v"]),
             group: keys(&["p"]),
             deleted: keys(&["d"]),
+            server: keys(&["t"]),
         }
     }
 }

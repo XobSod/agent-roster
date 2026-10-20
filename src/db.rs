@@ -344,6 +344,35 @@ impl Db {
         events_after(&self.conn, after, session, limit)
     }
 
+    /// Reported events not applied yet, and all events kept.
+    pub fn event_counts(&self) -> Result<(i64, i64)> {
+        let applied: i64 = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'applied_event'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let waiting = self.conn.query_row(
+            "SELECT count(*) FROM events WHERE id > ?1",
+            [applied],
+            |r| r.get(0),
+        )?;
+        let kept = self
+            .conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+        Ok((waiting, kept))
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
     /// The id of the `n`th newest event (to show the last few), or 0.
     pub fn event_id_before_last(&self, n: i64, session: Option<&str>) -> Result<i64> {
         Ok(self

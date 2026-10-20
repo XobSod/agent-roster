@@ -74,9 +74,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                     reload(roster, app);
                     last_reload = Instant::now();
                 }
-                None if app.selected_key() != selected || app.mode != mode => {
-                    update_preview(roster, app)
-                }
+                None if app.mode != mode => reload(roster, app),
+                None if app.selected_key() != selected => update_preview(roster, app),
                 None => {}
             }
         }
@@ -89,7 +88,13 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
 
 /// Folds hook events, checks the agents, and reloads the data from the database.
 fn reload(roster: &mut Roster, app: &mut App) {
-    if let Err(e) = roster.refresh() {
+    // The server report refreshes too.
+    let refreshed = if app.mode == Mode::Server {
+        roster.diagnose().map(|d| app.set_report(d))
+    } else {
+        roster.refresh()
+    };
+    if let Err(e) = refreshed {
         app.fail(format!("{e:#}"));
     }
     match (roster.projects(), roster.sessions(true)) {
@@ -273,6 +278,9 @@ fn perform(
                 },
             )
             .map(|p| format!("Saved project {}", p.name)),
+        Op::KillOrphans => roster
+            .kill_orphans()
+            .map(|n| format!("Killed {n} orphaned tmux session(s)")),
         Op::RemoveProject(name) => roster
             .remove_project(&name)
             .map(|_| format!("Removed project {name}")),

@@ -24,7 +24,8 @@ Run `roster` for the TUI: sessions on the left, the selected agent's screen on t
 
 Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds
 a heading); coming back from an agent you gave a task, the cursor stays where it was,
-on the next one waiting (after only reading, it stays on that agent). `q` quits
+on the next one waiting (after only reading, it stays on that agent). `q` quits (in
+the projects and server views it goes back, like `Esc`)
 and `?` shows every key. Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |

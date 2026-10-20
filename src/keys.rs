@@ -81,7 +81,7 @@ impl Action {
             Action::Collapse => "fold",
             Action::Expand => "unfold",
             Action::Confirm => "attach / open",
-            Action::Quit => "quit",
+            Action::Quit => "quit (in a view: back)",
             Action::Help => "help",
             Action::Open(menu) => menu.name(),
             Action::NewSession | Action::NewProject => "new",

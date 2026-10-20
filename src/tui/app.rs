@@ -403,10 +403,14 @@ impl App {
             .into_iter()
             .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
             .collect();
-        if self.mode != Mode::Live {
+        // In a view the quit key goes back, like Esc.
+        let quit = if self.mode == Mode::Live {
+            Some((Action::Quit, "quit"))
+        } else {
             hints.push(("Esc".into(), "back"));
-        }
-        for (a, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
+            None
+        };
+        for (a, what) in [(Action::Help, "help")].into_iter().chain(quit) {
             if let Some(key) = self.keymap.label(a) {
                 hints.push((key.to_string(), what));
             }
@@ -442,9 +446,7 @@ impl App {
             push(km.label(Action::Open(menu)).map(String::from), menu.name());
         }
         push(Some("Esc".into()), "back");
-        for (action, what) in [(Action::Help, "help"), (Action::Quit, "quit")] {
-            push(km.label(action).map(String::from), what);
-        }
+        push(km.label(Action::Help).map(String::from), "help");
         hints
     }
 
@@ -567,8 +569,9 @@ impl App {
             | Action::ToggleGroup
             | Action::ShowServer
             | Action::Open(_)
-            | Action::Help
-            | Action::Quit => return None,
+            | Action::Help => return None,
+            // Only the session list quits; here it's back, like Esc.
+            Action::Quit => self.set_mode(Mode::Live),
             _ => self.fail("This is the projects view: Esc goes back to the sessions"),
         }
         Some(None)
@@ -590,7 +593,8 @@ impl App {
                 self.confirm(question, Op::KillOrphans);
             }
             Action::Confirm => self.flash("No orphaned tmux sessions to remove"),
-            Action::Quit => return Some(Op::Quit),
+            // Only the session list quits; here it's back, like Esc.
+            Action::Quit => self.set_mode(Mode::Live),
             Action::Help => self.help = true,
             Action::Open(menu) => self.menu = Some(menu),
             Action::ShowServer => self.set_mode(Mode::Live),
@@ -1601,6 +1605,20 @@ mod tests {
         assert!(app.help);
         assert_eq!(keys(&mut app, "q"), None);
         assert!(!app.help);
+        assert_eq!(keys(&mut app, "q"), Some(Op::Quit));
+    }
+
+    #[test]
+    fn quit_only_quits_from_the_session_list() {
+        let mut app = app();
+        for view in ["pl", "vt"] {
+            keys(&mut app, view);
+            assert_ne!(app.mode, Mode::Live);
+            assert!(!app.hints().iter().any(|(_, what)| *what == "quit"));
+            assert_eq!(keys(&mut app, "q"), None, "{view}");
+            assert_eq!(app.mode, Mode::Live, "{view}");
+        }
+        assert!(app.hints().contains(&("q".to_string(), "quit")));
         assert_eq!(keys(&mut app, "q"), Some(Op::Quit));
     }
 

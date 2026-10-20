@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Text;
 
-use super::form::{Form, Outcome};
+use super::form::{self, Form, Outcome};
 use super::list::{self, Entry, EntryKey, Group, Shelf};
+use super::picker::{Picked, Picker};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
 use crate::paths::PROJECT_ENV;
@@ -35,6 +36,8 @@ pub enum Dialog {
         purpose: Purpose,
     },
     Form(Form),
+    /// Choosing a conversation to adopt.
+    Picker(Picker),
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +75,18 @@ pub enum Op {
         effort: Option<String>,
     },
     RetitleSession(String),
+    /// Look for conversations to adopt, then pick one.
+    FindConversations,
+    Adopt {
+        conversation: String,
+        project: String,
+        name: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        fork: bool,
+        /// Even though it's open in Claude.
+        force: bool,
+    },
     AddProject {
         name: String,
         path: String,
@@ -424,6 +439,7 @@ impl App {
             Action::FilterProject => self.toggle_filter(),
             Action::RemoveProject => self.remove_project(),
             Action::NewSession => self.new_session(),
+            Action::Adopt => return Some(Op::FindConversations),
             Action::Start
             | Action::Stop
             | Action::Restart
@@ -572,6 +588,36 @@ impl App {
         self.dialog = Some(Dialog::Form(form));
     }
 
+    /// Offers `found` to pick from.
+    pub fn pick_conversation(&mut self, found: Vec<crate::engine::Adoptable>) {
+        if found.is_empty() {
+            self.flash("No Claude conversations to adopt");
+            return;
+        }
+        self.dialog = Some(Dialog::Picker(Picker::new(found)));
+    }
+
+    /// The form for adopting `a`, or for a deleted session's conversation, restoring it.
+    fn adopt(&mut self, a: crate::engine::Adoptable) {
+        match a.deleted {
+            Some(s) => self.confirm(
+                format!(
+                    "That conversation is the deleted session {}. Restore it?",
+                    s.label()
+                ),
+                Op::Restore {
+                    id: s.id,
+                    name: None,
+                },
+            ),
+            None => {
+                self.dialog = Some(Dialog::Form(
+                    Form::adopt(&a).with_model_names(&self.model_names),
+                ))
+            }
+        }
+    }
+
     fn agent_names(&self) -> Vec<String> {
         self.agents.iter().map(|(name, _)| name.clone()).collect()
     }
@@ -651,7 +697,32 @@ impl App {
                     None
                 }
                 Outcome::Cancel => None,
+                // Two Claudes would write the same conversation: ask.
+                Outcome::Submit(op @ Op::Adopt { fork: false, .. })
+                    if let form::Purpose::Adopt {
+                        open_in: Some(pid), ..
+                    } = form.purpose =>
+                {
+                    self.confirm(
+                        format!(
+                            "It's open in Claude (pid {pid}): two Claudes would write one conversation. Adopt it anyway?"
+                        ),
+                        op,
+                    );
+                    None
+                }
                 Outcome::Submit(op) => Some(op),
+            },
+            Dialog::Picker(mut picker) => match picker.on_key(e) {
+                Picked::Continue => {
+                    self.dialog = Some(Dialog::Picker(picker));
+                    None
+                }
+                Picked::Cancel => None,
+                Picked::Pick(a) => {
+                    self.adopt(*a);
+                    None
+                }
             },
             Dialog::Confirm { question, op } => match e.code {
                 KeyCode::Char('y' | 'Y') => Some(op),
@@ -1085,6 +1156,75 @@ mod tests {
         assert_eq!(app.mode, Mode::Live);
         // The selection is where it was.
         assert_eq!(app.selected_session().unwrap().id, "s1");
+    }
+
+    #[test]
+    fn adopting_picks_a_conversation_then_fills_in_a_form() {
+        use crate::tui::picker::tests::adoptable;
+        let mut app = app();
+        assert_eq!(keys(&mut app, "sa"), Some(Op::FindConversations));
+        let mut open = adoptable("c2", "Busy elsewhere", Some("alpha"));
+        open.conversation.open_in = Some(42);
+        let mut deleted = adoptable("c3", "Old one", Some("alpha"));
+        deleted.deleted = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
+        app.pick_conversation(vec![adoptable("c1", "Fix the parser", None), open, deleted]);
+        assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if !p.all));
+
+        // The one in a project: its project's form; submitted, it asks first.
+        app.on_key(key(KeyCode::Enter));
+        let Some(Dialog::Form(form)) = &app.dialog else {
+            panic!("no form")
+        };
+        assert_eq!(form.title, "Adopt a conversation");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        let Some(Dialog::Confirm { question, op }) = &app.dialog else {
+            panic!("no confirmation")
+        };
+        assert!(question.contains("open in Claude (pid 42)"), "{question}");
+        assert!(matches!(
+            op,
+            Op::Adopt {
+                force: true,
+                fork: false,
+                ..
+            }
+        ));
+        app.on_key(key(KeyCode::Esc));
+
+        // Outside the projects (Tab): a new project, named after its directory.
+        app.pick_conversation(vec![adoptable("c1", "Fix the parser", None)]);
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            None,
+            "the form opens first"
+        );
+        assert_eq!(
+            app.on_key(key(KeyCode::Enter)),
+            Some(Op::Adopt {
+                conversation: "c1".into(),
+                project: "elsewhere".into(),
+                name: None,
+                model: None,
+                effort: None,
+                fork: false,
+                force: false,
+            })
+        );
+
+        // A deleted session's: restore it instead.
+        let mut deleted = adoptable("c3", "Old one", Some("alpha"));
+        deleted.deleted = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
+        app.pick_conversation(vec![deleted]);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            keys(&mut app, "y"),
+            Some(Op::Restore {
+                id: "s3".into(),
+                name: None
+            })
+        );
+        app.pick_conversation(Vec::new());
+        assert!(app.dialog.is_none() && !app.message().unwrap().error);
     }
 
     #[test]

@@ -79,6 +79,24 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// A project name from a directory: its last part, with anything a name can't
+/// hold replaced by '-'.
+pub fn directory_name(directory: &std::path::Path) -> String {
+    let base = directory
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    base.unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 /// Local wall-clock time of `ms` as HH:MM:SS.
 pub fn local_time(ms: i64) -> String {
     let secs = (ms / 1000) as libc::time_t;

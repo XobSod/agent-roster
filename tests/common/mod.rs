@@ -66,6 +66,45 @@ impl TestEnv {
         self.path("config/agent-roster")
     }
 
+    /// Claude's own directory, for conversations started outside roster.
+    pub fn claude_dir(&self) -> PathBuf {
+        self.path("claude")
+    }
+
+    /// A conversation Claude kept, as if run in `cwd`, with Claude's title.
+    pub fn conversation(&self, id: &str, cwd: &std::path::Path, title: &str) -> PathBuf {
+        let folder = self.claude_dir().join("projects").join("-somewhere");
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(format!("{id}.jsonl"));
+        let lines = [
+            serde_json::json!({"type": "user", "cwd": cwd, "message": {"content": "hello"}}),
+            serde_json::json!({"type": "assistant", "cwd": cwd, "message": {"id": "m1", "model": "claude-sonnet-5-5"}}),
+            serde_json::json!({"type": "ai-title", "aiTitle": title}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Registers conversation `id` as open in a running Claude (a process whose
+    /// command line says claude), the way Claude does. Kill it when done.
+    pub fn open_in_claude(&self, id: &str) -> std::process::Child {
+        let bin = self.path("claude-bin/claude");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let child = Command::new("sh").arg(&bin).spawn().unwrap();
+        let sessions = self.claude_dir().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let pid = child.id();
+        fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"{id}"}}"#),
+        )
+        .unwrap();
+        child
+    }
+
     pub fn db(&self) -> PathBuf {
         self.path("state/agent-roster/roster.db")
     }
@@ -76,6 +115,7 @@ impl TestEnv {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("ROSTER_TMUX_SOCKET", &self.socket)
+            .env("CLAUDE_CONFIG_DIR", self.claude_dir())
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("ROSTER_SESSION")
@@ -87,10 +127,11 @@ impl TestEnv {
     /// The same as a shell command line, for running roster in a terminal.
     pub fn shell_command(&self) -> String {
         format!(
-            "env -u TMUX -u TMUX_PANE XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' '{}'",
+            "env -u TMUX -u TMUX_PANE XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' CLAUDE_CONFIG_DIR='{}' '{}'",
             self.path("config").display(),
             self.path("state").display(),
             self.socket,
+            self.claude_dir().display(),
             env!("CARGO_BIN_EXE_roster"),
         )
     }

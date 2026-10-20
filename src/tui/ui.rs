@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, Dialog, Mode};
 use super::form::{Form, Kind};
 use super::list::{Entry, Group};
+use super::picker::Picker;
 use super::theme::{
     self, ACCENT, CLAUDE, ERROR, FAINT, INPUT, MUTED, SELECTED_BG, UNREAD, WORKING,
 };
@@ -651,8 +652,10 @@ fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     match dialog {
         Dialog::Form(form) => draw_form(f, form, area),
+        Dialog::Picker(picker) => draw_picker(f, picker, area),
         Dialog::Confirm { question, .. } => {
-            let rect = centered(area, width, 6);
+            let lines = wrapped_lines(question, width.saturating_sub(2) as usize);
+            let rect = centered(area, width, lines as u16 + 4);
             let key = |k: &'static str| {
                 Span::styled(k, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
             };
@@ -795,6 +798,127 @@ fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
     }
 }
 
+/// Conversations to adopt: a filter line, one row per conversation (age, project,
+/// title, and whether it's open in Claude or a deleted session's), and where the
+/// selected one ran.
+fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
+    let now = now_ms();
+    let shown = picker.shown();
+    let rows = (area.height.saturating_sub(8) as usize).clamp(1, 14);
+    // Filter, blank, the rows, blank, two lines about the selected one, borders.
+    let height = (rows.min(shown.len().max(1)) + 7) as u16;
+    let rect = centered(area, area.width.saturating_sub(4).min(100), height);
+    let toggle = if picker.all {
+        "Tab: only your projects"
+    } else {
+        "Tab: all"
+    };
+    let hint = format!(" Enter adopt · {toggle} · Esc cancel ");
+    let block = popup_block("Adopt a conversation")
+        .title_bottom(Line::styled(hint, Style::new().fg(MUTED)).right_aligned());
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    let width = inner.width as usize;
+
+    let scope = match (picker.all, picker.outside()) {
+        (true, _) => "all of Claude's conversations".to_string(),
+        (false, 0) => "in your projects".to_string(),
+        (false, n) => format!("in your projects ({n} more elsewhere)"),
+    };
+    let mut lines = vec![
+        Line::from(fit(
+            width,
+            vec![
+                Span::styled("› ", Style::new().fg(ACCENT)),
+                Span::raw(picker.query.clone()),
+            ],
+            vec![Span::styled(scope, Style::new().fg(FAINT)), Span::raw(" ")],
+        )),
+        Line::default(),
+    ];
+    if shown.is_empty() {
+        lines.push(Line::styled("  nothing matches", Style::new().fg(MUTED)));
+    }
+    let first = picker.selected.saturating_sub(rows - 1);
+    let project_width = shown
+        .iter()
+        .map(|a| {
+            a.project
+                .as_ref()
+                .map_or(a.new_project.width() + 1, |p| p.name.width())
+        })
+        .max()
+        .unwrap_or(0)
+        .min(18);
+    for (i, a) in shown.iter().enumerate().skip(first).take(rows) {
+        let c = &a.conversation;
+        let selected = i == picker.selected;
+        let (project, project_style) = match &a.project {
+            Some(p) => (
+                p.name.clone(),
+                Style::new().fg(theme::project_color(&p.name)),
+            ),
+            None => (format!("+{}", a.new_project), Style::new().fg(MUTED)),
+        };
+        let what = c.label();
+        let left = vec![
+            Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ACCENT)),
+            Span::styled(
+                format!("{:>4}  ", crate::util::ago(now - c.modified)),
+                Style::new().fg(MUTED),
+            ),
+            Span::styled(
+                format!("{:<project_width$}  ", truncate(&project, project_width)),
+                project_style,
+            ),
+            Span::raw(what),
+        ];
+        let right = match (&a.deleted, c.open_in) {
+            (Some(_), _) => vec![Span::styled("deleted session ", Style::new().fg(MUTED))],
+            (None, Some(_)) => vec![Span::styled("open in Claude ", Style::new().fg(INPUT))],
+            (None, None) => vec![],
+        };
+        let mut line = Line::from(fit(width, left, right));
+        if selected {
+            line = line.style(Style::new().bg(SELECTED_BG));
+        }
+        lines.push(line);
+    }
+    lines.push(Line::default());
+    if let Some(a) = shown.get(picker.selected) {
+        let c = &a.conversation;
+        let branch = c
+            .branch
+            .as_ref()
+            .map_or(String::new(), |b| format!(" ({b})"));
+        let short_id: String = c.id.chars().take(8).collect();
+        let place = match &a.project {
+            Some(_) => String::new(),
+            None => format!(" · new project {}", a.new_project),
+        };
+        lines.push(Line::styled(
+            truncate(
+                &format!("  {}{branch} · {short_id}{place}", c.cwd.display()),
+                width,
+            ),
+            Style::new().fg(MUTED),
+        ));
+        if let Some(prompt) = &c.last_prompt
+            && c.label() != crate::adopt::one_line(prompt)
+        {
+            let prompt = crate::adopt::one_line(prompt);
+            lines.push(Line::styled(
+                truncate(&format!("  last prompt: {prompt}"), width),
+                Style::new().fg(FAINT),
+            ));
+        }
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+    let query_width = picker.query.width().min(width.saturating_sub(3));
+    f.set_cursor_position((inner.x + 2 + query_width as u16, inner.y));
+}
+
 /// The end of `s` if it's wider than `width`, with "…" in front.
 fn tail(s: &str, width: usize) -> String {
     if s.width() <= width {
@@ -812,6 +936,22 @@ fn tail(s: &str, width: usize) -> String {
 }
 
 // Helpers
+
+/// How many lines `text` takes wrapped at word boundaries to `width`.
+fn wrapped_lines(text: &str, width: usize) -> usize {
+    let mut lines = 1;
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w = word.width();
+        if used > 0 && used + 1 + w > width {
+            lines += 1;
+            used = w;
+        } else {
+            used += w + usize::from(used > 0);
+        }
+    }
+    lines
+}
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
@@ -957,6 +1097,60 @@ mod tests {
         assert!(screen.contains("n new"), "{screen}");
         assert!(screen.contains("x stop"), "{screen}");
         assert!(screen.contains("d delete"), "{screen}");
+    }
+
+    #[test]
+    fn the_picker_shows_conversations_and_where_they_ran() {
+        use crate::tui::picker::tests::adoptable;
+        let mut app = app();
+        let mut open = adoptable("c2", "Busy elsewhere", Some("alpha"));
+        open.conversation.open_in = Some(42);
+        open.conversation.last_prompt = Some("and the\ntests".into());
+        app.pick_conversation(vec![open, adoptable("c1", "Fix the parser", None)]);
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Adopt a conversation"), "{screen}");
+        assert!(
+            screen.contains("in your projects (1 more elsewhere)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Busy elsewhere"), "{screen}");
+        assert!(screen.contains("open in Claude"), "{screen}");
+        assert!(!screen.contains("Fix the parser"), "{screen}");
+        assert!(screen.contains("/alpha · c2"), "{screen}");
+        assert!(screen.contains("last prompt: and the tests"), "{screen}");
+        assert!(
+            screen.contains("Enter adopt · Tab: all · Esc cancel"),
+            "{screen}"
+        );
+        // Tab: the rest, with the project each would get.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(
+            screen.contains("+elsewhere") && screen.contains("Fix the parser"),
+            "{screen}"
+        );
+        // Picked: the form, with what moving it means.
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("Adopting   Busy elsewhere"), "{screen}");
+        assert!(
+            screen.contains("it's open in Claude (pid 42), close it there"),
+            "{screen}"
+        );
+        assert!(screen.contains("Enter adopt"), "{screen}");
+    }
+
+    #[test]
+    fn long_questions_wrap_and_keep_their_keys() {
+        assert_eq!(wrapped_lines("one two three", 9), 2);
+        assert_eq!(wrapped_lines("one two", 7), 1);
+        let mut app = app();
+        app.dialog = Some(Dialog::Confirm {
+            question: "word ".repeat(40),
+            op: super::super::app::Op::Quit,
+        });
+        let screen = render(&app, 80, 30);
+        assert!(screen.contains("y yes    n no"), "{screen}");
     }
 
     #[test]

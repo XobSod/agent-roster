@@ -48,6 +48,7 @@ pub enum Action {
     Delete,
     ToggleRead,
     Retitle,
+    Adopt,
     NewProject,
     EditProject,
     RemoveProject,
@@ -77,6 +78,7 @@ impl Action {
             Action::Delete => "delete",
             Action::ToggleRead => "read/unread",
             Action::Retitle => "new title",
+            Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
             Action::ToggleGroup => "group by project",
@@ -263,6 +265,7 @@ impl Keymap {
             &mut labels,
         )?;
         session.bind(t, "retitle", &k.retitle, Action::Retitle, &mut labels)?;
+        session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
         session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
 
         let mut project = Table::default();
@@ -380,7 +383,7 @@ mod tests {
             .iter()
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "d"]);
+        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "a", "d"]);
     }
 
     #[test]

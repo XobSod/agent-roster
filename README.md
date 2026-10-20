@@ -27,7 +27,7 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `d` delete |
+| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` delete |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove |
 | `v` view | `p` group by project · `d` deleted sessions (`Enter` restores) · `t` tmux server and database |
 
@@ -39,6 +39,11 @@ New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits)
 carry a default agent, model and effort for their sessions; a new session can also
 get a first prompt, typed into the agent once it's ready.
 
+A Claude conversation started outside roster (plain `claude`, another session manager)
+can be adopted with `s a`: pick it (typing filters, `Tab` shows those outside your
+projects), and it continues as a session here, in its project or a new one for its
+directory. Close it where it's open first, or adopt a copy and leave the original alone.
+
 Everything is also available from the CLI:
 
 ```sh
@@ -49,6 +54,8 @@ roster edit api --model sonnet          # applies on the next start
 roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
 roster retitle api                      # a fresh title from Haiku, from the recent prompts
 roster info api                         # created, prompts, time worked, context, tokens, cost
+roster adopt --list                     # Claude conversations started elsewhere (--all: not only in your projects)
+roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
 roster ls --project myproj --sort attention   # like the TUI's shelves

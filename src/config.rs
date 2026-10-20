@@ -67,6 +67,7 @@ pub struct SessionKeys {
     pub delete: KeyList,
     pub toggle_read: KeyList,
     pub retitle: KeyList,
+    pub adopt: KeyList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +123,7 @@ impl Default for SessionKeys {
             delete: keys(&["d"]),
             toggle_read: keys(&["u"]),
             retitle: keys(&["t"]),
+            adopt: keys(&["a"]),
         }
     }
 }

@@ -5,6 +5,7 @@
 mod app;
 mod form;
 mod list;
+mod picker;
 mod theme;
 mod ui;
 
@@ -23,7 +24,7 @@ use ratatui::crossterm::terminal::{
 use ratatui::text::Text;
 
 use crate::agent;
-use crate::engine::{Defaults, NewSession, Roster};
+use crate::engine::{Adopt, Defaults, NewSession, Roster};
 use crate::keys::{Action, Keymap, Menu};
 use app::{App, Mode, Op};
 use list::{Entry, EntryKey, Group};
@@ -317,6 +318,36 @@ fn perform(
             roster
                 .generate_title(&id)
                 .map(|title| format!("New title: {title}"))
+        }
+        Op::FindConversations => roster.adoptable(true).map(|found| {
+            app.pick_conversation(found);
+            String::new()
+        }),
+        Op::Adopt {
+            conversation,
+            project,
+            name,
+            model,
+            effort,
+            fork,
+            force,
+        } => {
+            busy(terminal, app, format!("Adopting into {project}…"))?;
+            let request = Adopt {
+                conversation,
+                project: Some(project),
+                name,
+                model: Some(model),
+                effort: Some(effort),
+                fork,
+                force,
+            };
+            roster.adopt(request).map(|s| {
+                app.select(EntryKey::Session(s.id.clone()));
+                let key = app.keymap.label(Action::Confirm).unwrap_or("?");
+                let copy = if fork { " as a copy" } else { "" };
+                format!("Adopted {}{copy}; {key} attaches", s.label())
+            })
         }
         Op::KillOrphans => roster
             .kill_orphans()

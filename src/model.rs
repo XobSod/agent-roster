@@ -88,6 +88,9 @@ pub struct Session {
     /// Turns started and time spent working, counted by roster for any agent.
     pub turns: i64,
     pub worked_ms: i64,
+    /// For an adopted copy: the conversation it was copied from, forked again on
+    /// each start until the copy has a transcript of its own.
+    pub fork_from: Option<String>,
 }
 
 /// A status change reported by an agent hook through `roster report <kind>`.
@@ -318,6 +321,7 @@ pub mod tests {
             title_override: None,
             turns: 0,
             worked_ms: 0,
+            fork_from: None,
         }
     }
 

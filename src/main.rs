@@ -1,5 +1,6 @@
 //! roster: a keyboard-first terminal manager for AI coding agent sessions.
 
+mod adopt;
 mod agent;
 mod config;
 mod db;
@@ -26,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use engine::{Defaults, NewSession, Roster};
+use engine::{Adopt, Defaults, NewSession, Roster};
 use model::{Session, State};
 
 #[derive(Parser)]
@@ -63,6 +64,39 @@ enum Cmd {
         /// A first prompt, typed into the agent once it's ready
         #[arg(long)]
         prompt: Option<String>,
+        /// Attach to it right away
+        #[arg(short, long)]
+        attach: bool,
+    },
+    /// Take over a Claude conversation started elsewhere, resuming it here
+    Adopt {
+        /// The conversation's id (4+ characters are enough); without it, lists them
+        conversation: Option<String>,
+        /// List the conversations that can be adopted
+        #[arg(long)]
+        list: bool,
+        /// Also list those outside your projects' directories
+        #[arg(long)]
+        all: bool,
+        /// Project to put it in, created for its directory if new (default: the project
+        /// holding its directory, else a new one named after the directory)
+        #[arg(long)]
+        project: Option<String>,
+        /// Session name (default: claude-1, claude-2, …)
+        #[arg(long)]
+        name: Option<String>,
+        /// Claude model (default: the project's; "default" for Claude's own)
+        #[arg(long)]
+        model: Option<String>,
+        /// Claude effort (default: the project's; "default" for Claude's own)
+        #[arg(long)]
+        effort: Option<String>,
+        /// Adopt a copy and leave the original alone
+        #[arg(long)]
+        fork: bool,
+        /// Adopt it even if it's open in Claude
+        #[arg(short, long)]
+        yes: bool,
         /// Attach to it right away
         #[arg(short, long)]
         attach: bool,
@@ -208,6 +242,13 @@ fn setting(value: Option<String>) -> Option<Option<String>> {
 }
 
 fn main() -> ExitCode {
+    // Like other command-line tools, end quietly when what reads the output goes
+    // away (`roster ls | head`) instead of panicking. Nothing roster writes to
+    // is a pipe it could break otherwise: it only reads from its children.
+    // SAFETY: nothing else runs yet.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("report") {
         report::run(&args[2..]);
@@ -408,6 +449,42 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Cmd::Adopt {
+            conversation: None,
+            all,
+            ..
+        }
+        | Cmd::Adopt {
+            list: true, all, ..
+        } => {
+            list_adoptable(&r, all)?;
+        }
+        Cmd::Adopt {
+            conversation: Some(conversation),
+            project,
+            name,
+            model,
+            effort,
+            fork,
+            yes,
+            attach,
+            ..
+        } => {
+            let s = r.adopt(Adopt {
+                conversation,
+                project,
+                name,
+                model: setting(model),
+                effort: setting(effort),
+                fork,
+                force: yes,
+            })?;
+            let copy = if fork { " as a copy" } else { "" };
+            println!("Adopted {}{copy} ({})", s.label(), s.id);
+            if attach {
+                r.attach(&s.id)?;
+            }
+        }
         Cmd::Info { session } => {
             r.refresh()?;
             let s = r
@@ -450,6 +527,46 @@ fn run(cli: Cli) -> Result<()> {
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } => {}
     }
+    Ok(())
+}
+
+fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
+    let found = r.adoptable(all)?;
+    if found.is_empty() {
+        let hint = if all {
+            ""
+        } else {
+            " in your projects' directories (--all shows the rest)"
+        };
+        println!("No Claude conversations to adopt{hint}.");
+        return Ok(());
+    }
+    let now = util::now_ms();
+    let rows: Vec<Vec<String>> = found
+        .iter()
+        .map(|a| {
+            let c = &a.conversation;
+            let project = match &a.project {
+                Some(p) => p.name.clone(),
+                None => format!("new: {}", a.new_project),
+            };
+            let note = match (&a.deleted, c.open_in) {
+                (Some(s), _) => format!("deleted in roster as {}", s.label()),
+                (None, Some(pid)) => format!("open in Claude (pid {pid})"),
+                (None, None) => String::new(),
+            };
+            let what = c.label();
+            let id: String = c.id.chars().take(8).collect();
+            vec![
+                id,
+                util::ago(now - c.modified),
+                project,
+                cut(&what, 50),
+                note,
+            ]
+        })
+        .collect();
+    print_table(&["ID", "UPDATED", "PROJECT", "TITLE", ""], &rows);
     Ok(())
 }
 
@@ -609,7 +726,7 @@ fn list_sessions(
                 json!({
                     "id": s.id, "project": s.project, "name": s.name, "agent": s.agent,
                     "state": s.state.as_str(), "unread": s.unread, "exit_status": s.exit_status,
-                    "conversation_id": s.conversation_id, "workdir": s.workdir, "deleted_at": s.deleted_at,
+                    "conversation_id": s.conversation_id, "transcript_path": s.transcript_path, "workdir": s.workdir, "deleted_at": s.deleted_at,
                     "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
                     "pending_prompt": s.pending_prompt.is_some(),
                     "running_model": s.running_model, "running_effort": s.running_effort,

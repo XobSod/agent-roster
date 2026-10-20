@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{Event, Project, Session, State};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -49,7 +49,8 @@ CREATE TABLE sessions (
     running_effort    TEXT,
     title_override    TEXT,
     turns             INTEGER NOT NULL DEFAULT 0,
-    worked_ms         INTEGER NOT NULL DEFAULT 0
+    worked_ms         INTEGER NOT NULL DEFAULT 0,
+    fork_from         TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -66,7 +67,7 @@ const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms";
+    s.worked_ms, s.fork_from";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
 
@@ -95,6 +96,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE sessions ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE sessions ADD COLUMN worked_ms INTEGER NOT NULL DEFAULT 0;",
     ),
+    (6, "ALTER TABLE sessions ADD COLUMN fork_from TEXT;"),
 ];
 
 /// Applied events older than this are deleted.
@@ -430,12 +432,17 @@ impl Db {
     }
 
     /// Learns what each alias (or the default) turned out to be from sessions
-    /// that know both; the most recent session wins.
+    /// that know both; the most recent session wins. The default only from a
+    /// model Claude reported on starting: a resumed conversation keeps its own.
     pub fn learn_model_names(&self) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value)
-             SELECT 'model:' || coalesce(model, 'default'), running_model FROM sessions
-             WHERE running_model IS NOT NULL ORDER BY coalesce(state_since, created_at)",
+             SELECT 'model:' || coalesce(model, 'default'), running_model FROM sessions s
+             WHERE running_model IS NOT NULL
+               AND (model IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM events e WHERE e.session_id = s.id AND json_valid(e.payload)
+                   AND json_extract(e.payload, '$.model') = s.running_model))
+             ORDER BY coalesce(state_since, created_at)",
             [],
         )?;
         Ok(())
@@ -522,7 +529,7 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
              baseline_at = ?12, title = ?13, model = ?14, effort = ?15, state_since = ?16,
              pending_prompt = ?17, running_model = ?18, running_effort = ?19, title_override = ?20,
-             turns = ?21, worked_ms = ?22
+             turns = ?21, worked_ms = ?22, fork_from = ?23
          WHERE id = ?1",
         params![
             s.id,
@@ -547,6 +554,7 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             s.title_override,
             s.turns,
             s.worked_ms,
+            s.fork_from,
         ],
     )
     .map_err(|e| match e {
@@ -598,6 +606,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         title_override: r.get(24)?,
         turns: r.get(25)?,
         worked_ms: r.get(26)?,
+        fork_from: r.get(27)?,
     })
 }
 
@@ -752,6 +761,14 @@ mod tests {
             db.session(&s.id).unwrap().running_model.as_deref(),
             Some("claude-opus-5-5[1m]")
         );
+        assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
+        // A model only read from a conversation (say, an adopted one) isn't the default.
+        let mut adopted = session("b");
+        adopted.project_id = s.project_id;
+        adopted.running_model = Some("claude-haiku-5-5".into());
+        adopted.state_since = Some(i64::MAX);
+        db.insert_session(&adopted).unwrap();
+        db.learn_model_names().unwrap();
         assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
     }
 

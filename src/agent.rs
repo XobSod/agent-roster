@@ -138,6 +138,23 @@ fn claude(s: &Session, mut argv: Vec<String>, roster_exe: &Path) -> Launch {
             argv.extend(["--resume".into(), id.clone()]);
             id.clone()
         }
+        // An adopted copy until it has a transcript of its own (Claude writes it
+        // with the first message): fork the original into the copy's id.
+        _ if s.fork_from.is_some() => {
+            let id = s
+                .conversation_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let from = s.fork_from.clone().unwrap_or_default();
+            argv.extend([
+                "--resume".into(),
+                from,
+                "--fork-session".into(),
+                "--session-id".into(),
+                id.clone(),
+            ]);
+            id
+        }
         (existing, _) => {
             let id = existing
                 .clone()
@@ -247,6 +264,35 @@ mod tests {
             settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             "'/my tools/roster' report needs-input"
         );
+    }
+
+    #[test]
+    fn an_adopted_copy_forks_on_its_first_start() {
+        let mut s = session("a");
+        s.conversation_id = Some("copy".into());
+        s.fork_from = Some("original".into());
+        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let i = l.argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(
+            l.argv[i..i + 5],
+            [
+                "--resume",
+                "original",
+                "--fork-session",
+                "--session-id",
+                "copy"
+            ]
+        );
+        assert_eq!(l.conversation_id.as_deref(), Some("copy"));
+        // Once the copy has its own transcript, it resumes that.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("copy.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        s.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let i = l.argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(l.argv[i..i + 2], ["--resume", "copy"]);
+        assert!(!l.argv.contains(&"--fork-session".to_string()));
     }
 
     #[test]

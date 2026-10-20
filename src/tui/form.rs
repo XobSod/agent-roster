@@ -25,6 +25,8 @@ pub enum Id {
     Prompt,
     Title,
     EnvFile,
+    Conversation,
+    Copy,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,11 @@ pub enum Purpose {
     EditProject(i64),
     NewSession,
     EditSession(String),
+    /// Adopting a conversation, open in a Claude process or not.
+    Adopt {
+        conversation: String,
+        open_in: Option<i32>,
+    },
 }
 
 pub enum Outcome {
@@ -305,6 +312,91 @@ impl Form {
         )
     }
 
+    /// Adopting `a`: into the project holding its directory, or a new one.
+    pub fn adopt(a: &crate::engine::Adoptable) -> Form {
+        let c = &a.conversation;
+        let what = c.label();
+        let branch = c
+            .branch
+            .as_ref()
+            .map_or(String::new(), |b| format!(" ({b})"));
+        let mut directory = format!("{}{branch}", c.cwd.display());
+        let project = match &a.project {
+            Some(p) => Field::new(Id::Project, "Project", Kind::Info, &p.name),
+            None => {
+                directory.push_str(" · not in a project");
+                Field::new(
+                    Id::Project,
+                    "Project",
+                    Kind::Text {
+                        path: false,
+                        placeholder: String::new(),
+                    },
+                    &a.new_project,
+                )
+            }
+        };
+        let defaults = a.project.as_ref();
+        let moved = match c.open_in {
+            Some(pid) => {
+                format!("move it; it's open in Claude (pid {pid}), close it there")
+            }
+            None => "move it; resume it only here from now on".to_string(),
+        };
+        let mut copy = Field::new(
+            Id::Copy,
+            "Copy",
+            Kind::Choice(options("no", &["yes"])),
+            "no",
+        );
+        copy.notes = [
+            ("no".to_string(), moved),
+            (
+                "yes".to_string(),
+                "a copy; the original stays as it is".to_string(),
+            ),
+        ]
+        .into();
+        let fields = vec![
+            Field::new(Id::Conversation, "Adopting", Kind::Info, what),
+            Field::new(Id::Directory, "Directory", Kind::Info, directory),
+            project,
+            Field::new(
+                Id::Name,
+                "Name",
+                Kind::Text {
+                    path: false,
+                    placeholder: "automatic".into(),
+                },
+                "",
+            ),
+            Field::new(
+                Id::Model,
+                "Model",
+                Kind::Combo(model_options()),
+                or_default(&defaults.and_then(|p| p.model.clone())),
+            ),
+            Field::new(
+                Id::Effort,
+                "Effort",
+                Kind::Choice(options(DEFAULT, EFFORTS)),
+                or_default(&defaults.and_then(|p| p.effort.clone())),
+            ),
+            copy,
+        ];
+        let mut form = Form::build(
+            Purpose::Adopt {
+                conversation: c.id.clone(),
+                open_in: c.open_in,
+            },
+            "Adopt a conversation".into(),
+            fields,
+            Vec::new(),
+        );
+        form.focus = form.fields.iter().position(Field::focusable).unwrap_or(0);
+        form
+    }
+
     fn build(purpose: Purpose, title: String, fields: Vec<Field>, projects: Vec<Project>) -> Form {
         let mut form = Form {
             purpose,
@@ -355,6 +447,7 @@ impl Form {
         match self.purpose {
             Purpose::NewProject => "create",
             Purpose::NewSession => "start",
+            Purpose::Adopt { .. } => "adopt",
             Purpose::EditProject(_) | Purpose::EditSession(_) => "save",
         }
     }
@@ -379,8 +472,11 @@ impl Form {
 
     /// Fills in fields that follow others.
     fn update(&mut self) {
-        // Model and effort are Claude flags.
-        let agent = self.value(Id::Agent).to_string();
+        // Model and effort are Claude flags; without an agent field, it's Claude.
+        let agent = self
+            .field(Id::Agent)
+            .map_or(CLAUDE, |f| f.value.as_str())
+            .to_string();
         for id in [Id::Model, Id::Effort] {
             if let Some(f) = self.field_mut(id) {
                 f.hidden = agent != CLAUDE;
@@ -391,7 +487,7 @@ impl Form {
         if matches!(self.purpose, Purpose::NewProject)
             && let Some(name) = self.field_mut(Id::Name).filter(|f| !f.edited)
         {
-            name.value = directory_name(&directory);
+            name.value = crate::util::directory_name(Path::new(&directory));
         }
         let env = Path::new(&directory).join(PROJECT_ENV);
         let state = if env.exists() {
@@ -573,6 +669,19 @@ impl Form {
                 effort: effort(),
                 prompt: self.setting(Id::Prompt),
             },
+            Purpose::Adopt {
+                conversation,
+                open_in,
+            } => Op::Adopt {
+                conversation: conversation.clone(),
+                project: required(Id::Project, "The project")?,
+                name: self.setting(Id::Name),
+                model: self.setting(Id::Model),
+                effort: self.setting(Id::Effort),
+                fork: self.value(Id::Copy) == "yes",
+                // Asked first (see App).
+                force: open_in.is_some(),
+            },
             Purpose::EditSession(id) => {
                 let claude = self.value(Id::Agent) == CLAUDE;
                 Op::EditSession {
@@ -622,24 +731,6 @@ pub fn expand_tilde(path: &str) -> String {
         }
         _ => path.to_string(),
     }
-}
-
-/// A project name from a directory: its last part, with anything a name can't
-/// hold replaced by '-'.
-fn directory_name(directory: &str) -> String {
-    let base = Path::new(directory.trim_end_matches('/'))
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned());
-    base.unwrap_or_default()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 /// Completes `input` as far as the directories under it allow; also returns the
@@ -855,6 +946,44 @@ mod tests {
             complete_directory(&format!("{base}/zzz")).0,
             format!("{base}/zzz")
         );
+    }
+
+    #[test]
+    fn adopting_a_copy_with_the_projects_defaults() {
+        use crate::tui::picker::tests::adoptable;
+        let mut a = adoptable("c1", "Fix the parser", Some("alpha"));
+        a.project.as_mut().unwrap().model = Some("opus".into());
+        let mut form = Form::adopt(&a);
+        // The project is known: the first thing to fill in is the name.
+        assert_eq!(form.fields[form.focus].id, Id::Name);
+        assert!(matches!(form.field(Id::Project).unwrap().kind, Kind::Info));
+        assert_eq!(form.value(Id::Model), "opus");
+        assert!(!form.field(Id::Model).unwrap().hidden);
+        type_text(&mut form, "parser");
+        form.focus = form.fields.iter().position(|f| f.id == Id::Copy).unwrap();
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(
+            submit(&mut form),
+            Op::Adopt {
+                conversation: "c1".into(),
+                project: "alpha".into(),
+                name: Some("parser".into()),
+                model: Some("opus".into()),
+                effort: None,
+                fork: true,
+                force: false,
+            }
+        );
+        // Outside a project: the new project's name comes first, and can't be empty.
+        let mut form = Form::adopt(&adoptable("c2", "Elsewhere", None));
+        assert_eq!(form.fields[form.focus].id, Id::Project);
+        assert_eq!(form.value(Id::Project), "elsewhere");
+        form.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            form.on_key(key(KeyCode::Enter)),
+            Outcome::Continue
+        ));
+        assert!(form.error.is_some());
     }
 
     #[test]

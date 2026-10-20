@@ -81,6 +81,16 @@ pub fn model_name(id: &str) -> String {
 
 /// A project name from a directory: its last part, with anything a name can't
 /// hold replaced by '-'.
+/// `~/…` as a path in the home directory.
+pub fn expand_tilde(path: &str) -> String {
+    match (path.strip_prefix('~'), dirs::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", home.display())
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// `~` instead of the home directory, for shorter paths.
 pub fn short_path(path: &std::path::Path) -> String {
     let path = path.display().to_string();

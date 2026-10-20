@@ -550,6 +550,9 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
             if p.origin.join(crate::paths::PROJECT_ENV).exists() {
                 defaults.push_str(" · env file");
             }
+            if app.chat_project == Some(p.id) {
+                defaults.push_str(" · built-in, for chats");
+            }
             [
                 crate::util::short_path(&p.origin),
                 p.sessions_label(&app.sessions),

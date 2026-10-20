@@ -41,6 +41,8 @@ pub enum Action {
     Help,
     Open(Menu),
     NewSession,
+    /// A session in the built-in chats project.
+    NewChat,
     EditSession,
     Start,
     Stop,
@@ -83,6 +85,7 @@ impl Action {
             Action::Help => "help",
             Action::Open(menu) => menu.name(),
             Action::NewSession | Action::NewProject => "new",
+            Action::NewChat => "new chat (no project)",
             Action::EditSession | Action::EditProject => "edit",
             Action::Start => "start",
             Action::Stop => "stop",
@@ -276,6 +279,7 @@ impl Keymap {
         let mut session = Table::default();
         let (t, k) = ("keys.session", &keys.session);
         session.bind(t, "new", &k.new, Action::NewSession, &mut labels)?;
+        session.bind(t, "chat", &k.chat, Action::NewChat, &mut labels)?;
         session.bind(t, "edit", &k.edit, Action::EditSession, &mut labels)?;
         session.bind(t, "start", &k.start, Action::Start, &mut labels)?;
         session.bind(t, "stop", &k.stop, Action::Stop, &mut labels)?;
@@ -454,7 +458,10 @@ mod tests {
             .iter()
             .map(|(k, _)| *k)
             .collect();
-        assert_eq!(items, ["n", "e", "s", "x", "r", "u", "t", "a", "d", "D"]);
+        assert_eq!(
+            items,
+            ["n", "c", "e", "s", "x", "r", "u", "t", "a", "d", "D"]
+        );
     }
 
     #[test]

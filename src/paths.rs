@@ -47,6 +47,11 @@ impl Paths {
         self.state_dir.join("roster.db")
     }
 
+    /// Where chats run unless `chats_dir` says otherwise.
+    pub fn chats_dir(&self) -> PathBuf {
+        self.state_dir.join("chats")
+    }
+
     /// The tmux config roster generates for its private server.
     pub fn tmux_conf(&self) -> PathBuf {
         self.state_dir.join("tmux.conf")

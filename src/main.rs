@@ -68,6 +68,26 @@ enum Cmd {
         #[arg(short, long)]
         attach: bool,
     },
+    /// Start a chat: a session that needs no project (it runs in the built-in chats project)
+    Chat {
+        #[arg(short, long)]
+        name: Option<String>,
+        /// claude, or an agent from [agents] in config.toml (default: the chats project's)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Claude model (default: the chats project's; "default" for Claude's own)
+        #[arg(long)]
+        model: Option<String>,
+        /// Claude effort (default: the chats project's; "default" for Claude's own)
+        #[arg(long)]
+        effort: Option<String>,
+        /// A first prompt, typed into the agent once it's ready
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Attach to it right away
+        #[arg(short, long)]
+        attach: bool,
+    },
     /// Take over a Claude conversation started elsewhere, resuming it here
     Adopt {
         /// The conversation's id (4+ characters are enough); without it, lists them
@@ -332,31 +352,34 @@ fn run(cli: Cli) -> Result<()> {
             let p = p.with_context(|| {
                 format!("no project {project:?} (add it with `roster project add`)")
             })?;
-            let waits = prompt.is_some() && !attach;
-            let s = r.new_session(NewSession {
+            let request = NewSession {
                 project,
                 name,
                 agent,
                 model: setting(model).unwrap_or(p.model),
                 effort: setting(effort).unwrap_or(p.effort),
                 prompt,
-            })?;
-            println!("Started {} ({})", s.label(), s.id);
-            if waits {
-                if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
-                    println!("Sent the first prompt");
-                } else {
-                    println!(
-                        "The agent isn't ready yet (it may be waiting for you, e.g. to trust the folder);"
-                    );
-                    println!(
-                        "the prompt is typed in once it is, by the next roster command or the TUI"
-                    );
-                }
-            }
-            if attach {
-                r.attach(&s.id)?;
-            }
+            };
+            start_session(&mut r, request, attach)?;
+        }
+        Cmd::Chat {
+            name,
+            agent,
+            model,
+            effort,
+            prompt,
+            attach,
+        } => {
+            let p = r.chat_project()?;
+            let request = NewSession {
+                project: p.name,
+                name,
+                agent,
+                model: setting(model).unwrap_or(p.model),
+                effort: setting(effort).unwrap_or(p.effort),
+                prompt,
+            };
+            start_session(&mut r, request, attach)?;
         }
         Cmd::Ls {
             archived,
@@ -565,6 +588,28 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// Starts a new session, waits for its first prompt to go in (unless attaching,
+/// which shows it), and attaches if asked.
+fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()> {
+    let waits = request.prompt.is_some() && !attach;
+    let s = r.new_session(request)?;
+    println!("Started {} ({})", s.label(), s.id);
+    if waits {
+        if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
+            println!("Sent the first prompt");
+        } else {
+            println!(
+                "The agent isn't ready yet (it may be waiting for you, e.g. to trust the folder);"
+            );
+            println!("the prompt is typed in once it is, by the next roster command or the TUI");
+        }
+    }
+    if attach {
+        r.attach(&s.id)?;
+    }
+    Ok(())
+}
+
 fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
     let found = r.adoptable(all)?;
     if found.is_empty() {
@@ -709,14 +754,19 @@ fn list_projects(r: &Roster) -> Result<()> {
     }
     let sessions = r.sessions(true)?;
     let models = r.db.model_names()?;
+    let chats = r.chat_project_id()?;
     let rows: Vec<Vec<String>> = projects
         .iter()
         .map(|p| {
+            let mut defaults = p.defaults_label(&models);
+            if chats == Some(p.id) {
+                defaults.push_str(" · built-in, for chats");
+            }
             vec![
                 p.name.clone(),
                 p.origin.display().to_string(),
                 p.sessions_label(&sessions),
-                p.defaults_label(&models),
+                defaults,
             ]
         })
         .collect();

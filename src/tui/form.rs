@@ -10,6 +10,7 @@ use super::app::Op;
 use crate::agent::{CLAUDE, CLAUDE_MODELS, CLAUDE_PINNED, EFFORTS};
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
+use crate::util::expand_tilde;
 
 /// Shown for "no value": the agent's own default.
 const DEFAULT: &str = "default";
@@ -165,7 +166,18 @@ impl Form {
         )
     }
 
-    pub fn edit_project(p: &Project, agents: &[String]) -> Form {
+    /// A new chat: the new-session form on the chats project, on the prompt.
+    pub fn new_chat(projects: &[Project], chats: &Project, agents: &[String]) -> Form {
+        let mut form = Form::new_session(projects, Some(chats), agents);
+        form.title = "New chat".into();
+        if let Some(i) = form.fields.iter().position(|f| f.id == Id::Prompt) {
+            form.focus = i;
+        }
+        form
+    }
+
+    /// `builtin`: the chats project, whose directory follows `chats_dir`.
+    pub fn edit_project(p: &Project, agents: &[String], builtin: bool) -> Form {
         let mut fields = vec![
             Field::new(
                 Id::Name,
@@ -179,9 +191,14 @@ impl Form {
             Field::new(
                 Id::Directory,
                 "Directory",
-                Kind::Text {
-                    path: true,
-                    placeholder: String::new(),
+                // The chats project's follows `chats_dir` in config.toml.
+                if builtin {
+                    Kind::Info
+                } else {
+                    Kind::Text {
+                        path: true,
+                        placeholder: String::new(),
+                    }
                 },
                 p.origin.display().to_string(),
             ),
@@ -206,12 +223,12 @@ impl Form {
             Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
         ];
         fields[0].edited = true;
-        Form::build(
-            Purpose::EditProject(p.id),
-            format!("Edit project {}", p.name),
-            fields,
-            Vec::new(),
-        )
+        let title = if builtin {
+            format!("Edit project {} (built-in, for chats)", p.name)
+        } else {
+            format!("Edit project {}", p.name)
+        };
+        Form::build(Purpose::EditProject(p.id), title, fields, Vec::new())
     }
 
     pub fn new_session(
@@ -722,15 +739,6 @@ fn cycle(options: &[String], value: &str, forward: bool) -> String {
         None => 0,
     };
     options[next].clone()
-}
-
-pub fn expand_tilde(path: &str) -> String {
-    match (path.strip_prefix('~'), dirs::home_dir()) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            format!("{}{rest}", home.display())
-        }
-        _ => path.to_string(),
-    }
 }
 
 /// Completes `input` as far as the directories under it allow; also returns the

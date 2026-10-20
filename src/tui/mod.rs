@@ -105,6 +105,7 @@ fn reload(roster: &mut Roster, app: &mut App) {
     if let Ok(names) = roster.db.model_names() {
         app.model_names = names;
     }
+    app.chat_project = roster.chat_project_id().ok().flatten();
     update_preview(roster, app);
 }
 
@@ -324,6 +325,11 @@ fn perform(
                 .generate_title(&id)
                 .map(|title| format!("New title: {title}"))
         }
+        Op::NewChat => roster.chat_project().and_then(|chats| {
+            app.chat_project = Some(chats.id);
+            app.open_chat_form(&roster.projects()?, &chats);
+            Ok(String::new())
+        }),
         Op::FindConversations => roster.adoptable(true).map(|found| {
             app.pick_conversation(found);
             String::new()

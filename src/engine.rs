@@ -23,6 +23,8 @@ const DEFAULT_SIZE: (u16, u16) = (160, 48);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Screen changes this soon after a start are the agent starting up, not a turn.
 const BOOT_GRACE_MS: i64 = 5000;
+/// The meta key holding the chats project's id.
+const CHAT_PROJECT: &str = "chat_project";
 
 pub struct Roster {
     pub paths: Paths,
@@ -160,6 +162,12 @@ impl Roster {
         defaults: Defaults,
     ) -> Result<Project> {
         let project = self.checked_project(id, name, path, defaults)?;
+        if self.chat_project_id()? == Some(id) {
+            let current = self.db.projects()?.into_iter().find(|p| p.id == id);
+            if current.is_some_and(|p| p.origin != project.origin) {
+                bail!("the chats project's directory is set by `chats_dir` in config.toml");
+            }
+        }
         self.db.save_project(&project)?;
         Ok(project)
     }
@@ -195,6 +203,49 @@ impl Roster {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         self.db.projects()
+    }
+
+    /// Where chats run: `chats_dir` in config.toml, else roster's state directory.
+    pub fn chats_dir(&self) -> PathBuf {
+        match &self.config.chats_dir {
+            Some(dir) => PathBuf::from(util::expand_tilde(dir)),
+            None => self.paths.chats_dir(),
+        }
+    }
+
+    /// The built-in project chats belong to, if it exists yet.
+    pub fn chat_project_id(&self) -> Result<Option<i64>> {
+        let Some(id) = self.db.meta(CHAT_PROJECT)?.and_then(|v| v.parse().ok()) else {
+            return Ok(None);
+        };
+        Ok(self.db.projects()?.iter().any(|p| p.id == id).then_some(id))
+    }
+
+    /// The project for chats, sessions that need no project of their own:
+    /// created on first use (named "chats" unless that's taken), in one
+    /// directory for all of them, so Claude asks to trust it only once. Its
+    /// directory follows `chats_dir`; it can be renamed and given defaults.
+    pub fn chat_project(&mut self) -> Result<Project> {
+        let dir = self.chats_dir();
+        fs::create_dir_all(&dir).with_context(|| format!("can't create {}", dir.display()))?;
+        let origin = fs::canonicalize(&dir)?;
+        let projects = self.db.projects()?;
+        if let Some(id) = self.chat_project_id()?
+            && let Some(p) = projects.iter().find(|p| p.id == id)
+        {
+            let mut p = p.clone();
+            // `chats_dir` changed: new chats run there; older ones keep theirs.
+            if p.origin != origin {
+                p.origin = origin;
+                self.db.save_project(&p)?;
+            }
+            return Ok(p);
+        }
+        let taken: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+        let name = new_project_name(Path::new("chats"), &taken);
+        let p = self.add_project(&name, &origin, Defaults::default())?;
+        self.db.set_meta(CHAT_PROJECT, &p.id.to_string())?;
+        Ok(p)
     }
 
     /// Removes a project that has no live sessions; returns the archived sessions

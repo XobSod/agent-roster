@@ -3,6 +3,7 @@
 //!
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
+//! chats_dir = "~/chats"           # where chats run; default: roster's state directory
 //!
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
@@ -31,6 +32,8 @@ use serde::{Deserialize, Deserializer};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub shell: Option<String>,
+    /// Where chats (sessions without a project of their own) run.
+    pub chats_dir: Option<String>,
     pub keys: Keys,
     pub agents: BTreeMap<String, AgentConfig>,
 }
@@ -71,6 +74,8 @@ pub struct SessionKeys {
     pub toggle_read: KeyList,
     pub retitle: KeyList,
     pub adopt: KeyList,
+    /// A new chat: a session in the built-in chats project.
+    pub chat: KeyList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +136,7 @@ impl Default for SessionKeys {
             toggle_read: keys(&["u"]),
             retitle: keys(&["t"]),
             adopt: keys(&["a"]),
+            chat: keys(&["c"]),
         }
     }
 }

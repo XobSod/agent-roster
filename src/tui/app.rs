@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::text::Text;
+use ratatui::text::{Line, Text};
 
 use super::form::{self, Form, Outcome};
 use super::list::{self, Entry, EntryKey, Group, Shelf};
@@ -78,6 +78,8 @@ pub enum Op {
         effort: Option<String>,
     },
     RetitleSession(String),
+    /// Make sure the chats project exists, then open the new-chat form.
+    NewChat,
     /// Look for conversations to adopt, then pick one.
     FindConversations,
     Adopt {
@@ -147,6 +149,8 @@ pub struct App {
     pub project_row: usize,
     /// A project to select there once it shows up (after adding or renaming it).
     select_project: Option<String>,
+    /// The built-in project chats run in, once it exists.
+    pub chat_project: Option<i64>,
     message: Option<Message>,
     pub projects: Vec<Project>,
     /// Live and deleted.
@@ -183,6 +187,7 @@ impl App {
             report_scroll: 0,
             project_row: 0,
             select_project: None,
+            chat_project: None,
             message: None,
             projects: Vec::new(),
             sessions: Vec::new(),
@@ -467,8 +472,9 @@ impl App {
             }
             Action::EditProject => match self.selected_project() {
                 Some(p) => {
+                    let builtin = self.chat_project == Some(p.id);
                     self.dialog = Some(Dialog::Form(
-                        Form::edit_project(&p, &self.agent_names())
+                        Form::edit_project(&p, &self.agent_names(), builtin)
                             .with_model_names(&self.model_names),
                     ))
                 }
@@ -480,6 +486,7 @@ impl App {
             Action::FilterProject => self.toggle_filter(),
             Action::RemoveProject => self.remove_project(),
             Action::NewSession => self.new_session(),
+            Action::NewChat => return Some(Op::NewChat),
             Action::Adopt => return Some(Op::FindConversations),
             Action::Start
             | Action::Stop
@@ -522,6 +529,7 @@ impl App {
             | Action::EditProject
             | Action::RemoveProject
             | Action::NewSession
+            | Action::NewChat
             | Action::Adopt
             | Action::ToggleGroup
             | Action::ShowServer
@@ -701,7 +709,10 @@ impl App {
     fn new_session(&mut self) {
         if self.projects.is_empty() {
             let key = self.chord(Menu::Project, Action::NewProject);
-            self.fail(format!("Add a project first ({key})"));
+            let chat = self.chord(Menu::Session, Action::NewChat);
+            self.fail(format!(
+                "Add a project first ({key}), or start a chat, which needs none ({chat})"
+            ));
             return;
         }
         let selected = self.selected_project();
@@ -738,6 +749,13 @@ impl App {
                 ))
             }
         }
+    }
+
+    /// The new-chat form, once the chats project exists (`projects` has it).
+    pub fn open_chat_form(&mut self, projects: &[Project], chats: &Project) {
+        let form = Form::new_chat(projects, chats, &self.agent_names())
+            .with_model_names(&self.model_names);
+        self.dialog = Some(Dialog::Form(form));
     }
 
     fn agent_names(&self) -> Vec<String> {
@@ -912,17 +930,25 @@ impl App {
         } else {
             "none"
         };
-        Text::from(vec![
-            format!("origin    {}", p.origin.display()).into(),
-            format!("sessions  {}", p.sessions_label(&self.sessions)).into(),
-            format!("env file  {} ({env_state})", env.display()).into(),
-            "".into(),
-            format!(
-                "Press {} to start a session here.",
-                self.chord(Menu::Session, Action::NewSession)
-            )
-            .into(),
-        ])
+        let builtin = (self.chat_project == Some(p.id)).then(|| {
+            Line::from(format!(
+                "built-in  for chats ({}); its directory follows chats_dir in config.toml",
+                self.chord(Menu::Session, Action::NewChat)
+            ))
+        });
+        Text::from_iter(
+            builtin.into_iter().chain([
+                format!("origin    {}", p.origin.display()).into(),
+                format!("sessions  {}", p.sessions_label(&self.sessions)).into(),
+                format!("env file  {} ({env_state})", env.display()).into(),
+                "".into(),
+                format!(
+                    "Press {} to start a session here.",
+                    self.chord(Menu::Session, Action::NewSession)
+                )
+                .into(),
+            ]),
+        )
     }
 
     /// Preview for a shelf heading.
@@ -972,13 +998,20 @@ impl App {
     /// Preview when there's nothing to select.
     pub fn empty_info(&self) -> Text<'static> {
         match self.mode {
-            Mode::Live | Mode::Projects if self.projects.is_empty() => Text::from(format!(
-                "No projects yet. Press {} to add one: a name and its directory.",
-                self.chord(Menu::Project, Action::NewProject)
-            )),
+            Mode::Live | Mode::Projects if self.projects.is_empty() => Text::from(vec![
+                Line::from(format!(
+                    "No projects yet. Press {} to add one: a name and its directory.",
+                    self.chord(Menu::Project, Action::NewProject)
+                )),
+                Line::from(format!(
+                    "Or press {} to start a chat, which needs no project.",
+                    self.chord(Menu::Session, Action::NewChat)
+                )),
+            ]),
             Mode::Live => Text::from(format!(
-                "No sessions yet. Press {} to start one.",
-                self.chord(Menu::Session, Action::NewSession)
+                "No sessions yet. Press {} to start one, or {} for a chat.",
+                self.chord(Menu::Session, Action::NewSession),
+                self.chord(Menu::Session, Action::NewChat)
             )),
             Mode::Projects | Mode::Server => Text::default(),
         }
@@ -1273,6 +1306,47 @@ mod tests {
         // On the session list, the same keys don't act on projects.
         assert_eq!(keys(&mut app, "e"), None);
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn a_chat_opens_the_new_session_form_on_the_chats_project() {
+        let mut app = app();
+        assert_eq!(keys(&mut app, "sc"), Some(Op::NewChat));
+        // The run loop makes sure the project exists, then:
+        let chats = project(3, "chats");
+        let mut projects = app.projects.clone();
+        projects.push(chats.clone());
+        app.open_chat_form(&projects, &chats);
+        let Some(Dialog::Form(form)) = &app.dialog else {
+            panic!("no form")
+        };
+        assert_eq!(form.title, "New chat");
+        assert!(form.fields.iter().any(|f| f.value == "chats"));
+        // Straight to the prompt.
+        assert_eq!(form.fields[form.focus].label, "Prompt");
+        app.on_key(key(KeyCode::Esc));
+
+        // Its directory can't be edited here.
+        app.set_data(projects, app.sessions.clone());
+        app.chat_project = Some(3);
+        keys(&mut app, "pl");
+        app.project_row = 2;
+        keys(&mut app, "e");
+        let Some(Dialog::Form(form)) = &app.dialog else {
+            panic!("no form")
+        };
+        assert_eq!(form.title, "Edit project chats (built-in, for chats)");
+        assert!(
+            !form
+                .fields
+                .iter()
+                .any(|f| f.label == "Directory" && f.hint() == "Tab completes")
+        );
+        assert!(
+            app.project_info(&project(3, "chats")).lines[0]
+                .to_string()
+                .starts_with("built-in")
+        );
     }
 
     #[test]

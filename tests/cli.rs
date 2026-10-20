@@ -708,3 +708,63 @@ fn conversations_started_elsewhere_can_be_adopted() {
         "{list}"
     );
 }
+
+#[test]
+fn chats_need_no_project() {
+    let Some(t) = TestEnv::new("chat") else {
+        return;
+    };
+    // No project yet: a chat creates the chats project, in roster's state directory.
+    let out = t.ok(&["chat", "--name", "hello"]);
+    assert!(out.starts_with("Started chats/hello"), "{out}");
+    let dir = t.path("state/agent-roster/chats");
+    let s = t.session("hello", false).unwrap();
+    assert_eq!(
+        (s["project"].as_str(), s["workdir"].as_str()),
+        (Some("chats"), dir.to_str())
+    );
+    t.wait_for("the agent", |t| {
+        t.ok(&["show", "hello"])
+            .contains("fake agent: --session-id")
+    });
+    // One project for every chat.
+    t.ok(&["chat", "--name", "again"]);
+    let projects = t.ok(&["project", "ls"]);
+    assert_eq!(projects.lines().count(), 2, "{projects}");
+    assert!(projects.contains("built-in, for chats"), "{projects}");
+
+    // Its directory is roster's; its name and defaults are yours.
+    let proj = t.path("proj");
+    let out = t.run(&["project", "edit", "chats", "--path", proj.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("chats_dir"));
+    t.ok(&[
+        "project", "edit", "chats", "--name", "talk", "--model", "haiku",
+    ]);
+    t.ok(&["chat", "--name", "second"]);
+    let s = t.session("second", false).unwrap();
+    assert_eq!(
+        (s["project"].as_str(), s["model"].as_str()),
+        (Some("talk"), Some("haiku"))
+    );
+
+    // Removed once empty, it comes back with the next chat, where chats_dir says.
+    for name in ["hello", "again", "second"] {
+        t.ok(&["archive", "--yes", name]);
+        t.ok(&["rm", "--yes", name]);
+    }
+    t.ok(&["project", "rm", "talk"]);
+    let mine = t.path("my chats");
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!("chats_dir = \"{}\"\n{text}", mine.display()),
+    )
+    .unwrap();
+    t.ok(&["chat", "--name", "third"]);
+    let s = t.session("third", false).unwrap();
+    assert_eq!(
+        (s["project"].as_str(), s["workdir"].as_str()),
+        (Some("chats"), mine.to_str())
+    );
+}

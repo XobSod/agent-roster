@@ -27,7 +27,7 @@ and `?` shows every key. Everything else is in three menus, which pop up their k
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `g` group by project · `p` all projects · `t` tmux server and database |
 
@@ -52,6 +52,7 @@ Everything is also available from the CLI:
 roster project add myproj ~/src/myproj --model opus --effort high
 roster new myproj --name api --attach   # start Claude and go into it; Ctrl+Q comes back
 roster new myproj --prompt "fix the failing tests"   # typed in once Claude is ready
+roster chat --prompt "explain tmux copy mode"         # no project needed: a chat
 roster edit api --model sonnet          # applies on the next start
 roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
 roster retitle api                      # a fresh title from Haiku, from the recent prompts
@@ -77,7 +78,8 @@ lists every command.
 
 All files are optional and live in `~/.config/agent-roster/`:
 
-- `config.toml`: `shell`, `[keys]` (every TUI key, plus `detach` for Ctrl+Q),
+- `config.toml`: `shell`, `chats_dir` (where chats run; default inside roster's state
+  directory), `[keys]` (every TUI key, plus `detach` for Ctrl+Q),
   `[agents.claude] command`/`args`. Any other agent
   goes in its own table and is then offered for new sessions:
 

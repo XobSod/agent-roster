@@ -415,6 +415,23 @@ impl Db {
         Ok((waiting, kept))
     }
 
+    /// A value roster keeps for itself.
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     /// What each model alias (and "default") last turned out to be, as Claude
     /// names it: {"opus": "Opus 5.5", "default": "Opus 5.5 (1M)"}.
     pub fn model_names(&self) -> Result<HashMap<String, String>> {

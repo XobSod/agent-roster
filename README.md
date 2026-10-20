@@ -14,6 +14,10 @@ Requires tmux ≥ 3.2 and Claude Code on `PATH`.
 cargo install --path .     # installs `roster` into ~/.cargo/bin
 ```
 
+To scroll back through an agent's history while attached, also set up the two
+example files described under [Configure](#configure): without them, copy mode in
+your own tmux shows that pane's older output, not the agent's.
+
 ## Use
 
 Run `roster` for the TUI: projects and their sessions on the left, the selected

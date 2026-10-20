@@ -1,0 +1,433 @@
+//! The operations behind the CLI and the TUI, so the two stay at parity.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+
+use crate::config::Config;
+use crate::db::Db;
+use crate::model::{Project, QUIET_MS, Session, State};
+use crate::paths::{self, PROJECT_ENV, Paths};
+use crate::tmux::Tmux;
+use crate::util::{self, now_ms};
+use crate::{agent, launch};
+
+/// Window size for new sessions when roster isn't run from a terminal.
+const DEFAULT_SIZE: (u16, u16) = (160, 48);
+/// How long `stop` waits after SIGTERM before SIGKILL.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct Roster {
+    pub paths: Paths,
+    pub config: Config,
+    pub db: Db,
+    tmux: Tmux,
+    exe: PathBuf,
+}
+
+impl Roster {
+    pub fn open() -> Result<Roster> {
+        let paths = Paths::from_env()?;
+        let config = Config::load(&paths.config_file())?;
+        fs::create_dir_all(&paths.state_dir)
+            .with_context(|| format!("can't create {}", paths.state_dir.display()))?;
+        let db = Db::open(&paths.db())?;
+        let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
+        tmux.write_config(&config.keys.detach, &paths.user_tmux_conf())?;
+        let exe = std::env::current_exe().context("can't find roster's own path")?;
+        Ok(Roster {
+            paths,
+            config,
+            db,
+            tmux,
+            exe,
+        })
+    }
+
+    /// Brings the database up to date: applies reported events, notices agents
+    /// that have exited, and corrects stale "working" states from the screen.
+    pub fn refresh(&mut self) -> Result<()> {
+        let now = now_ms();
+        self.db.fold_events(now)?;
+        let panes = self.tmux.panes()?;
+        for mut s in self.db.sessions(false)? {
+            let before = s.clone();
+            match panes.get(&s.tmux_name()) {
+                None => s.state = State::Stopped,
+                Some(pane) if pane.dead => {
+                    // Record the exit code when it stops, not on every pass, so
+                    // `stop` can clear it.
+                    if s.state != State::Stopped {
+                        s.state = State::Stopped;
+                        s.exit_status = pane.dead_status;
+                    }
+                }
+                Some(_) => {
+                    // Running although recorded as stopped: idle until hooks say otherwise.
+                    if s.state == State::Stopped {
+                        s.state = State::Idle;
+                    }
+                    if s.needs_screen_check(now)
+                        && let Ok(screen) = self.tmux.capture(&s.tmux_name(), false, 0)
+                    {
+                        s.observe_screen(&util::fnv1a(screen.as_bytes()), now);
+                        s.correct_stale_working(now);
+                    }
+                }
+            }
+            if s != before {
+                self.db.save_session(&s)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `refresh` for one-shot commands. The TUI polls anyway; a single command has
+    /// to watch for a moment when a session claims to be working without recent
+    /// hook events: until its screen changes (still working) or has stayed still
+    /// for QUIET_MS (idle).
+    pub fn settle(&mut self) -> Result<()> {
+        self.refresh()?;
+        let start = now_ms();
+        loop {
+            let now = now_ms();
+            let unresolved = self.db.sessions(false)?.iter().any(|s| {
+                s.needs_screen_check(now) && s.screen_changed_at.is_some_and(|t| t <= start)
+            });
+            if !unresolved || now - start > QUIET_MS + 1000 {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(500));
+            self.refresh()?;
+        }
+    }
+
+    // Projects
+
+    pub fn add_project(&self, name: &str, path: &Path) -> Result<Project> {
+        validate_name("project", name)?;
+        let origin =
+            fs::canonicalize(path).with_context(|| format!("can't find {}", path.display()))?;
+        if !origin.is_dir() {
+            bail!("{} is not a directory", origin.display());
+        }
+        self.db.add_project(name, &origin, now_ms())
+    }
+
+    pub fn projects(&self) -> Result<Vec<Project>> {
+        self.db.projects()
+    }
+
+    /// Removes a project that has no live sessions; returns the deleted sessions
+    /// purged with it.
+    pub fn remove_project(&mut self, name: &str) -> Result<Vec<Session>> {
+        let project = self
+            .db
+            .project(name)?
+            .with_context(|| format!("no project {name:?}"))?;
+        self.db.remove_project(&project)
+    }
+
+    // Sessions
+
+    pub fn sessions(&self, include_deleted: bool) -> Result<Vec<Session>> {
+        self.db.sessions(include_deleted)
+    }
+
+    /// Finds a live (or, with `deleted`, a deleted) session by id, `project/name`,
+    /// name, or id prefix of at least 4 characters.
+    pub fn resolve(&self, addr: &str, deleted: bool) -> Result<Session> {
+        let pool: Vec<Session> = self
+            .db
+            .sessions(true)?
+            .into_iter()
+            .filter(|s| s.deleted_at.is_some() == deleted)
+            .collect();
+        let rules: [&dyn Fn(&Session) -> bool; 4] = [
+            &|s| s.id == addr,
+            &|s| s.label() == addr,
+            &|s| s.name == addr,
+            &|s| addr.len() >= 4 && s.id.starts_with(addr),
+        ];
+        for rule in rules {
+            let found: Vec<&Session> = pool.iter().filter(|s| rule(s)).collect();
+            match found[..] {
+                [] => continue,
+                [s] => return Ok(s.clone()),
+                _ => {
+                    let labels: Vec<String> = found
+                        .iter()
+                        .map(|s| format!("{} ({})", s.label(), s.id))
+                        .collect();
+                    bail!("{addr:?} matches several sessions: {}", labels.join(", "));
+                }
+            }
+        }
+        bail!(
+            "no {}session {addr:?}",
+            if deleted { "deleted " } else { "" }
+        )
+    }
+
+    /// Creates a session in `project` and starts its agent.
+    pub fn new_session(
+        &mut self,
+        project: &str,
+        name: Option<&str>,
+        agent: &str,
+    ) -> Result<Session> {
+        agent::check(agent)?;
+        let project = self.db.project(project)?.with_context(|| {
+            format!("no project {project:?} (add it with `roster project add`)")
+        })?;
+        let taken: Vec<String> = self
+            .db
+            .sessions(false)?
+            .into_iter()
+            .filter(|s| s.project_id == project.id)
+            .map(|s| s.name)
+            .collect();
+        let name = match name {
+            Some(name) => {
+                validate_name("session", name)?;
+                if taken.iter().any(|t| t == name) {
+                    bail!(
+                        "project {:?} already has a session named {name:?}",
+                        project.name
+                    );
+                }
+                name.to_string()
+            }
+            None => (1..)
+                .map(|i| format!("{agent}-{i}"))
+                .find(|n| !taken.contains(n))
+                .expect("unbounded"),
+        };
+        let s = Session {
+            id: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
+            project_id: project.id,
+            project: project.name.clone(),
+            name,
+            agent: agent.to_string(),
+            workdir: project.origin.clone(),
+            conversation_id: None,
+            transcript_path: None,
+            state: State::Stopped,
+            unread: false,
+            exit_status: None,
+            last_event_at: None,
+            screen_hash: None,
+            screen_changed_at: None,
+            created_at: now_ms(),
+            deleted_at: None,
+        };
+        self.db.insert_session(&s)?;
+        self.start(&s.id)?;
+        self.db.session(&s.id)
+    }
+
+    /// Starts a stopped session: sources the env files and launches its agent,
+    /// resuming the conversation if it has one.
+    pub fn start(&mut self, id: &str) -> Result<()> {
+        self.refresh()?;
+        let mut s = self.db.session(id)?;
+        if s.deleted_at.is_some() {
+            bail!("{} is deleted; restore it first", s.label());
+        }
+        if s.state != State::Stopped {
+            bail!("{} is already running", s.label());
+        }
+        let project = self
+            .db
+            .projects()?
+            .into_iter()
+            .find(|p| p.id == s.project_id)
+            .with_context(|| format!("{} has no project", s.label()))?;
+        let launch = agent::launch(&s, &self.config.agent(&s.agent), &self.exe)?;
+        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
+        let argv = launch::wrap(
+            &shell,
+            &self.paths.global_env(),
+            &project.origin.join(PROJECT_ENV),
+            &launch.argv,
+        );
+        let env = [
+            ("ROSTER_SESSION", s.id.clone()),
+            ("ROSTER_DB", self.paths.db().to_string_lossy().into_owned()),
+        ];
+        let name = s.tmux_name();
+        if self.tmux.panes()?.contains_key(&name) {
+            self.tmux.respawn(&name, &s.workdir, &env, &argv)?;
+        } else {
+            let size = util::terminal_size().unwrap_or(DEFAULT_SIZE);
+            self.tmux
+                .new_session(&name, &s.workdir, size, &env, &argv)?;
+        }
+        s.conversation_id = Some(launch.conversation_id);
+        s.state = State::Working;
+        s.unread = false;
+        s.exit_status = None;
+        s.last_event_at = Some(now_ms());
+        s.screen_hash = None;
+        s.screen_changed_at = None;
+        self.db.save_session(&s)
+    }
+
+    /// Stops a session's agent (SIGTERM, then SIGKILL), keeping its entry and last
+    /// screen. Returns false if it wasn't running.
+    pub fn stop(&mut self, id: &str) -> Result<bool> {
+        let name = self.db.session(id)?.tmux_name();
+        let Some(pid) = self.live_pid(&name)? else {
+            self.refresh()?;
+            return Ok(false);
+        };
+        signal(pid, libc::SIGTERM);
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while self.live_pid(&name)?.is_some() {
+            if Instant::now() > deadline {
+                signal(pid, libc::SIGKILL);
+                sleep(Duration::from_millis(200));
+                break;
+            }
+            sleep(Duration::from_millis(100));
+        }
+        self.refresh()?;
+        // The exit code of a stop the user asked for (143 after SIGTERM) means nothing.
+        let mut s = self.db.session(id)?;
+        if s.state == State::Stopped && s.exit_status.is_some() {
+            s.exit_status = None;
+            self.db.save_session(&s)?;
+        }
+        Ok(true)
+    }
+
+    pub fn restart(&mut self, id: &str) -> Result<()> {
+        self.stop(id)?;
+        self.start(id)
+    }
+
+    /// Deletes a session: stops it and hides it, keeping its conversation ID so
+    /// `restore` can bring it back.
+    pub fn delete(&mut self, id: &str) -> Result<()> {
+        self.stop(id)?;
+        let mut s = self.db.session(id)?;
+        self.tmux.kill_session(&s.tmux_name())?;
+        s.deleted_at = Some(now_ms());
+        s.state = State::Stopped;
+        self.db.save_session(&s)
+    }
+
+    /// Brings back a deleted session (stopped), optionally under a new name.
+    pub fn restore(&mut self, id: &str, new_name: Option<&str>) -> Result<Session> {
+        self.db.fold_events(now_ms())?;
+        let mut s = self.db.session(id)?;
+        if s.deleted_at.is_none() {
+            bail!("{} isn't deleted", s.label());
+        }
+        if let Some(name) = new_name {
+            validate_name("session", name)?;
+            s.name = name.to_string();
+        }
+        let taken = self
+            .db
+            .sessions(false)?
+            .iter()
+            .any(|o| o.project_id == s.project_id && o.name == s.name);
+        if taken {
+            bail!(
+                "project {:?} already has a session named {:?}; restore with --name",
+                s.project,
+                s.name
+            );
+        }
+        s.deleted_at = None;
+        s.state = State::Stopped;
+        s.unread = false;
+        self.db.save_session(&s)?;
+        Ok(s)
+    }
+
+    /// Attaches the terminal to a session, starting it first if it's stopped, and
+    /// marks it read once the user detaches.
+    pub fn attach(&mut self, id: &str) -> Result<()> {
+        self.refresh()?;
+        let s = self.db.session(id)?;
+        if s.deleted_at.is_some() {
+            bail!("{} is deleted; restore it first", s.label());
+        }
+        if s.state == State::Stopped {
+            self.start(id)?;
+        }
+        let status = self.tmux.attach(&s.tmux_name())?;
+        if !status.success() {
+            bail!("couldn't attach to {}", s.label());
+        }
+        // Whatever happened while attached counts as seen.
+        self.refresh()?;
+        self.set_unread(id, false)
+    }
+
+    pub fn set_unread(&mut self, id: &str, unread: bool) -> Result<()> {
+        // Events reported before this must not be applied after it.
+        self.db.fold_events(now_ms())?;
+        let mut s = self.db.session(id)?;
+        s.unread = unread;
+        self.db.save_session(&s)
+    }
+
+    /// The session's current screen, also after its agent exited.
+    pub fn screen(&self, id: &str, ansi: bool) -> Result<String> {
+        let s = self.db.session(id)?;
+        let Some(pane) = self.tmux.panes()?.remove(&s.tmux_name()) else {
+            bail!("{} isn't running, so there's no screen to show", s.label());
+        };
+        // tmux writes "Pane is dead" on the bottom line, scrolling the agent's
+        // last screen up by one line.
+        let history = if pane.dead { 1 } else { 0 };
+        self.tmux.capture(&s.tmux_name(), ansi, history)
+    }
+
+    fn live_pid(&self, tmux_name: &str) -> Result<Option<i32>> {
+        Ok(self
+            .tmux
+            .panes()?
+            .get(tmux_name)
+            .filter(|p| !p.dead)
+            .and_then(|p| p.pid))
+    }
+}
+
+fn signal(pid: i32, sig: libc::c_int) {
+    // SAFETY: kill(2) has no memory effects; a stale pid just fails.
+    unsafe {
+        libc::kill(pid, sig);
+    }
+}
+
+fn validate_name(what: &str, name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid {
+        bail!("{what} name {name:?} may only contain letters, digits, '-', '_' and '.'");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_simple() {
+        assert!(validate_name("session", "api-fix_2.0").is_ok());
+        assert!(validate_name("session", "").is_err());
+        assert!(validate_name("session", "a/b").is_err());
+        assert!(validate_name("session", "has space").is_err());
+    }
+}

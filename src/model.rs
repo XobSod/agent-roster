@@ -1,0 +1,263 @@
+//! Projects, sessions, reported events, and how events and screen changes move a
+//! session between states.
+
+use std::path::PathBuf;
+
+/// How long a "working" session must go without hook events and without screen
+/// changes before it counts as idle. Claude reports no event when a turn is
+/// interrupted with Esc; while it really works, its spinner changes the screen
+/// several times a second.
+pub const QUIET_MS: i64 = 4000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Working,
+    NeedsInput,
+    Idle,
+    Stopped,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::NeedsInput => "needs-input",
+            State::Idle => "idle",
+            State::Stopped => "stopped",
+        }
+    }
+
+    pub fn parse(s: &str) -> State {
+        match s {
+            "working" => State::Working,
+            "needs-input" => State::NeedsInput,
+            "idle" => State::Idle,
+            _ => State::Stopped,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub origin: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    pub id: String,
+    pub project_id: i64,
+    /// Name of the project (joined in from `projects`).
+    pub project: String,
+    pub name: String,
+    pub agent: String,
+    pub workdir: PathBuf,
+    pub conversation_id: Option<String>,
+    /// Where the agent keeps the conversation; if it exists, the next start resumes.
+    pub transcript_path: Option<String>,
+    pub state: State,
+    pub unread: bool,
+    pub exit_status: Option<i32>,
+    pub last_event_at: Option<i64>,
+    pub screen_hash: Option<String>,
+    pub screen_changed_at: Option<i64>,
+    pub created_at: i64,
+    pub deleted_at: Option<i64>,
+}
+
+/// A status change reported by an agent hook through `roster report <kind>`.
+#[derive(Clone, Debug)]
+pub struct Event {
+    pub id: i64,
+    pub session_id: String,
+    pub kind: String,
+    pub at: i64,
+    pub payload: Option<String>,
+}
+
+impl Session {
+    /// Name of this session's tmux session on roster's private server.
+    pub fn tmux_name(&self) -> String {
+        format!("r-{}", self.id)
+    }
+
+    /// `project/name`, how sessions are shown and addressed.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.project, self.name)
+    }
+
+    /// Applies a reported event.
+    pub fn apply(&mut self, e: &Event) {
+        if self.deleted_at.is_some() {
+            return;
+        }
+        // Claude's hook payloads carry the current conversation ID, which changes
+        // after /clear.
+        if let Some(payload) = e
+            .payload
+            .as_deref()
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+        {
+            if let Some(id) = payload.get("session_id").and_then(|v| v.as_str()) {
+                self.conversation_id = Some(id.to_string());
+            }
+            if let Some(path) = payload.get("transcript_path").and_then(|v| v.as_str()) {
+                self.transcript_path = Some(path.to_string());
+            }
+        }
+        match e.kind.as_str() {
+            "working" => self.state = State::Working,
+            "idle" => {
+                self.state = State::Idle;
+                self.unread = true;
+            }
+            "needs-input" => {
+                self.state = State::NeedsInput;
+                self.unread = true;
+            }
+            // The agent (re)started or cleared its conversation and waits for a prompt.
+            "session" => self.state = State::Idle,
+            _ => return,
+        }
+        self.last_event_at = Some(e.at);
+    }
+
+    /// Records a capture of the screen, noting when it last changed.
+    pub fn observe_screen(&mut self, hash: &str, now: i64) {
+        if self.screen_hash.as_deref() != Some(hash) {
+            self.screen_hash = Some(hash.to_string());
+            self.screen_changed_at = Some(now);
+        }
+    }
+
+    /// True if the session claims to be working but no hook has reported anything
+    /// for a while, so only the screen can tell whether it still is.
+    pub fn needs_screen_check(&self, now: i64) -> bool {
+        self.state == State::Working && self.last_event_at.is_none_or(|t| now - t >= QUIET_MS)
+    }
+
+    /// Turns a stale "working" into idle once the screen has stopped changing.
+    /// Doesn't mark it unread: for Claude this only happens after an interrupt,
+    /// which the user did while attached.
+    pub fn correct_stale_working(&mut self, now: i64) -> bool {
+        let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
+        if self.needs_screen_check(now) && still {
+            self.state = State::Idle;
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    pub fn session(id: &str) -> Session {
+        Session {
+            id: id.into(),
+            project_id: 1,
+            project: "demo".into(),
+            name: format!("s-{id}"),
+            agent: "claude".into(),
+            workdir: "/tmp".into(),
+            conversation_id: None,
+            transcript_path: None,
+            state: State::Working,
+            unread: false,
+            exit_status: None,
+            last_event_at: None,
+            screen_hash: None,
+            screen_changed_at: None,
+            created_at: 0,
+            deleted_at: None,
+        }
+    }
+
+    fn event(kind: &str, at: i64, payload: Option<&str>) -> Event {
+        Event {
+            id: 1,
+            session_id: "a".into(),
+            kind: kind.into(),
+            at,
+            payload: payload.map(String::from),
+        }
+    }
+
+    #[test]
+    fn turn_end_and_questions_mark_unread() {
+        let mut s = session("a");
+        s.apply(&event("working", 10, None));
+        assert_eq!((s.state, s.unread), (State::Working, false));
+        s.apply(&event("needs-input", 20, None));
+        assert_eq!((s.state, s.unread), (State::NeedsInput, true));
+        s.unread = false;
+        s.apply(&event("working", 30, None));
+        s.apply(&event("idle", 40, None));
+        assert_eq!(
+            (s.state, s.unread, s.last_event_at),
+            (State::Idle, true, Some(40))
+        );
+    }
+
+    #[test]
+    fn session_start_is_idle_but_not_unread() {
+        let mut s = session("a");
+        s.apply(&event(
+            "session",
+            10,
+            Some(r#"{"session_id":"c-1","transcript_path":"/t/c-1.jsonl","source":"startup"}"#),
+        ));
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+        assert_eq!(s.conversation_id.as_deref(), Some("c-1"));
+        assert_eq!(s.transcript_path.as_deref(), Some("/t/c-1.jsonl"));
+    }
+
+    #[test]
+    fn clear_switches_the_conversation() {
+        let mut s = session("a");
+        s.conversation_id = Some("c-1".into());
+        s.apply(&event(
+            "session",
+            10,
+            Some(r#"{"session_id":"c-2","source":"clear"}"#),
+        ));
+        assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
+    }
+
+    #[test]
+    fn ignores_unknown_kinds_and_deleted_sessions() {
+        let mut s = session("a");
+        s.apply(&event("bogus", 10, None));
+        assert_eq!((s.state, s.last_event_at), (State::Working, None));
+        s.deleted_at = Some(1);
+        s.apply(&event("idle", 20, None));
+        assert_eq!(s.state, State::Working);
+    }
+
+    #[test]
+    fn stale_working_becomes_idle_only_when_screen_is_still() {
+        let mut s = session("a");
+        s.apply(&event("working", 0, None));
+        s.observe_screen("h1", 1000);
+        // Hook event too recent.
+        assert!(!s.correct_stale_working(3000));
+        // Screen still changing.
+        s.observe_screen("h2", 4500);
+        assert!(!s.correct_stale_working(6000));
+        // Unchanged for QUIET_MS.
+        s.observe_screen("h2", 8000);
+        assert!(s.correct_stale_working(4500 + QUIET_MS));
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+    }
+
+    #[test]
+    fn only_working_sessions_get_corrected() {
+        let mut s = session("a");
+        s.apply(&event("needs-input", 0, None));
+        s.observe_screen("h", 0);
+        assert!(!s.correct_stale_working(60_000));
+        assert_eq!(s.state, State::NeedsInput);
+    }
+}

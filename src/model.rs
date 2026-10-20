@@ -174,6 +174,27 @@ impl Session {
         self.worked_ms + current.max(0)
     }
 
+    /// The list's order: by attention (archived last), then, within each, by
+    /// when the session got there, oldest or newest first as `order` says.
+    pub fn list_order(&self, other: &Session, order: &crate::config::Order) -> std::cmp::Ordering {
+        use crate::config::First;
+        let tier = |s: &Session| (s.deleted_at.is_some(), s.attention());
+        tier(self).cmp(&tier(other)).then_with(|| {
+            let first = match (self.deleted_at, self.state, self.unread) {
+                (Some(_), _, _) => order.archived,
+                (None, State::NeedsInput, _) | (None, State::Idle, true) => order.needs_input,
+                (None, State::Idle, false) => order.idle,
+                (None, State::Stopped, _) => order.stopped,
+                (None, State::Working, _) => order.working,
+            };
+            let since = |s: &Session| s.deleted_at.or(s.state_since).unwrap_or(s.created_at);
+            match first {
+                First::Oldest => since(self).cmp(&since(other)),
+                First::Newest => since(other).cmp(&since(self)),
+            }
+        })
+    }
+
     /// Attention order: blocked on the user, then unread, idle, stopped (idle
     /// without a running agent), and working last: handed off.
     pub fn attention(&self) -> u8 {

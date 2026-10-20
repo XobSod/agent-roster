@@ -792,7 +792,7 @@ fn list_sessions(
         .filter(|s| s.deleted_at.is_some() == archived && project.is_none_or(|p| s.project == p))
         .collect();
     if by_attention {
-        sessions.sort_by_key(|s| (s.attention(), std::cmp::Reverse(s.state_since)));
+        sessions.sort_by(|a, b| a.list_order(b, &r.config.order));
     }
     if json {
         let items: Vec<_> = sessions

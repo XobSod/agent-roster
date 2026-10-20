@@ -166,6 +166,8 @@ pub struct App {
     agents: Vec<(String, bool)>,
     /// What each model alias last turned out to be, for the forms.
     pub model_names: std::collections::HashMap<String, String>,
+    /// Oldest or newest first, per shelf (config.toml).
+    pub order: crate::config::Order,
 }
 
 impl App {
@@ -201,6 +203,7 @@ impl App {
             default_path,
             agents,
             model_names: Default::default(),
+            order: Default::default(),
         }
     }
 
@@ -237,6 +240,7 @@ impl App {
             grouped: self.grouped,
             folded: &self.folded,
             filter: self.filter,
+            order: &self.order,
         };
         self.entries = list::live(&self.projects, &self.sessions, &opts);
         let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
@@ -1246,7 +1250,8 @@ mod tests {
     fn selection_follows_a_session_to_its_new_shelf() {
         let mut app = app();
         select(&mut app, "s4");
-        // s4 finishes its turn: it moves to "Needs you" and stays selected.
+        // s4 finishes its turn: it moves to "Needs input" and stays selected,
+        // after s2, which has waited longer.
         let mut sessions = app.sessions.clone();
         let s4 = sessions.iter_mut().find(|s| s.id == "s4").unwrap();
         s4.state = State::Idle;
@@ -1254,7 +1259,7 @@ mod tests {
         s4.state_since = Some(40);
         app.set_data(app.projects.clone(), sessions);
         assert_eq!(app.selected_session().unwrap().id, "s4");
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected, 2);
     }
 
     #[test]

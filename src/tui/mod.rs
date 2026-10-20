@@ -45,6 +45,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
         })
         .collect();
     let mut app = App::new(keymap, cwd, agents);
+    app.order = roster.config.order.clone();
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();

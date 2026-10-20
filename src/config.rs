@@ -5,6 +5,13 @@
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
 //! chats_dir = "~/chats"           # where chats run; default: roster's state directory
 //!
+//! [order]                         # within each shelf: "oldest" or "newest" first
+//! needs_input = "oldest"          # the defaults: first come, first served,
+//! idle = "oldest"
+//! stopped = "oldest"
+//! working = "oldest"              # (the one working longest on top)
+//! archived = "newest"             # and the most recently archived on top
+//!
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
 //! down = ["j", "Down"]
@@ -34,8 +41,40 @@ pub struct Config {
     pub shell: Option<String>,
     /// Where chats (sessions without a project of their own) run.
     pub chats_dir: Option<String>,
+    pub order: Order,
     pub keys: Keys,
     pub agents: BTreeMap<String, AgentConfig>,
+}
+
+/// Which comes first within a shelf: the session that got there earliest, or
+/// latest (archived: by when it was archived).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum First {
+    Oldest,
+    Newest,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Order {
+    pub needs_input: First,
+    pub idle: First,
+    pub stopped: First,
+    pub working: First,
+    pub archived: First,
+}
+
+impl Default for Order {
+    fn default() -> Self {
+        Order {
+            needs_input: First::Oldest,
+            idle: First::Oldest,
+            stopped: First::Oldest,
+            working: First::Oldest,
+            archived: First::Newest,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,6 +300,23 @@ mod tests {
             Some("/opt/claude")
         );
         assert_eq!(config.agent("claude").args, ["--model", "haiku"]);
+    }
+
+    #[test]
+    fn shelf_order_is_oldest_first_but_archived_newest() {
+        let config = Config::parse("").unwrap();
+        assert_eq!(config.order, Order::default());
+        assert_eq!(
+            (config.order.needs_input, config.order.archived),
+            (First::Oldest, First::Newest)
+        );
+        let config = Config::parse("[order]\nworking = \"newest\"").unwrap();
+        assert_eq!(
+            (config.order.working, config.order.idle),
+            (First::Newest, First::Oldest)
+        );
+        assert!(Config::parse("[order]\nworking = \"random\"").is_err());
+        assert!(Config::parse("[order]\nnope = \"oldest\"").is_err());
     }
 
     #[test]

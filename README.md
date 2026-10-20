@@ -81,7 +81,9 @@ lists every command.
 All files are optional and live in `~/.config/agent-roster/`:
 
 - `config.toml`: `shell`, `chats_dir` (where chats run; default inside roster's state
-  directory), `[keys]` (every TUI key, plus `detach` for Ctrl+Q),
+  directory), `[order]` (per shelf, `"oldest"` or `"newest"` first; by default first
+  come, first served, and the archive newest first), `[keys]` (every TUI key, plus
+  `detach` for Ctrl+Q),
   `[agents.claude] command`/`args`. Any other agent
   goes in its own table and is then offered for new sessions:
 

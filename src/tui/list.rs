@@ -1,7 +1,6 @@
 //! What the session list shows: sessions on shelves by attention (or grouped by
 //! project), archived ones last, in which order, and which groups are folded.
 
-use std::cmp::Reverse;
 use std::collections::HashSet;
 
 use crate::model::{Project, Session, State};
@@ -109,20 +108,15 @@ pub struct Options<'a> {
     pub folded: &'a HashSet<Group>,
     /// Show only this project's sessions.
     pub filter: Option<i64>,
+    /// Oldest or newest first, per shelf.
+    pub order: &'a crate::config::Order,
 }
 
-/// Most attention first, then the most recent state change first. A working
-/// session's state changes only when its turn starts, so cards don't jump around.
-/// Archived ones: the most recently archived first.
-fn sort(sessions: &mut [&Session]) {
-    sessions.sort_by_key(|s| {
-        (
-            s.deleted_at.is_some(),
-            Reverse(s.deleted_at),
-            s.attention(),
-            Reverse(s.state_since),
-        )
-    });
+/// Most attention first, then by when each got there, as `order` says
+/// (default: first come, first served; archived: the latest first). A working
+/// session's state changes only when its turn starts, so cards don't jump.
+fn sort(sessions: &mut [&Session], order: &crate::config::Order) {
+    sessions.sort_by(|a, b| a.list_order(b, order));
 }
 
 fn entry(s: &Session) -> Entry {
@@ -145,7 +139,7 @@ pub fn live(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<E
     let mut entries = Vec::new();
     // A shelf's heading and, unless it's folded, its sessions.
     let push = |entries: &mut Vec<Entry>, group: Group, label: String, mut mine: Vec<&Session>| {
-        sort(&mut mine);
+        sort(&mut mine, opts.order);
         let open = !opts.folded.contains(&group);
         entries.push(Entry::Heading {
             group,
@@ -271,6 +265,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
@@ -284,10 +279,42 @@ mod tests {
                 "[Stopped 1]",
                 "row:stopped",
                 "[Working 2]",
-                "working-new",
                 "working-old",
+                "working-new",
                 "[Archived 1]",
                 "row:archived",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_shelf_can_be_newest_first() {
+        let folded = HashSet::new();
+        let order = crate::config::Order {
+            working: crate::config::First::Newest,
+            ..Default::default()
+        };
+        let opts = Options {
+            grouped: false,
+            folded: &folded,
+            filter: None,
+            order: &order,
+        };
+        let sessions = [
+            with("first", 1, State::Working, false, 10),
+            with("second", 1, State::Working, false, 20),
+            with("idle-1", 1, State::Idle, false, 10),
+            with("idle-2", 1, State::Idle, false, 20),
+        ];
+        assert_eq!(
+            keys(&live(&[project(1, "a")], &sessions, &opts)),
+            [
+                "[Idle 2]",
+                "idle-1",
+                "idle-2",
+                "[Working 2]",
+                "second",
+                "first"
             ]
         );
     }
@@ -299,6 +326,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         let shown = keys(&entries);
@@ -317,6 +345,7 @@ mod tests {
             grouped: true,
             folded: &folded,
             filter: None,
+            order: &crate::config::Order::default(),
         };
         let entries = live(
             &[project(1, "a"), project(2, "b"), project(3, "empty")],
@@ -348,6 +377,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: Some(2),
+            order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
@@ -369,6 +399,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            order: &crate::config::Order::default(),
         };
         let sessions = [archived("a", 1, 1), archived("b", 1, 2)];
         assert_eq!(

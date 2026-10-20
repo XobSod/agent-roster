@@ -156,8 +156,10 @@ pub struct App {
     /// Live and deleted.
     pub sessions: Vec<Session>,
     select_next: Option<EntryKey>,
-    /// Where the cursor was when attaching: its row, the session, its group.
-    attached: Option<(usize, String, Group)>,
+    /// The cursor's row when attaching, while attached.
+    attached_row: Option<usize>,
+    /// Back from giving a session a task: keep this row (see `rebuild`).
+    keep_row: Option<usize>,
     /// Suggested origin for a new project.
     default_path: String,
     /// Agents that can be started, and whether each resumes its conversations.
@@ -194,7 +196,8 @@ impl App {
             projects: Vec::new(),
             sessions: Vec::new(),
             select_next: None,
-            attached: None,
+            attached_row: None,
+            keep_row: None,
             default_path,
             agents,
             model_names: Default::default(),
@@ -257,17 +260,12 @@ impl App {
         self.selected = found
             .unwrap_or(fallback)
             .min(self.entries.len().saturating_sub(1));
-        // Back from a session that moved to another group (given a task, or
-        // read): the cursor keeps its row, so it's on whatever took the
-        // session's place, e.g. the next one waiting. One that stayed is followed.
-        if let Some((row, id, group)) = self.attached.take()
+        // Back from giving a session a task: the cursor keeps its row, so it's
+        // on whatever took the session's place, the next one waiting. Otherwise
+        // (only looked, or read its turn) it follows the session, as always.
+        if let Some(row) = self.keep_row.take()
             && self.mode == Mode::Live
             && !self.entries.is_empty()
-            && self
-                .sessions
-                .iter()
-                .find(|s| s.id == id)
-                .is_some_and(|s| list::group_of(s, self.grouped) != group)
         {
             let n = self.entries.len();
             let row = row.min(n - 1);
@@ -280,12 +278,18 @@ impl App {
     }
 
     /// Notes where the cursor is before attaching to session `id`, the selected
-    /// one (see `rebuild`).
+    /// one.
     pub fn attaching(&mut self, id: &str) {
-        if let Some(s) = self.selected_session().filter(|s| s.id == id) {
-            let group = list::group_of(s, self.grouped);
-            self.attached = Some((self.selected, s.id.clone(), group));
-        }
+        self.attached_row = self
+            .selected_session()
+            .is_some_and(|s| s.id == id)
+            .then_some(self.selected);
+    }
+
+    /// Back from attaching; `prompted`: a prompt was submitted meanwhile, so the
+    /// next rebuild keeps the cursor's row (see `rebuild`).
+    pub fn detached(&mut self, prompted: bool) {
+        self.keep_row = self.attached_row.take().filter(|_| prompted);
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -1201,6 +1205,7 @@ mod tests {
         select(&mut app, "s2");
         let row = app.selected;
         app.attaching("s2");
+        app.detached(true);
         let mut sessions = app.sessions.clone();
         let s2 = sessions.iter_mut().find(|s| s.id == "s2").unwrap();
         (s2.state, s2.unread, s2.state_since) = (State::Working, false, Some(50));
@@ -1216,11 +1221,20 @@ mod tests {
     }
 
     #[test]
-    fn back_from_a_session_that_stayed_the_cursor_stays_on_it() {
+    fn back_from_only_reading_the_cursor_stays_on_the_session() {
         let mut app = app();
+        // s2's finished turn, read without a prompt: read, it moves to Idle.
+        select(&mut app, "s2");
+        app.attaching("s2");
+        app.detached(false);
+        let mut sessions = app.sessions.clone();
+        sessions.iter_mut().find(|s| s.id == "s2").unwrap().unread = false;
+        app.set_data(app.projects.clone(), sessions);
+        assert_eq!(app.selected_session().unwrap().id, "s2");
+        // Another one landing above it meanwhile changes nothing either.
         select(&mut app, "s1");
         app.attaching("s1");
-        // Meanwhile another one needs input and lands above it.
+        app.detached(false);
         let mut sessions = app.sessions.clone();
         let s4 = sessions.iter_mut().find(|s| s.id == "s4").unwrap();
         (s4.state, s4.unread, s4.state_since) = (State::NeedsInput, true, Some(60));

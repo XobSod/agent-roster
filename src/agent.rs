@@ -176,7 +176,8 @@ fn claude_settings(roster_exe: &Path) -> String {
     let report = |kind: &str| json!([{"hooks": [{"type": "command", "command": format!("{} report {kind}", sh_quote(&roster_exe.to_string_lossy()))}]}]);
     json!({"hooks": {
         "SessionStart": report("session"),
-        "UserPromptSubmit": report("working"),
+        // Working too, and tells that you gave it a task.
+        "UserPromptSubmit": report("prompt"),
         "PostToolUse": report("working"),
         "PermissionRequest": report("needs-input"),
         "Stop": report("idle"),

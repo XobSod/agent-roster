@@ -415,6 +415,18 @@ impl Db {
         Ok((waiting, kept))
     }
 
+    /// Whether a prompt was submitted to session `id` since `at` (events are
+    /// kept a day).
+    pub fn prompted_since(&self, id: &str, at: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE session_id = ?1 AND kind = 'prompt' AND at >= ?2)",
+                params![id, at],
+                |r| r.get(0),
+            )?)
+    }
+
     /// A value roster keeps for itself.
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -752,6 +764,21 @@ mod tests {
         db.save_session(&read).unwrap();
         assert_eq!(db.fold_events(200).unwrap(), 0);
         assert!(!db.session(&s.id).unwrap().unread);
+    }
+
+    #[test]
+    fn prompts_count_as_working_and_are_found_later() {
+        let (mut db, s) = db_with_session();
+        db.insert_event(&s.id, "prompt", 10, None).unwrap();
+        db.fold_events(100).unwrap();
+        assert_eq!(db.session(&s.id).unwrap().state, State::Working);
+        // Since when you attached: one at 10, none after it.
+        assert!(db.prompted_since(&s.id, 5).unwrap());
+        assert!(!db.prompted_since(&s.id, 11).unwrap());
+        // Working alone (a tool, say) isn't a prompt.
+        db.insert_event(&s.id, "working", 20, None).unwrap();
+        assert!(!db.prompted_since(&s.id, 15).unwrap());
+        assert!(!db.prompted_since("other", 0).unwrap());
     }
 
     #[test]

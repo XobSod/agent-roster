@@ -541,7 +541,9 @@ impl Roster {
 
     /// Attaches the terminal to a session, starting it first if it's stopped, and
     /// marks it read once the user detaches.
-    pub fn attach(&mut self, id: &str) -> Result<()> {
+    /// Returns whether you submitted a prompt while attached (for agents that
+    /// report prompts: Claude).
+    pub fn attach(&mut self, id: &str) -> Result<bool> {
         self.refresh()?;
         let s = self.db.session(id)?;
         if s.deleted_at.is_some() {
@@ -550,13 +552,15 @@ impl Roster {
         if s.state == State::Stopped {
             self.start(id)?;
         }
+        let since = now_ms();
         let status = self.tmux.attach(&s.tmux_name())?;
         if !status.success() {
             bail!("couldn't attach to {}", s.label());
         }
         // Whatever happened while attached counts as seen.
         self.refresh()?;
-        self.set_unread(id, false)
+        self.set_unread(id, false)?;
+        self.db.prompted_since(id, since)
     }
 
     /// Renames a session or changes its model and effort; the agent picks those up

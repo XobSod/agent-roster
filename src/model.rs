@@ -239,7 +239,8 @@ impl Session {
             }
         }
         match e.kind.as_str() {
-            "working" => self.set_state(State::Working, e.at),
+            // A prompt you submitted starts a turn.
+            "working" | "prompt" => self.set_state(State::Working, e.at),
             "idle" => {
                 self.set_state(State::Idle, e.at);
                 self.unread = true;

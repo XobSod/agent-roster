@@ -188,7 +188,10 @@ fn perform(
     let outcome: Result<String> = match op {
         Op::Attach(id) => {
             app.attaching(&id);
-            attach(terminal, roster, &id)?.map(|()| String::new())
+            attach(terminal, roster, &id)?.map(|prompted| {
+                app.detached(prompted);
+                String::new()
+            })
         }
         Op::Start(id) => {
             let label = app.session_label(&id);
@@ -387,8 +390,8 @@ fn busy(terminal: &mut DefaultTerminal, app: &mut App, message: String) -> Resul
 }
 
 /// Hands the terminal to `tmux attach` until the user detaches. The outer result
-/// is the terminal's, the inner one the attach's.
-fn attach(terminal: &mut DefaultTerminal, roster: &mut Roster, id: &str) -> Result<Result<()>> {
+/// is the terminal's, the inner one the attach's: whether a prompt was submitted.
+fn attach(terminal: &mut DefaultTerminal, roster: &mut Roster, id: &str) -> Result<Result<bool>> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
     let result = roster.attach(id);

@@ -29,9 +29,11 @@ To scroll back through an agent's history while attached, also set up
 Run `roster` for the TUI: sessions on the left, the selected agent's screen on the right.
 
 Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds
-a heading); in an agent, Ctrl+Q comes back and marks it read. `?` shows every key, and
-`q` quits (in the projects and server views it goes back, like `Esc`). Everything
-else is in three menus, which pop up their keys:
+a heading); in an agent, Ctrl+Q comes back and marks it read. `/` filters the list as
+you type, fuzzily (`atrw` finds "Auth rework"; `'word` matches exactly): `Enter` keeps
+the filter, `Esc` clears it. `?` shows every key, and `q` quits (in the projects and
+server views it goes back, like `Esc`). Everything else is in three menus, which pop
+up their keys:
 
 | Menu | Keys |
 |---|---|
@@ -74,6 +76,7 @@ roster adopt 3f2a --name api            # continue one here; --fork adopts a cop
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
 roster ls --project myproj --sort attention   # like the TUI's shelves
+roster ls auth rework                   # only those matching (fuzzy, like / in the TUI)
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation

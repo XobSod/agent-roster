@@ -37,6 +37,8 @@ pub enum Action {
     Collapse,
     Expand,
     Confirm,
+    /// Filter the list by typing.
+    Search,
     Quit,
     Help,
     Open(Menu),
@@ -81,6 +83,7 @@ impl Action {
             Action::Collapse => "fold",
             Action::Expand => "unfold",
             Action::Confirm => "attach / open",
+            Action::Search => "filter the list",
             Action::Quit => "quit (in a view: back)",
             Action::Help => "help",
             Action::Open(menu) => menu.name(),
@@ -273,6 +276,7 @@ impl Keymap {
             Action::Open(Menu::View),
             &mut labels,
         )?;
+        top.bind(t, "search", &keys.search, Action::Search, &mut labels)?;
         top.bind(t, "help", &keys.help, Action::Help, &mut labels)?;
         top.bind(t, "quit", &keys.quit, Action::Quit, &mut labels)?;
 

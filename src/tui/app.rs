@@ -2,7 +2,7 @@
 //! that the run loop carries out, so this part is testable on its own.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -14,6 +14,7 @@ use super::picker::{Picked, Picker};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
 use crate::paths::PROJECT_ENV;
+use crate::search::Hit;
 
 const MESSAGE_TTL: Duration = Duration::from_secs(6);
 
@@ -125,7 +126,16 @@ pub struct App {
     pub grouped: bool,
     /// Showing only this project's sessions.
     pub filter: Option<i64>,
+    /// The text filter (`/`), and the sessions matching it by id (None: none).
+    pub search: String,
+    pub hits: Option<HashMap<String, Hit>>,
+    /// Typing the filter, so keys go to it: what it and the selection were
+    /// before, for Esc.
+    pub typing: Option<(String, Option<EntryKey>)>,
     folded: HashSet<Group>,
+    /// Folded while filtering by text; every group starts open, so what
+    /// matches shows, archived too.
+    search_folded: HashSet<Group>,
     pub entries: Vec<Entry>,
     pub selected: usize,
     /// First visible list row; the drawing code keeps the selection in view.
@@ -177,7 +187,11 @@ impl App {
             mode: Mode::Live,
             grouped: false,
             filter: None,
+            search: String::new(),
+            hits: None,
+            typing: None,
             folded: HashSet::from([Group::Shelf(Shelf::Archived)]),
+            search_folded: HashSet::new(),
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
@@ -235,11 +249,18 @@ impl App {
 
     fn rebuild(&mut self) {
         let keep = self.select_next.take().or_else(|| self.selected_key());
+        self.hits = crate::search::hits(
+            &self.search,
+            self.sessions
+                .iter()
+                .filter(|s| self.filter.is_none_or(|p| s.project_id == p)),
+        );
         // In the server view the list isn't shown, but kept for coming back.
         let opts = list::Options {
             grouped: self.grouped,
-            folded: &self.folded,
+            folded: self.folds(),
             filter: self.filter,
+            hits: self.hits.as_ref(),
             order: &self.order,
         };
         self.entries = list::live(&self.projects, &self.sessions, &opts);
@@ -371,15 +392,21 @@ impl App {
         });
     }
 
-    /// The current message, if it's recent.
+    /// The current message: an error until the next key press, anything else
+    /// while it's recent.
     pub fn message(&self) -> Option<&Message> {
         self.message
             .as_ref()
-            .filter(|m| m.at.elapsed() < MESSAGE_TTL)
+            .filter(|m| m.error || m.at.elapsed() < MESSAGE_TTL)
     }
 
     /// Footer hints: keys that act here and now.
     pub fn hints(&self) -> Vec<(String, &'static str)> {
+        if self.typing.is_some() {
+            return [("Enter", "keep"), ("Esc", "cancel"), ("↑↓ C-p C-n", "move")]
+                .map(|(key, what)| (key.to_string(), what))
+                .into();
+        }
         if self.mode == Mode::Projects {
             return self.projects_view_hints();
         }
@@ -391,6 +418,7 @@ impl App {
                 let enter = if archived { "restore" } else { "attach" };
                 let mut actions = vec![(Action::Confirm, enter)];
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
+                actions.push((Action::Search, "filter"));
                 actions
             }
             Mode::Projects => Vec::new(),
@@ -403,6 +431,9 @@ impl App {
             .into_iter()
             .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
             .collect();
+        if self.mode == Mode::Live && !self.search.is_empty() {
+            hints.push(("Esc".into(), "clear filter"));
+        }
         // In a view the quit key goes back, like Esc.
         let quit = if self.mode == Mode::Live {
             Some((Action::Quit, "quit"))
@@ -451,8 +482,15 @@ impl App {
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Option<Op> {
+        if self.message.as_ref().is_some_and(|m| m.error) {
+            self.message = None;
+        }
         if self.dialog.is_some() {
             return self.on_dialog_key(e);
+        }
+        if self.typing.is_some() {
+            self.on_search_key(e);
+            return None;
         }
         if self.help {
             self.help = false;
@@ -464,6 +502,10 @@ impl App {
         }
         if self.mode != Mode::Live && e.code == KeyCode::Esc {
             self.set_mode(Mode::Live);
+            return None;
+        }
+        if e.code == KeyCode::Esc && !self.search.is_empty() {
+            self.set_search(String::new());
             return None;
         }
         // The projects view is about projects: the project menu's keys work
@@ -492,6 +534,7 @@ impl App {
             Action::Collapse => self.fold(true),
             Action::Expand => self.fold(false),
             Action::Confirm => return self.confirm_selected(),
+            Action::Search => self.typing = Some((self.search.clone(), self.selected_key())),
             Action::Quit => return Some(Op::Quit),
             Action::Help => self.help = true,
             Action::Open(menu) => self.menu = Some(menu),
@@ -617,10 +660,15 @@ impl App {
             }
             _ => return,
         };
-        let changed = if fold {
-            self.folded.insert(group)
+        let folds = if self.hits.is_some() {
+            &mut self.search_folded
         } else {
-            self.folded.remove(&group)
+            &mut self.folded
+        };
+        let changed = if fold {
+            folds.insert(group)
+        } else {
+            folds.remove(&group)
         };
         if changed {
             self.select_next = Some(EntryKey::Group(group));
@@ -797,6 +845,84 @@ impl App {
 
     fn agent_names(&self) -> Vec<String> {
         self.agents.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// The folded groups: while filtering by text, its own.
+    fn folds(&self) -> &HashSet<Group> {
+        if self.hits.is_some() {
+            &self.search_folded
+        } else {
+            &self.folded
+        }
+    }
+
+    /// Typing the text filter: Enter keeps it, Esc puts back what it was.
+    fn on_search_key(&mut self, e: KeyEvent) {
+        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = e.modifiers.contains(KeyModifiers::ALT);
+        let down = match e.code {
+            KeyCode::Up => Some(false),
+            KeyCode::Char('p' | 'k') if ctrl => Some(false),
+            KeyCode::Down => Some(true),
+            KeyCode::Char('n' | 'j') if ctrl => Some(true),
+            _ => None,
+        };
+        if let Some(down) = down {
+            self.selected = wrap(self.selected, self.entries.len(), down);
+            return;
+        }
+        let mut text = self.search.clone();
+        match e.code {
+            KeyCode::Enter => {
+                self.typing = None;
+                if text.trim().is_empty() {
+                    text.clear();
+                }
+            }
+            KeyCode::Esc => return self.cancel_search(),
+            KeyCode::Char('c') if ctrl => return self.cancel_search(),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char('u') if ctrl => text.clear(),
+            KeyCode::Char('w') if ctrl => {
+                let kept = text.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                text.truncate(kept);
+            }
+            KeyCode::Char(c) if !ctrl && !alt => text.push(c),
+            _ => {}
+        }
+        if text != self.search {
+            self.set_search(text);
+        }
+    }
+
+    fn cancel_search(&mut self) {
+        if let Some((text, selected)) = self.typing.take() {
+            self.search = text;
+            self.select_next = selected;
+            self.rebuild();
+        }
+    }
+
+    /// Filters the list by `text`, every group open, the cursor on the best
+    /// match.
+    fn set_search(&mut self, text: String) {
+        self.search = text;
+        self.search_folded.clear();
+        self.rebuild();
+        let Some(hits) = &self.hits else { return };
+        let mut best: Option<(u32, usize)> = None;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if let Some(hit) = entry.session().and_then(|s| hits.get(&s.id))
+                && best.is_none_or(|(score, _)| hit.score > score)
+            {
+                best = Some((hit.score, i));
+            }
+        }
+        if let Some((_, i)) = best {
+            self.selected = i;
+        }
     }
 
     fn toggle_filter(&mut self) {
@@ -1045,6 +1171,9 @@ impl App {
                     self.chord(Menu::Session, Action::NewChat)
                 )),
             ]),
+            Mode::Live if self.hits.is_some() => {
+                Text::from(format!("No session matches “{}”.", self.search.trim()))
+            }
             Mode::Live => Text::from(format!(
                 "No sessions yet. Press {} to start one, or {} for a chat.",
                 self.chord(Menu::Session, Action::NewSession),
@@ -1629,5 +1758,120 @@ mod tests {
         assert_eq!(hints[0], ("Enter".to_string(), "attach"));
         assert!(hints.contains(&("s".to_string(), "session")));
         assert!(hints.contains(&("?".to_string(), "help")));
+    }
+
+    /// `app()` with titles: s1 "Tree depot", s2 "Auth rework", s4 "Report",
+    /// archived s3 "Old idea".
+    fn titled() -> App {
+        let mut app = app();
+        let mut sessions = app.sessions.clone();
+        for (s, title) in
+            sessions
+                .iter_mut()
+                .zip(["Tree depot", "Auth rework", "Report", "Old idea"])
+        {
+            s.title = Some(title.into());
+        }
+        app.set_data(app.projects.clone(), sessions);
+        app
+    }
+
+    fn session_key(id: &str) -> EntryKey {
+        EntryKey::Session(id.into())
+    }
+
+    #[test]
+    fn slash_filters_as_you_type_and_enter_keeps_it() {
+        let mut app = titled();
+        keys(&mut app, "/");
+        assert_eq!(app.hints()[0], ("Enter".to_string(), "keep"));
+        // Keys go to the filter, `q` too; the cursor goes to the best match,
+        // not the first.
+        assert_eq!(keys(&mut app, "rep"), None);
+        assert_eq!(
+            shown(&app),
+            [
+                EntryKey::Group(Group::Shelf(Shelf::Idle)),
+                session_key("s1"),
+                EntryKey::Group(Group::Shelf(Shelf::Working)),
+                session_key("s4"),
+            ]
+        );
+        assert_eq!(app.selected_key(), Some(session_key("s4")));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(
+            app.selected_key(),
+            Some(EntryKey::Group(Group::Shelf(Shelf::Working)))
+        );
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.typing.is_none());
+        // Kept: the list stays filtered, and keys are keys again.
+        keys(&mut app, "j");
+        assert_eq!(app.selected_key(), Some(session_key("s4")));
+        assert!(app.hints().contains(&("Esc".to_string(), "clear filter")));
+        // Esc clears it.
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!((app.search.as_str(), app.hits.is_none()), ("", true));
+        assert!(shown(&app).contains(&session_key("s2")));
+        assert_eq!(app.selected_key(), Some(session_key("s4")));
+    }
+
+    #[test]
+    fn esc_while_typing_puts_back_the_filter_and_the_cursor() {
+        let mut app = titled();
+        select(&mut app, "s2");
+        keys(&mut app, "/auth");
+        app.on_key(key(KeyCode::Enter));
+        keys(&mut app, "/q");
+        assert_eq!(app.search, "authq");
+        assert!(app.hits.as_ref().unwrap().is_empty());
+        assert!(app.entries.is_empty());
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.search, "auth");
+        assert_eq!(
+            shown(&app),
+            [
+                EntryKey::Group(Group::Shelf(Shelf::NeedsInput)),
+                session_key("s2")
+            ]
+        );
+        assert_eq!(app.selected_key(), Some(session_key("s2")));
+        // Blank, Enter turns it off.
+        keys(&mut app, "/");
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        keys(&mut app, " ");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!((app.search.as_str(), app.hits.is_none()), ("", true));
+    }
+
+    #[test]
+    fn filtering_opens_every_group_and_folds_its_own() {
+        let mut app = titled();
+        assert!(!shown(&app).contains(&session_key("s3")));
+        keys(&mut app, "/old");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.selected_key(), Some(session_key("s3")));
+        keys(&mut app, "h");
+        assert_eq!(
+            shown(&app),
+            [EntryKey::Group(Group::Shelf(Shelf::Archived))]
+        );
+        // The list's own folds are as they were, and the next filter starts open.
+        app.on_key(key(KeyCode::Esc));
+        keys(&mut app, "l");
+        assert!(shown(&app).contains(&session_key("s3")));
+        keys(&mut app, "h/old");
+        assert!(shown(&app).contains(&session_key("s3")));
+    }
+
+    #[test]
+    fn errors_stay_until_a_key_is_pressed() {
+        let mut app = app();
+        app.flash("Started");
+        keys(&mut app, "j");
+        assert_eq!(app.message().map(|m| m.text.as_str()), Some("Started"));
+        app.fail("Broken");
+        keys(&mut app, "j");
+        assert!(app.message().is_none());
     }
 }

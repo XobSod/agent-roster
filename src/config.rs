@@ -89,6 +89,8 @@ pub struct Keys {
     pub expand: KeyList,
     /// Attach to the selected session, open or fold a heading, restore when archived.
     pub confirm: KeyList,
+    /// Filter the session list by typing.
+    pub search: KeyList,
     pub quit: KeyList,
     pub help: KeyList,
     pub session: SessionKeys,
@@ -152,6 +154,7 @@ impl Default for Keys {
             collapse: keys(&["h", "Left"]),
             expand: keys(&["l", "Right"]),
             confirm: keys(&["Enter"]),
+            search: keys(&["/"]),
             quit: keys(&["q", "C-c"]),
             help: keys(&["?"]),
             session: SessionKeys::default(),

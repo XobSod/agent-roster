@@ -6,6 +6,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Dialog, Mode};
@@ -17,6 +18,7 @@ use super::theme::{
 };
 use crate::keys::{Action, Menu};
 use crate::model::{Session, State};
+use crate::search::Hit;
 use crate::util::now_ms;
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -115,21 +117,44 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
         top,
     );
 
-    let note = match (app.mode, app.filter.and_then(|id| app.project(id))) {
-        (Mode::Live, Some(p)) => Some(format!(" only {}", p.name)),
-        _ => None,
-    };
-    if let Some(note) = note {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                truncate(&note, width),
-                Style::new().fg(MUTED).italic(),
-            )),
-            sub,
-        );
+    // The filters: by project and by text, and how many match.
+    let mut filters = Vec::new();
+    if let Some(p) = app.filter.and_then(|id| app.project(id)) {
+        filters.push(Span::styled(
+            format!(" only {}", p.name),
+            Style::new().fg(MUTED).italic(),
+        ));
+    }
+    let mut count = Vec::new();
+    if app.typing.is_some() || !app.search.is_empty() {
+        if !filters.is_empty() {
+            filters.push(Span::styled(" ·", Style::new().fg(FAINT)));
+        }
+        filters.push(Span::styled(" / ", Style::new().fg(ACCENT)));
+        filters.push(Span::raw(app.search.clone()));
+        if let Some(hits) = &app.hits {
+            let total = app
+                .sessions
+                .iter()
+                .filter(|s| app.filter.is_none_or(|p| s.project_id == p))
+                .count();
+            count.push(Span::styled(
+                format!("{} of {total} ", hits.len()),
+                Style::new().fg(MUTED),
+            ));
+        }
+    }
+    let typed = filters.iter().map(Span::width).sum::<usize>();
+    f.render_widget(Paragraph::new(Line::from(fit(width, filters, count))), sub);
+    if app.typing.is_some() {
+        let x = typed.min(width.saturating_sub(1)) as u16;
+        f.set_cursor_position((sub.x + x, sub.y));
     }
 
     let (mut lines, mut spans) = list_lines(app, width, now);
+    if lines.is_empty() && app.hits.is_some() {
+        lines.push(Line::styled("  nothing matches", Style::new().fg(MUTED)));
+    }
     let height = list.height as usize;
     // What's handed off (working) or finished (archived) sits at the bottom
     // while everything fits.
@@ -179,7 +204,7 @@ fn list_lines(app: &App, width: usize, now: i64) -> (Vec<Line<'static>>, Vec<(us
                 open,
                 group,
             } => vec![heading(*group, label, *count, *open, content)],
-            Entry::Card(s) => card(s, !app.grouped, content, now),
+            Entry::Card(s) => card(s, hit(app, s), !app.grouped, content, now),
             Entry::Row(s) => vec![row(app, s, content, now)],
         };
         spans.push((lines.len(), rows.len()));
@@ -240,9 +265,46 @@ fn heading(
     left
 }
 
+/// Where the text filter matched `s`, if it's on.
+fn hit<'a>(app: &'a App, s: &Session) -> Option<&'a Hit> {
+    app.hits.as_ref()?.get(&s.id)
+}
+
+/// `text` in `style`, with the characters at `marks` (indices of graphemes, in
+/// order) highlighted, as matched by the text filter.
+fn marked(text: &str, marks: &[usize], style: Style) -> Vec<Span<'static>> {
+    let lit = style
+        .fg(ACCENT)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_lit = false;
+    for (i, g) in text.graphemes(true).enumerate() {
+        let is_lit = marks.binary_search(&i).is_ok();
+        if is_lit != run_lit && !run.is_empty() {
+            let s = if run_lit { lit } else { style };
+            spans.push(Span::styled(std::mem::take(&mut run), s));
+        }
+        run_lit = is_lit;
+        run.push_str(g);
+    }
+    if !run.is_empty() || spans.is_empty() {
+        spans.push(Span::styled(run, if run_lit { lit } else { style }));
+    }
+    spans
+}
+
 /// A session's lines: its project (badge and name) unless the project's heading
 /// is right above; the title and state; name, model and effort, age and agent.
-fn card(s: &Session, with_project: bool, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
+fn card(
+    s: &Session,
+    hit: Option<&Hit>,
+    with_project: bool,
+    width: usize,
+    now: i64,
+) -> Vec<Vec<Span<'static>>> {
+    let none = Hit::default();
+    let hit = hit.unwrap_or(&none);
     let working = s.state == State::Working;
     let title_style = match (s.state, s.unread) {
         (State::NeedsInput, _) | (State::Idle, true) => Style::new().add_modifier(Modifier::BOLD),
@@ -252,22 +314,30 @@ fn card(s: &Session, with_project: bool, width: usize, now: i64) -> Vec<Vec<Span
     let meta_color = if working { FAINT } else { MUTED };
     let mut lines = Vec::new();
     if with_project {
-        lines.push(fit(width, project_name(&s.project), Vec::new()));
+        lines.push(fit(
+            width,
+            project_name(&s.project, &hit.project),
+            Vec::new(),
+        ));
     }
     let first = fit(
         width,
-        vec![
-            Span::raw("   "),
-            Span::styled(s.display_title().to_string(), title_style),
-        ],
+        [
+            vec![Span::raw("   ")],
+            marked(s.display_title(), &hit.title, title_style),
+        ]
+        .concat(),
         [status(s, now), vec![Span::raw(" ")]].concat(),
     );
+    let meta_style = Style::new().fg(meta_color);
     let second = fit(
         width,
-        vec![
-            Span::raw("   "),
-            Span::styled(meta(s), Style::new().fg(meta_color)),
-        ],
+        [
+            vec![Span::raw("   ")],
+            marked(&s.name, &hit.name, meta_style),
+            vec![Span::styled(meta(s), meta_style)],
+        ]
+        .concat(),
         vec![
             Span::styled(
                 format!("{} ", theme::ago(now - s.created_at)),
@@ -290,28 +360,28 @@ fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
         )],
         None => [status(s, now), vec![Span::raw(" ")]].concat(),
     };
-    let title = Span::styled(s.display_title().to_string(), Style::new().fg(MUTED));
+    let none = Hit::default();
+    let hit = hit(app, s).unwrap_or(&none);
+    let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));
     // Grouped by project, the heading right above says it; archived sessions
     // come from every project.
     let left = if app.grouped && s.deleted_at.is_none() {
-        vec![Span::raw("   "), title]
+        [vec![Span::raw("   ")], title].concat()
     } else {
         let slash = Span::styled(" / ", Style::new().fg(FAINT));
-        [project_name(&s.project), vec![slash, title]].concat()
+        [project_name(&s.project, &hit.project), vec![slash], title].concat()
     };
     fit(width, left, right)
 }
 
-/// The project's badge and name, in its colour.
-fn project_name(project: &str) -> Vec<Span<'static>> {
-    vec![
-        badge(project),
-        Span::raw(" "),
-        Span::styled(
-            project.to_string(),
-            Style::new().fg(theme::project_color(project)),
-        ),
+/// The project's badge and name, in its colour (`marks` matched the filter).
+fn project_name(project: &str, marks: &[usize]) -> Vec<Span<'static>> {
+    let style = Style::new().fg(theme::project_color(project));
+    [
+        vec![badge(project), Span::raw(" ")],
+        marked(project, marks, style),
     ]
+    .concat()
 }
 
 /// The colored two-letter project badge.
@@ -332,9 +402,10 @@ fn glyph(agent: &str) -> Span<'static> {
     }
 }
 
-/// The card's second line: name, then model and effort (and the agent, if not Claude).
+/// The card's second line after the name: model and effort (and the agent, if
+/// not Claude).
 fn meta(s: &Session) -> String {
-    let mut meta = s.name.clone();
+    let mut meta = String::new();
     if s.agent != crate::agent::CLAUDE {
         meta.push_str(&format!(" · {}", s.agent));
     }
@@ -489,22 +560,42 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
     }
 }
 
+/// The key hints, and the latest message flush right, so the hints stay in
+/// sight. Where the two would meet, the last hints give way, whole.
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let line = match app.message() {
-        Some(m) => Line::styled(
-            format!(" {}", m.text),
-            Style::new().fg(if m.error { ERROR } else { INPUT }),
-        ),
-        None => {
-            let mut spans = vec![Span::raw(" ")];
-            for (key, what) in app.hints() {
-                spans.push(Span::styled(key, Style::new().add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(format!(" {what}   "), Style::new().fg(MUTED)));
-            }
-            Line::from(spans)
-        }
+    let width = area.width as usize;
+    let message: Vec<Span> = app
+        .message()
+        .map(|m| {
+            let style = Style::new().fg(if m.error { ERROR } else { INPUT });
+            vec![
+                Span::styled(truncate(&m.text, width.saturating_sub(2)), style),
+                Span::raw(" "),
+            ]
+        })
+        .unwrap_or_default();
+    // A gap of three columns before the message, as between hints.
+    let room = match message.iter().map(Span::width).sum::<usize>() {
+        0 => width,
+        w => width.saturating_sub(w + 3),
     };
-    f.render_widget(Paragraph::new(line), area);
+    let mut hints = vec![Span::raw(" ")];
+    let mut used = 1;
+    for (i, (key, what)) in app.hints().into_iter().enumerate() {
+        let gap = if i == 0 { 0 } else { 3 };
+        let w = gap + key.width() + 1 + what.width();
+        if used + w > room {
+            break;
+        }
+        used += w;
+        hints.push(Span::raw(" ".repeat(gap)));
+        hints.push(Span::styled(key, Style::new().add_modifier(Modifier::BOLD)));
+        hints.push(Span::styled(format!(" {what}"), Style::new().fg(MUTED)));
+    }
+    if used == 1 {
+        hints.clear();
+    }
+    f.render_widget(Paragraph::new(Line::from(fit(width, hints, message))), area);
 }
 
 /// The tmux server and database report, full width.
@@ -1248,6 +1339,58 @@ mod tests {
         assert!(screen.contains("needs input"), "{screen}");
         assert!(screen.contains("agent screen line"), "{screen}");
         assert!(screen.contains("Enter attach"), "{screen}");
+    }
+
+    #[test]
+    fn messages_sit_right_of_the_hints() {
+        let mut app = app();
+        app.flash("Started roster/api; Enter attaches");
+        let screen = render(&app, 120, 16);
+        let footer = screen.lines().last().unwrap();
+        assert!(footer.starts_with(" Enter attach   s session"), "{footer}");
+        assert!(
+            footer.ends_with("   Started roster/api; Enter attaches "),
+            "{footer}"
+        );
+        // Where they'd meet, the last hints give way, whole.
+        let screen = render(&app, 70, 16);
+        let footer = screen.lines().last().unwrap();
+        assert!(
+            footer.starts_with(" Enter attach   s session   "),
+            "{footer}"
+        );
+        assert!(!footer.contains("help"), "{footer}");
+        assert!(
+            footer.ends_with(" Started roster/api; Enter attaches "),
+            "{footer}"
+        );
+        // Longer than the line: only the message, cut.
+        let screen = render(&app, 30, 16);
+        let footer = screen.lines().last().unwrap();
+        assert_eq!(footer, " Started roster/api; Enter a… ");
+    }
+
+    #[test]
+    fn the_text_filter_shows_under_the_title_and_marks_what_matched() {
+        let mut app = app();
+        for c in "/fix".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let line = |y: u16| -> String { (0..40).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(line(1).starts_with(" / fix "), "{}", line(1));
+        assert!(line(1).contains(" 1 of 2 │"), "{}", line(1));
+        let y = (0..16)
+            .find(|&y| line(y).contains("Fix scrollback"))
+            .unwrap();
+        let x = (0..40).find(|&x| buffer[(x, y)].symbol() == "F").unwrap();
+        let lit = |x| buffer[(x, y)].modifier.contains(Modifier::UNDERLINED);
+        assert!(lit(x) && lit(x + 1) && lit(x + 2) && !lit(x + 3));
+        assert!(!render(&app, 120, 16).contains("Working"));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(render(&app, 120, 16).contains("nothing matches"));
     }
 
     #[test]

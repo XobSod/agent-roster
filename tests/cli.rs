@@ -581,6 +581,13 @@ fn ls_shows_titles_models_and_filters() {
         lines[1].contains("two") && lines[1].contains("●"),
         "{by_attention}"
     );
+    // Words filter fuzzily, by project, title or name.
+    let matching = t.ok(&["ls", "b/tw"]);
+    assert!(
+        matching.contains("two") && !matching.contains("one"),
+        "{matching}"
+    );
+    assert!(t.ok(&["ls", "zzz"]).contains("No sessions match \"zzz\""));
 }
 
 #[test]

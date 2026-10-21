@@ -1,9 +1,10 @@
 //! What the session list shows: sessions on shelves by attention (or grouped by
 //! project), archived ones last, in which order, and which groups are folded.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::model::{Project, Session, State};
+use crate::search::Hit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Shelf {
@@ -108,6 +109,8 @@ pub struct Options<'a> {
     pub folded: &'a HashSet<Group>,
     /// Show only this project's sessions.
     pub filter: Option<i64>,
+    /// Show only these sessions (matching the text filter), by id.
+    pub hits: Option<&'a HashMap<String, Hit>>,
     /// Oldest or newest first, per shelf.
     pub order: &'a crate::config::Order,
 }
@@ -133,6 +136,7 @@ pub fn live(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<E
     let shown: Vec<&Session> = sessions
         .iter()
         .filter(|s| opts.filter.is_none_or(|p| s.project_id == p))
+        .filter(|s| opts.hits.is_none_or(|h| h.contains_key(&s.id)))
         .collect();
     let (archived, shown): (Vec<&Session>, Vec<&Session>) =
         shown.into_iter().partition(|s| s.deleted_at.is_some());
@@ -161,6 +165,10 @@ pub fn live(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<E
                 .copied()
                 .filter(|s| s.project_id == p.id)
                 .collect();
+            // Filtering by text, only projects with a match.
+            if opts.hits.is_some() && mine.is_empty() {
+                continue;
+            }
             push(&mut entries, Group::Project(p.id), p.name.clone(), mine);
         }
         if !archived.is_empty() {
@@ -265,6 +273,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            hits: None,
             order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
@@ -298,6 +307,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            hits: None,
             order: &order,
         };
         let sessions = [
@@ -326,6 +336,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: None,
+            hits: None,
             order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
@@ -345,6 +356,7 @@ mod tests {
             grouped: true,
             folded: &folded,
             filter: None,
+            hits: None,
             order: &crate::config::Order::default(),
         };
         let entries = live(
@@ -377,6 +389,7 @@ mod tests {
             grouped: false,
             folded: &folded,
             filter: Some(2),
+            hits: None,
             order: &crate::config::Order::default(),
         };
         let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
@@ -393,12 +406,52 @@ mod tests {
     }
 
     #[test]
+    fn text_filter_shows_matches_only() {
+        let folded = HashSet::new();
+        let hits: HashMap<String, Hit> = ["unread", "working-new", "archived"]
+            .map(|id| (id.to_string(), Hit::default()))
+            .into();
+        let mut opts = Options {
+            grouped: false,
+            folded: &folded,
+            filter: None,
+            hits: Some(&hits),
+            order: &crate::config::Order::default(),
+        };
+        let projects = [project(1, "a"), project(2, "b"), project(3, "empty")];
+        assert_eq!(
+            keys(&live(&projects, &sessions(), &opts)),
+            [
+                "[Needs input 1]",
+                "unread",
+                "[Working 1]",
+                "working-new",
+                "[Archived 1]",
+                "row:archived",
+            ]
+        );
+        // Grouped: projects without a match are left out.
+        opts.grouped = true;
+        assert_eq!(
+            keys(&live(&projects, &sessions(), &opts)),
+            [
+                "[b 2]",
+                "unread",
+                "working-new",
+                "[Archived 1]",
+                "row:archived"
+            ]
+        );
+    }
+
+    #[test]
     fn archived_sessions_newest_first() {
         let folded = HashSet::new();
         let opts = Options {
             grouped: false,
             folded: &folded,
             filter: None,
+            hits: None,
             order: &crate::config::Order::default(),
         };
         let sessions = [archived("a", 1, 1), archived("b", 1, 2)];

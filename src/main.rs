@@ -11,6 +11,7 @@ mod launch;
 mod model;
 mod paths;
 mod report;
+mod search;
 mod stats;
 mod tmux;
 mod tui;
@@ -138,6 +139,8 @@ enum Cmd {
     },
     /// List sessions and their state (● = unread)
     Ls {
+        /// Only sessions matching all these words, by project, title or name (fuzzy, like `/` in the TUI)
+        words: Vec<String>,
         /// List archived sessions instead
         #[arg(long)]
         archived: bool,
@@ -382,13 +385,16 @@ fn run(cli: Cli) -> Result<()> {
             start_session(&mut r, request, attach)?;
         }
         Cmd::Ls {
+            words,
             archived,
             project,
             sort,
             json,
         } => {
             r.settle()?;
-            list_sessions(&r, archived, project.as_deref(), sort == "attention", json)?;
+            let query = words.join(" ");
+            let by_attention = sort == "attention";
+            list_sessions(&r, &query, archived, project.as_deref(), by_attention, json)?;
         }
         Cmd::Show { session } => {
             r.refresh()?;
@@ -776,6 +782,7 @@ fn list_projects(r: &Roster) -> Result<()> {
 
 fn list_sessions(
     r: &Roster,
+    query: &str,
     archived: bool,
     project: Option<&str>,
     by_attention: bool,
@@ -791,6 +798,9 @@ fn list_sessions(
         .into_iter()
         .filter(|s| s.deleted_at.is_some() == archived && project.is_none_or(|p| s.project == p))
         .collect();
+    if let Some(hits) = search::hits(query, &sessions) {
+        sessions.retain(|s| hits.contains_key(&s.id));
+    }
     if by_attention {
         sessions.sort_by(|a, b| a.list_order(b, &r.config.order));
     }
@@ -814,7 +824,9 @@ fn list_sessions(
         return Ok(());
     }
     if sessions.is_empty() {
-        if archived {
+        if !query.trim().is_empty() {
+            println!("No sessions match {:?}.", query.trim());
+        } else if archived {
             println!("No archived sessions.");
         } else {
             println!("No sessions. Start one with `roster new <project>`.");

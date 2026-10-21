@@ -96,6 +96,12 @@ All files are optional and live in `~/.config/agent-roster/`:
 - `config.toml`:
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
   - `chats_dir`: where chats run (default inside roster's state directory).
+  - `fit_preview`: agents drawing full screen (in the terminal's alternate screen, as
+    Claude Code's fullscreen renderer does) are sized to the preview while you're not
+    attached, so it shows all of their screen; `"never"` turns that off, also per agent
+    under `[agents.<name>]`. Agents drawing on the normal screen, Claude's classic
+    renderer among them, keep your terminal's size: resizing would garble their
+    history in tmux.
   - `[order]`: per shelf (`needs_input`, `idle`, `stopped`, `working`, `archived`),
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
@@ -133,6 +139,13 @@ Then, while attached, `C-a [` (or `C-a Enter`) opens copy mode with vi keys (`k`
 `C-u`/`C-d`, `/` to search, `q` to leave), and `C-a C-a` sends a literal `C-a` to the
 agent. Roster's tmux re-reads the file the next time roster starts (the TUI, or any
 `roster` command), even with agents running.
+
+Claude Code's fullscreen renderer (`/tui fullscreen`) keeps the conversation itself
+rather than in tmux's history, so copy mode doesn't see it there: scroll with its own
+keys, `PgUp`/`PgDn`, or `Ctrl+O` for the transcript, which scrolls like `less`
+(`j`/`k`, `Ctrl+U`/`Ctrl+D`, `g`/`G`, `/` to search) and where `[` writes the whole
+conversation into tmux's history, for copy mode. Its docs say the mouse wheel needs
+tmux's mouse mode: `set -g mouse on` in roster's `tmux.conf`.
 
 ## Inside your own tmux
 

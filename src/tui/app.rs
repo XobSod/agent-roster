@@ -140,6 +140,11 @@ pub struct App {
     pub selected: usize,
     /// First visible list row; the drawing code keeps the selection in view.
     pub scroll: Cell<usize>,
+    /// The preview's size when last drawn; agents drawing full screen get it.
+    pub preview_size: Cell<Option<(u16, u16)>>,
+    /// Agents fitted to `fitted_size` (see `Roster::fit_screens`).
+    pub fitted: HashSet<String>,
+    pub fitted_size: Option<(u16, u16)>,
     /// The menu whose popup is open.
     pub menu: Option<Menu>,
     pub help: bool,
@@ -195,6 +200,9 @@ impl App {
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
+            preview_size: Cell::new(None),
+            fitted: HashSet::new(),
+            fitted_size: None,
             menu: None,
             help: false,
             dialog: None,

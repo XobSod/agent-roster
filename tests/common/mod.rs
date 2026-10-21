@@ -16,8 +16,16 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// Stand-in for `claude`: shows its arguments and environment, then echoes what
-/// it's sent.
+/// it's sent. In a directory with a `.fullscreen` file it draws full screen
+/// instead (the alternate screen), redrawing its size whenever it changes.
 const FAKE_AGENT: &str = r#"#!/bin/sh
+if [ -e .fullscreen ]; then
+  printf '\033[?1049h'
+  draw() { printf '\033[2J\033[Hfull screen %s\n' "$(stty size)"; }
+  trap draw WINCH
+  draw
+  while :; do sleep 0.1; done
+fi
 echo "fake agent: $*"
 echo "TOKEN=${TOKEN-unset} GLOBAL=${GLOBAL-unset} SESSION=${ROSTER_SESSION-unset}"
 exec cat
@@ -264,6 +272,13 @@ impl Terminal {
             .output()
             .unwrap();
         sleep(Duration::from_millis(50));
+    }
+
+    pub fn resize(&self, size: (u16, u16)) {
+        let (w, h) = (size.0.to_string(), size.1.to_string());
+        self.tmux(&["resize-window", "-t", "term", "-x", &w, "-y", &h])
+            .output()
+            .unwrap();
     }
 
     pub fn screen(&self) -> String {

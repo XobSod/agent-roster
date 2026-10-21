@@ -1,5 +1,6 @@
 //! The operations behind the CLI and the TUI, so the two stay at parity.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
@@ -23,6 +24,9 @@ const DEFAULT_SIZE: (u16, u16) = (160, 48);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Screen changes this soon after a start are the agent starting up, not a turn.
 const BOOT_GRACE_MS: i64 = 5000;
+/// Screen changes this soon after roster resized a window are the agent
+/// redrawing for its new size, not activity.
+const RESIZE_GRACE_MS: i64 = 3000;
 /// The meta key holding the chats project's id.
 const CHAT_PROJECT: &str = "chat_project";
 
@@ -32,6 +36,9 @@ pub struct Roster {
     pub db: Db,
     pub(crate) tmux: Tmux,
     exe: PathBuf,
+    /// Sessions whose window this process resized, and until when their screen
+    /// changes are the agent redrawing.
+    resized: HashMap<String, i64>,
 }
 
 impl Roster {
@@ -54,6 +61,7 @@ impl Roster {
             db,
             tmux,
             exe,
+            resized: HashMap::new(),
         })
     }
 
@@ -63,8 +71,10 @@ impl Roster {
         let now = now_ms();
         self.db.fold_events(now)?;
         let panes = self.tmux.panes()?;
+        self.resized.retain(|_, until| *until > now);
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
+            let redrawing = self.resized.contains_key(&s.id);
             match panes.get(&s.tmux_name()) {
                 None => s.set_state(State::Stopped, now),
                 Some(pane) if pane.dead => {
@@ -88,14 +98,22 @@ impl Roster {
                             if s.needs_screen_check(now)
                                 && let Some(hash) = self.screen_hash(&s)
                             {
-                                s.observe_screen(&hash, now);
-                                s.correct_stale_working(now);
+                                if redrawing {
+                                    s.redrawn(&hash);
+                                } else {
+                                    s.observe_screen(&hash, now);
+                                    s.correct_stale_working(now);
+                                }
                             }
                         }
                         Kind::Generic => {
                             if let Some(hash) = self.screen_hash(&s) {
                                 let idle_after = agent::idle_after_ms(&s.agent, &self.config);
-                                s.observe_generic(&hash, now, idle_after);
+                                if redrawing {
+                                    s.redrawn(&hash);
+                                } else {
+                                    s.observe_generic(&hash, now, idle_after);
+                                }
                             }
                         }
                     }
@@ -110,6 +128,38 @@ impl Roster {
             }
             if s != before {
                 self.db.save_session(&s)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sizes the windows of agents drawing full screen to `size` (the TUI's
+    /// preview) while no one is attached, so their screens fit it instead of
+    /// being cut. Only the alternate screen is safe to resize: it keeps no
+    /// scrollback that a resize could garble, so agents on the normal screen
+    /// (Claude's classic renderer, say) keep the terminal's size. Attaching
+    /// sizes a window to the terminal again, as before. Each running agent is
+    /// fitted once (`fitted` notes it by window and process; the caller clears
+    /// it for a new size or after an attach), so a window someone else sized,
+    /// another TUI for instance, isn't fought over.
+    pub fn fit_screens(&mut self, size: (u16, u16), fitted: &mut HashSet<String>) -> Result<()> {
+        let panes = self.tmux.panes()?;
+        for s in self.db.sessions(false)? {
+            let name = s.tmux_name();
+            let Some(pane) = panes.get(&name) else {
+                continue;
+            };
+            if pane.dead
+                || !pane.alternate
+                || pane.clients > 0
+                || !agent::fits_preview(&s.agent, &self.config)
+            {
+                continue;
+            }
+            if fitted.insert(format!("{name} {:?}", pane.pid)) && pane.size != size {
+                self.tmux.resize(&name, size)?;
+                self.resized
+                    .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
             }
         }
         Ok(())

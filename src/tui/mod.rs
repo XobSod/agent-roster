@@ -31,6 +31,8 @@ use list::{Entry, EntryKey, Group};
 
 /// How often states and the preview refresh.
 const TICK: Duration = Duration::from_secs(1);
+/// The smallest size agents are fitted to; a narrower preview cuts their lines.
+const MIN_FIT: (u16, u16) = (60, 10);
 
 pub fn run(roster: &mut Roster) -> Result<()> {
     let keymap = Keymap::new(&roster.config.keys)?;
@@ -107,7 +109,23 @@ fn reload(roster: &mut Roster, app: &mut App) {
         app.model_names = names;
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
+    fit(roster, app);
     update_preview(roster, app);
+}
+
+/// Agents drawing full screen sized to the preview, so their screens fit it.
+fn fit(roster: &mut Roster, app: &mut App) {
+    let Some((w, h)) = app.preview_size.get() else {
+        return;
+    };
+    let size = (w.max(MIN_FIT.0), h.max(MIN_FIT.1));
+    if app.fitted_size != Some(size) {
+        app.fitted.clear();
+        app.fitted_size = Some(size);
+    }
+    if let Err(e) = roster.fit_screens(size, &mut app.fitted) {
+        app.fail(format!("{e:#}"));
+    }
 }
 
 fn update_preview(roster: &Roster, app: &mut App) {
@@ -189,10 +207,13 @@ fn perform(
     let outcome: Result<String> = match op {
         Op::Attach(id) => {
             app.attaching(&id);
-            attach(terminal, roster, &id)?.map(|prompted| {
+            let result = attach(terminal, roster, &id)?.map(|prompted| {
                 app.detached(prompted);
                 String::new()
-            })
+            });
+            // Attaching sized it to the terminal: fit it to the preview again.
+            app.fitted.clear();
+            result
         }
         Op::Start(id) => {
             let label = app.session_label(&id);

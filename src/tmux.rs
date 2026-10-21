@@ -33,6 +33,13 @@ pub struct Pane {
     pub dead: bool,
     pub dead_status: Option<i32>,
     pub pid: Option<i32>,
+    /// The window's size.
+    pub size: (u16, u16),
+    /// Clients attached to its session.
+    pub clients: u32,
+    /// The program draws full screen: in the terminal's alternate screen, which
+    /// keeps no scrollback.
+    pub alternate: bool,
     /// The terminal title the program set (tmux's default is the host name).
     pub title: String,
 }
@@ -132,7 +139,9 @@ impl Tmux {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t#{pane_title}",
+                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t\
+                 #{window_width}\t#{window_height}\t#{session_attached}\t#{alternate_on}\t\
+                 #{pane_title}",
             ])
             .output()
             .context("can't run tmux (is it installed?)")?;
@@ -146,12 +155,26 @@ impl Tmux {
         let mut panes = HashMap::new();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
             // The title comes last and may itself contain tabs.
-            let fields: Vec<&str> = line.splitn(5, '\t').collect();
-            if let [name, dead, status, pid, title] = fields[..] {
+            let fields: Vec<&str> = line.splitn(9, '\t').collect();
+            if let [
+                name,
+                dead,
+                status,
+                pid,
+                width,
+                height,
+                clients,
+                alternate,
+                title,
+            ] = fields[..]
+            {
                 panes.entry(name.to_string()).or_insert(Pane {
                     dead: dead == "1",
                     dead_status: status.parse().ok(),
                     pid: pid.parse().ok(),
+                    size: (width.parse().unwrap_or(0), height.parse().unwrap_or(0)),
+                    clients: clients.parse().unwrap_or(0),
+                    alternate: alternate == "1",
                     title: title.to_string(),
                 });
             }
@@ -343,6 +366,32 @@ impl Tmux {
         std::thread::sleep(std::time::Duration::from_millis(300));
         self.run(["send-keys", "-t", target.as_str(), "Enter"])
             .map(drop)
+    }
+
+    /// Sizes the session's window while no one is attached. Unsetting
+    /// `window-size` afterwards (resize-window sets it to manual) leaves the size
+    /// as it is until a client attaches, which then sizes the window to itself
+    /// as usual (verified on tmux 3.5a).
+    pub fn resize(&self, name: &str, size: (u16, u16)) -> Result<()> {
+        let target = pane_target(name);
+        let (w, h) = (size.0.to_string(), size.1.to_string());
+        self.run([
+            "resize-window",
+            "-t",
+            target.as_str(),
+            "-x",
+            w.as_str(),
+            "-y",
+            h.as_str(),
+            ";",
+            "set-option",
+            "-w",
+            "-u",
+            "-t",
+            target.as_str(),
+            "window-size",
+        ])
+        .map(drop)
     }
 
     pub fn kill_session(&self, name: &str) -> Result<()> {

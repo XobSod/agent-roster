@@ -285,6 +285,12 @@ impl Session {
         }
     }
 
+    /// The screen changed because roster resized the window: the agent's redraw
+    /// becomes what later screens are compared with, not activity.
+    pub fn redrawn(&mut self, hash: &str) {
+        self.screen_hash = Some(hash.to_string());
+    }
+
     /// True if the session claims to be working but no hook has reported anything
     /// for a while, so only the screen can tell whether it still is.
     pub fn needs_screen_check(&self, now: i64) -> bool {

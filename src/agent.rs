@@ -77,6 +77,13 @@ pub fn idle_after_ms(name: &str, config: &Config) -> i64 {
         .map_or(QUIET_MS, |secs| secs as i64 * 1000)
 }
 
+/// Whether `name`'s sessions may be sized to the TUI's preview (when drawing
+/// full screen): its own setting, else the global one, else yes.
+pub fn fits_preview(name: &str, config: &Config) -> bool {
+    let setting = config.agent(name).fit_preview.or(config.fit_preview);
+    setting != Some(crate::config::FitPreview::Never)
+}
+
 pub struct Launch {
     pub argv: Vec<String>,
     /// The conversation the agent will use, to store with the session.
@@ -238,7 +245,7 @@ mod tests {
         let agent = AgentConfig {
             command: Some("/opt/claude".into()),
             args: vec!["--model".into(), "haiku".into()],
-            idle_after: None,
+            ..AgentConfig::default()
         };
         let l = launch(
             &session("a"),
@@ -331,6 +338,13 @@ mod tests {
         assert_eq!(l.conversation_id, None);
         assert_eq!(kind("codex", &config).unwrap(), Kind::Generic);
         assert!(!Kind::Generic.can_resume() && Kind::Claude.can_resume());
+        // Fitting the preview: the agent's setting, else the global one, else yes.
+        let mut config = config;
+        assert!(fits_preview("codex", &config));
+        config.fit_preview = Some(crate::config::FitPreview::Never);
+        assert!(!fits_preview("codex", &config) && !fits_preview("claude", &config));
+        config.agents.get_mut("codex").unwrap().fit_preview = Some(crate::config::FitPreview::Auto);
+        assert!(fits_preview("codex", &config) && !fits_preview("claude", &config));
         assert_eq!(available(&config), ["claude", "codex"]);
         assert_eq!(idle_after_ms("codex", &config), 2000);
         assert_eq!(idle_after_ms("claude", &config), QUIET_MS);

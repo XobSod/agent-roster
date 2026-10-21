@@ -4,6 +4,8 @@
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
 //! chats_dir = "~/chats"           # where chats run; default: roster's state directory
+//! fit_preview = "never"           # "auto" (default): agents drawing full screen are
+//!                                 # sized to the TUI's preview while no one's attached
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -25,6 +27,7 @@
 //!
 //! [agents.aider]                  # any other agent: state from its screen
 //! idle_after = 4                  # seconds without screen changes = idle
+//! fit_preview = "never"           # also per agent; the agent's wins
 //! ```
 
 use std::collections::BTreeMap;
@@ -44,6 +47,17 @@ pub struct Config {
     pub order: Order,
     pub keys: Keys,
     pub agents: BTreeMap<String, AgentConfig>,
+    pub fit_preview: Option<FitPreview>,
+}
+
+/// Whether an agent drawing full screen (in the terminal's alternate screen,
+/// as Claude's fullscreen renderer does) gets the TUI preview's size while no
+/// one is attached, so its screen fits instead of being cut.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FitPreview {
+    Auto,
+    Never,
 }
 
 /// Which comes first within a shelf: the session that got there earliest, or
@@ -236,6 +250,7 @@ pub struct AgentConfig {
     pub args: Vec<String>,
     /// Seconds without screen changes after which an agent without hooks is idle.
     pub idle_after: Option<u64>,
+    pub fit_preview: Option<FitPreview>,
 }
 
 impl Config {

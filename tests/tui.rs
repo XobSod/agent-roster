@@ -99,3 +99,100 @@ fn tui_walkthrough() {
     assert!(!screen.contains("[detached"), "{screen}");
     assert!(t.session("one", false).is_none() && t.session("one", true).is_none());
 }
+
+#[test]
+fn agents_drawing_full_screen_fit_the_preview() {
+    let Some(t) = TestEnv::new("fit") else { return };
+    // A generic agent too: tracked by its screen, its redraw mustn't look like work.
+    let config = t.config_dir().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text += &format!(
+        "[agents.app]\ncommand = \"{}\"\nidle_after = 1\n",
+        t.path("fake-agent").display()
+    );
+    std::fs::write(&config, text).unwrap();
+    let full = t.path("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join(".fullscreen"), "").unwrap();
+    t.ok(&[
+        "project",
+        "add",
+        "classic",
+        t.path("proj").to_str().unwrap(),
+    ]);
+    t.ok(&["project", "add", "full", full.to_str().unwrap()]);
+    t.ok(&["new", "classic", "--name", "a"]);
+    t.ok(&["new", "full", "--name", "b"]);
+    t.ok(&["new", "full", "--name", "c", "--agent", "app"]);
+    // Until they've settled (just started, they count as working), and only with
+    // `roster ls` before the TUI runs: another roster process doesn't know the
+    // TUI resized an agent, so it would take the redraw for work.
+    t.wait_for("the agents idle", |t| {
+        ["a", "b", "c"]
+            .iter()
+            .all(|n| t.session(n, false).unwrap()["state"] == "idle")
+    });
+    let ids: std::collections::HashMap<&str, String> = ["a", "b", "c"]
+        .map(|n| {
+            (
+                n,
+                t.session(n, false).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .into();
+    let size = |name: &str| -> String {
+        let id = &ids[name];
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket, "display", "-p", "-t"])
+            .arg(format!("=r-{id}:"))
+            .arg("#{window_width}x#{window_height}")
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Started outside a terminal, sessions get 160x48.
+    assert_eq!(size("a"), "160x48");
+
+    // In a 120x30 terminal the preview is 82x26: what's left of the sidebar (36),
+    // its divider and a column of space; below the header, statistics and a blank
+    // line, above the footer.
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    t.wait_for("the full-screen agents fitted", |_| {
+        size("b") == "82x26" && size("c") == "82x26"
+    });
+    // The agents redrew for their new size; the generic one doesn't count as working.
+    for _ in 0..30 {
+        let screen = term.screen();
+        assert!(!screen.contains("Working ("), "{screen}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(size("a"), "160x48");
+
+    // The terminal resized: so is the preview, and so are they.
+    term.resize((140, 34));
+    t.wait_for("the agents fitted again", |_| {
+        size("b") == "96x30" && size("c") == "96x30"
+    });
+
+    // Attached, an agent has the terminal's size; back, the preview's again.
+    for _ in 0..10 {
+        if term.screen().contains("full / b ") {
+            break;
+        }
+        term.keys(&["j"]);
+    }
+    term.wait_for("b selected", "full / b ");
+    term.keys(&["Enter"]);
+    term.wait_for_gone("the agent full screen", "Enter attach");
+    t.wait_for("b at the terminal's size", |_| size("b") == "140x34");
+    term.keys(&["C-q"]);
+    term.wait_for("the list again", "Enter attach");
+    t.wait_for("b fitted again", |_| size("b") == "96x30");
+    // The classic agent (normal screen, scrollback in tmux) was never resized.
+    assert_eq!(size("a"), "160x48");
+}

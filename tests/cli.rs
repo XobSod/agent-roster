@@ -154,6 +154,33 @@ fn sessions_survive_a_lost_tmux_server_as_stopped() {
 }
 
 #[test]
+fn works_in_a_locale_without_utf8() {
+    let Some(t) = TestEnv::new("locale") else {
+        return;
+    };
+    // Roster and so its tmux server and agents, all in the C locale.
+    let run = |args: &[&str]| {
+        let out = t
+            .command(args)
+            .env("LC_ALL", "C")
+            .env_remove("LC_CTYPE")
+            .env_remove("LANG")
+            .output()
+            .unwrap();
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    run(&["project", "add", "demo", t.path("proj").to_str().unwrap()]).unwrap();
+    run(&["new", "demo", "--name", "one"]).unwrap();
+    t.wait_for("the agent's output", |_| {
+        run(&["show", "one"]).is_some_and(|s| s.contains("fake agent"))
+    });
+    let ls: Value = serde_json::from_str(&run(&["ls", "--json"]).unwrap()).unwrap();
+    assert_ne!(ls[0]["state"], "stopped", "{ls}");
+}
+
+#[test]
 fn report_is_silent_and_always_succeeds() {
     let Some(t) = TestEnv::new("report") else {
         return;

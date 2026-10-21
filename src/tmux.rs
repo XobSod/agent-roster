@@ -96,7 +96,14 @@ impl Tmux {
 
     fn command(&self) -> Command {
         let mut cmd = Command::new("tmux");
-        cmd.arg("-L").arg(&self.socket).arg("-f").arg(&self.conf);
+        // -u: in a locale without UTF-8 (LANG unset, say), tmux would otherwise
+        // replace tabs and non-ASCII characters in what it prints with `_`, so
+        // listing panes, their titles and captured screens would all break.
+        cmd.arg("-u")
+            .arg("-L")
+            .arg(&self.socket)
+            .arg("-f")
+            .arg(&self.conf);
         for var in LEAKY_ENV {
             cmd.env_remove(var);
         }

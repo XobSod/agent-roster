@@ -8,7 +8,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 /// How many recent prompts are kept, for generating a title.
 const RECENT_PROMPTS: usize = 5;
@@ -67,40 +68,39 @@ impl ClaudeTranscript {
             return Ok(());
         }
         file.seek(SeekFrom::Start(self.offset))?;
-        let mut added = Vec::new();
-        file.read_to_end(&mut added)?;
-        self.offset += added.len() as u64;
-        self.rest.extend_from_slice(&added);
+        let mut text = std::mem::take(&mut self.rest);
+        self.offset += file.read_to_end(&mut text)? as u64;
         let mut start = 0;
-        while let Some(end) = self.rest[start..].iter().position(|b| *b == b'\n') {
-            let line = self.rest[start..start + end].to_vec();
-            self.line(&line);
-            start += end + 1;
+        for end in memchr::memchr_iter(b'\n', &text) {
+            self.line(&text[start..end]);
+            start = end + 1;
         }
-        self.rest.drain(..start);
+        text.drain(..start);
+        self.rest = text;
         Ok(())
     }
 
     fn line(&mut self, line: &[u8]) {
-        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+        if !wanted(line) {
+            return;
+        }
+        let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
             return;
         };
-        match entry["type"].as_str() {
+        let message = entry.message.unwrap_or_default();
+        match entry.kind.as_deref() {
             Some("assistant") => {
-                let message = &entry["message"];
-                let usage = &message["usage"];
-                if let (Some(id), Some(output)) =
-                    (message["id"].as_str(), usage["output_tokens"].as_u64())
-                {
-                    self.outputs.insert(id.to_string(), output);
+                let usage = message.usage.unwrap_or_default();
+                if let (Some(id), Some(output)) = (message.id, usage.output_tokens) {
+                    self.outputs.insert(id, output);
                 }
                 let context: u64 = [
-                    "input_tokens",
-                    "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
+                    usage.input_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.cache_creation_input_tokens,
                 ]
-                .iter()
-                .filter_map(|k| usage[*k].as_u64())
+                .into_iter()
+                .flatten()
                 .sum();
                 if context > 0 {
                     self.context = Some(context);
@@ -109,23 +109,23 @@ impl ClaudeTranscript {
                     self.replies_since_cost = true;
                 }
             }
-            Some("user") if entry["isMeta"].as_bool() != Some(true) => {
+            Some("user") if entry.is_meta != Some(true) => {
                 // A typed prompt is text; tool results are lists, and local
                 // commands and their output are wrapped in tags.
-                if let Some(text) = entry["message"]["content"].as_str()
+                if let Some(Text(Some(text))) = message.content
                     && !text.trim_start().starts_with('<')
                 {
                     self.prompts += 1;
                     if self.recent.len() == RECENT_PROMPTS {
                         self.recent.pop_front();
                     }
-                    self.recent.push_back(text.to_string());
+                    self.recent.push_back(text);
                 }
             }
             Some("cost-state") => {
-                if let Some(cost) = entry["totalCostUSD"].as_f64() {
-                    let added = entry["totalLinesAdded"].as_u64().unwrap_or(0);
-                    let removed = entry["totalLinesRemoved"].as_u64().unwrap_or(0);
+                if let Some(cost) = entry.total_cost {
+                    let added = entry.lines_added.unwrap_or(0);
+                    let removed = entry.lines_removed.unwrap_or(0);
                     self.cost = Some((cost, added, removed));
                     self.replies_since_cost = false;
                 }
@@ -155,6 +155,81 @@ impl ClaudeTranscript {
     /// The last few prompts the user typed, oldest first.
     pub fn recent_prompts(&self) -> Vec<String> {
         self.recent.iter().cloned().collect()
+    }
+}
+
+/// What roster reads of a transcript entry; the rest of it is skipped unread.
+#[derive(Deserialize)]
+struct Entry<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<std::borrow::Cow<'a, str>>,
+    #[serde(rename = "isMeta")]
+    is_meta: Option<bool>,
+    message: Option<Message>,
+    #[serde(rename = "totalCostUSD")]
+    total_cost: Option<f64>,
+    #[serde(rename = "totalLinesAdded")]
+    lines_added: Option<u64>,
+    #[serde(rename = "totalLinesRemoved")]
+    lines_removed: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+struct Message {
+    id: Option<String>,
+    usage: Option<Usage>,
+    content: Option<Text>,
+}
+
+#[derive(Default, Deserialize)]
+struct Usage {
+    output_tokens: Option<u64>,
+    input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
+/// A message's content if it's text (a typed prompt). Anything else (tool
+/// results, replies: lists, often large) is skipped without being kept.
+struct Text(Option<String>);
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
+        struct Content;
+        impl<'de> Visitor<'de> for Content {
+            type Value = Text;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a message's content")
+            }
+            fn visit_str<E>(self, text: &str) -> Result<Text, E> {
+                Ok(Text(Some(text.to_string())))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Text, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(Text(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Text, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Text(None))
+            }
+            fn visit_unit<E>(self) -> Result<Text, E> {
+                Ok(Text(None))
+            }
+        }
+        d.deserialize_any(Content)
+    }
+}
+
+/// Whether a transcript line can be one roster reads. Claude writes its own
+/// bookkeeping (titles, modes, the requests it sent, …) with `type` first, so
+/// those lines are told apart without parsing them; in a long transcript
+/// they're most of it (46 of 80 MB in one, seen in real use).
+fn wanted(line: &[u8]) -> bool {
+    match line.strip_prefix(br#"{"type":""#) {
+        Some(kind) => [&b"assistant\""[..], b"user\"", b"cost-state\""]
+            .iter()
+            .any(|k| kind.starts_with(k)),
+        None => true,
     }
 }
 
@@ -264,7 +339,7 @@ pub fn tokens(n: u64) -> String {
 mod tests {
     use super::*;
 
-    fn line(v: Value) -> String {
+    fn line(v: serde_json::Value) -> String {
         format!("{v}\n")
     }
 
@@ -329,6 +404,29 @@ mod tests {
             (Some(900), Some(6012), true)
         );
         assert_eq!(t.recent_prompts(), ["fix the tests", "now add a retry"]);
+    }
+
+    #[test]
+    fn bookkeeping_is_skipped_unparsed() {
+        // Claude's bookkeeping has `type` first; the entries roster reads are
+        // read wherever their `type` is.
+        assert!(!wanted(br#"{"type":"api-request","body":"..."}"#));
+        assert!(!wanted(br#"{"type":"user-ish","message":{}}"#));
+        assert!(wanted(br#"{"type":"cost-state","totalCostUSD":1}"#));
+        assert!(wanted(br#"{"parentUuid":null,"type":"api-request"}"#));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let text = [
+            r#"{"type":"api-request","message":{"content":"not a prompt"}}"#,
+            r#"{"type":"user","message":{"content":"first"}}"#,
+            r#"{"parentUuid":null,"message":{"content":"second"},"type":"user"}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}"#,
+        ];
+        std::fs::write(&path, text.join("\n") + "\n").unwrap();
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        assert_eq!(t.stats(None).prompts, Some(2));
+        assert_eq!(t.recent_prompts(), ["first", "second"]);
     }
 
     #[test]

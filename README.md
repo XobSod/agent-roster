@@ -7,6 +7,11 @@ working, needs input, is idle or stopped, and whether you've seen its latest tur
 Claude Code is tracked through its hooks; any other CLI agent can be added as a
 generic agent, tracked by its screen.
 
+![roster: a finished turn read and given a follow-up, a question that came in meanwhile answered, and the follow-up coming back up](demo/gifs/roster.gif)
+
+<sub>The agents in the recording are a scripted stand-in for Claude Code
+([demo/](demo/)).</sub>
+
 ## Install
 
 Requires tmux ≥ 3.2 and Claude Code on `PATH`.
@@ -178,3 +183,7 @@ cargo test     # unit tests, plus end-to-end tests that need tmux
 
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a
 development build apart from your real sessions.
+
+`demo/render.sh` records the GIF above from `demo/tapes/` with
+[VHS](https://github.com/charmbracelet/vhs) in Docker, in a home of its own, with
+`demo/env/fake-claude` as every agent.

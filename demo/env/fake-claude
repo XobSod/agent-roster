@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""A scripted stand-in for Claude Code, so the demo needs no account, costs nothing
+and plays the same every time. Roster starts it like Claude (`--session-id` or
+`--resume`, `--settings` with its hooks, `--model`); it reports through those
+hooks, keeps a transcript for roster's statistics and sets the pane title the way
+Claude does. What it does after a prompt comes from SCENARIOS, by keyword."""
+
+import json
+import os
+import select
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+# Steps: ("think", seconds), ("tool", call, result, seconds), ("ask", tool, command),
+# ("say", text). A step's seconds are how long it takes; "ask" waits for an answer.
+SCENARIOS = [
+    ("rate limit", "Rate limiting for the login endpoint", [
+        ("think", 3.0),
+        ("tool", "Read(internal/auth/login.go)", "Read 182 lines", 2.0),
+        ("tool", "Edit(internal/auth/login.go)", "Updated with 24 additions and 3 removals", 3.5),
+        ("tool", "Write(internal/auth/ratelimit_test.go)", "Wrote 61 lines", 2.5),
+        ("ask", "Bash", "go test ./internal/auth/..."),
+        ("tool", "Bash(go test ./internal/auth/...)", "ok  example.com/api/internal/auth  0.412s", 1.5),
+        ("tool", "Edit(internal/auth/login.go)", "Updated with 2 additions and 1 removal", 2.0),
+        ("tool", "Bash(go vet ./...)", "No issues found", 2.0),
+        ("say", "Logins are now limited to 5 attempts per minute per IP; beyond that the "
+                "endpoint answers 429 with a Retry-After header. The new tests cover the "
+                "limit and its reset."),
+    ]),
+    ("date parser", "Fix the failing date parser tests", [
+        ("think", 1.5),
+        ("tool", "Bash(npm test -- date)", "2 failed, 38 passed", 1.5),
+        ("tool", "Read(src/date/parse.ts)", "Read 96 lines", 0.8),
+        ("tool", "Edit(src/date/parse.ts)", "Updated with 6 additions and 2 removals", 1.2),
+        ("tool", "Bash(npm test -- date)", "40 passed", 1.5),
+        ("say", "Fixed: timestamps ending in \"Z\" were parsed as local time instead of "
+                "UTC. All 40 date tests pass."),
+    ]),
+    ("leap year", "Leap-year tests for the date parser", [
+        ("think", 2.0),
+        ("tool", "Edit(src/date/parse.test.ts)", "Updated with 18 additions", 3.0),
+        ("tool", "Bash(npm test -- date)", "1 failed, 43 passed", 5.0),
+        ("tool", "Edit(src/date/parse.ts)", "Updated with 1 addition and 1 removal", 2.0),
+        ("tool", "Bash(npm test -- date)", "44 passed", 3.5),
+        ("say", "Added four leap-year cases (2000, 2024, 1900, 2100). 1900 failed: century "
+                "years weren't handled; fixed, and all 44 date tests pass."),
+    ]),
+    ("uuid", "Migrate user IDs to UUIDs", [
+        ("think", 3.0),
+        ("tool", "Read(db/schema.sql)", "Read 240 lines", 1.0),
+        ("tool", 'Grep("user_id")', "Found 47 matches in 19 files", 1.5),
+        ("tool", "Write(db/migrations/0042_user_uuid.sql)", "Wrote 38 lines", 2.5),
+    ] + [
+        ("tool", f"Edit({path})", f"Updated with {n} additions and {n} removals", 3.0)
+        for path, n in [
+            ("internal/users/store.go", 14), ("internal/users/model.go", 6),
+            ("internal/auth/session.go", 9), ("internal/billing/invoice.go", 7),
+            ("internal/orders/store.go", 11), ("internal/api/users.go", 8),
+            ("internal/api/orders.go", 5), ("internal/admin/report.go", 4),
+            ("internal/users/store_test.go", 22), ("internal/orders/store_test.go", 17),
+            ("internal/api/users_test.go", 12), ("internal/events/publish.go", 3),
+            ("internal/search/index.go", 6), ("internal/export/csv.go", 4),
+            ("internal/users/cache.go", 5), ("internal/api/middleware.go", 2),
+            ("internal/billing/invoice_test.go", 9), ("internal/admin/report_test.go", 6),
+            ("cmd/backfill/main.go", 31), ("internal/users/merge.go", 7),
+        ]
+    ] + [
+        ("tool", "Bash(go test ./...)", "ok  (19 packages)", 6.0),
+        ("say", "User IDs are UUIDs now, with a migration that backfills them."),
+    ]),
+    ("changelog", "Changelog for v2.3", [
+        ("think", 1.0),
+        ("tool", "Bash(git log --oneline v2.2..HEAD)", "34 commits", 1.0),
+        ("tool", "Edit(CHANGELOG.md)", "Updated with 21 additions", 1.5),
+        ("say", "CHANGELOG.md has a v2.3 section: 3 features, 7 fixes, 1 deprecation."),
+    ]),
+    ("flaky", "Flaky checkout e2e test", [
+        ("think", 1.5),
+        ("tool", "Read(e2e/checkout.spec.ts)", "Read 133 lines", 1.0),
+        ("tool", "Edit(e2e/checkout.spec.ts)", "Updated with 4 additions and 2 removals", 1.2),
+        ("say", "The test clicked Pay before the total had loaded; it now waits for the "
+                "total, and passed 50 runs in a row."),
+    ]),
+    ("copy mode", "tmux copy mode basics", [
+        ("think", 1.5),
+        ("say", "prefix [ enters copy mode. With vi keys: move with h j k l, start a "
+                "selection with v, copy with y, search with /, leave with q."),
+    ]),
+    ("virtualised table", "Virtualised orders table", [
+        ("think", 1.5),
+        ("tool", "Write(src/orders/VirtualTable.tsx)", "Wrote 88 lines", 1.0),
+        ("say", "A first try is in src/orders/VirtualTable.tsx: 10k rows scroll smoothly, "
+                "but sticky headers don't work yet."),
+    ]),
+    ("", None, [("think", 1.5), ("say", "Done.")]),
+]
+
+MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
+SPINNER = "·✢✳✶✻✽✻✶✳✢"
+VERBS = ["Thinking", "Pondering", "Reasoning", "Working"]
+
+ACCENT, DIM, GREEN, RED, BOLD, RESET = (
+    "\033[38;5;173m", "\033[2m", "\033[32m", "\033[31m", "\033[1m", "\033[0m")
+
+
+def arg(name):
+    a = sys.argv[1:]
+    return a[a.index(name) + 1] if name in a and a.index(name) + 1 < len(a) else None
+
+
+class Agent:
+    def __init__(self):
+        self.session_id = arg("--session-id") or arg("--resume") or "demo"
+        resumed = arg("--resume") is not None and arg("--fork-session") is None
+        alias = arg("--model") or "opus"
+        self.model = MODELS.get(alias, alias)
+        self.alias = alias
+        self.cwd = os.getcwd()
+        self.hooks = json.loads(arg("--settings") or "{}").get("hooks", {})
+        claude = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+        folder = os.path.join(claude, "projects", self.cwd.replace("/", "-"))
+        os.makedirs(folder, exist_ok=True)
+        self.transcript = os.path.join(folder, self.session_id + ".jsonl")
+        self.lines = []  # the conversation, as (prefix, text, style, a tool's result)
+        self.input = ""
+        self.steps = []
+        self.step_started = 0.0
+        self.turn_started = 0.0
+        self.asking = None
+        self.context = 18_000
+        self.cost = 0.0
+        self.added = 0
+        self.replies = 0
+        if resumed and os.path.exists(self.transcript):
+            self.lines.append(("", "Resumed the conversation.", DIM, None))
+        self.title("Claude Code")
+        self.hook("SessionStart", source="resume" if resumed else "startup", model=self.model)
+
+    def hook(self, event, **extra):
+        payload = {"session_id": self.session_id, "transcript_path": self.transcript,
+                   "cwd": self.cwd, "hook_event_name": event, **extra}
+        for group in self.hooks.get(event, []):
+            for h in group.get("hooks", []):
+                subprocess.run(["sh", "-c", h["command"]], input=json.dumps(payload),
+                               text=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+
+    def record(self, entry):
+        with open(self.transcript, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def title(self, text):
+        sys.stdout.write(f"\033]2;✳ {text}\007")
+
+    def submit(self, prompt):
+        self.lines.append(("> ", prompt, DIM, None))
+        self.hook("UserPromptSubmit", prompt=prompt)
+        self.record({"type": "user", "cwd": self.cwd, "message": {"content": prompt}})
+        for keyword, title, steps in SCENARIOS:
+            if keyword in prompt.lower():
+                break
+        if title:
+            self.title(title)
+            self.record({"type": "ai-title", "aiTitle": title})
+        self.steps = list(steps)
+        self.turn_started = self.step_started = time.time()
+
+    def reply(self, output_tokens):
+        self.replies += 1
+        self.context += 3_000 + 1_700 * (self.replies % 5)
+        self.cost += 0.04 + output_tokens / 40_000
+        self.record({"type": "assistant", "cwd": self.cwd, "message": {
+            "id": f"msg-{self.session_id[:8]}-{self.replies}", "model": self.model,
+            "usage": {"input_tokens": 4, "cache_read_input_tokens": self.context,
+                      "cache_creation_input_tokens": 0, "output_tokens": output_tokens}}})
+
+    def advance(self, now):
+        """Finishes the current step once its time is up and starts the next."""
+        while self.steps and not self.asking:
+            step = self.steps[0]
+            if step[0] == "ask":
+                self.asking = step
+                self.hook("PermissionRequest", tool_name=step[1],
+                          tool_input={"command": step[2]})
+                return
+            took = step[-1] if step[0] in ("think", "tool") else 0
+            if now - self.step_started < took:
+                return
+            self.steps.pop(0)
+            self.step_started = now
+            if step[0] == "tool":
+                self.lines.append(("● ", step[1], GREEN, step[2]))
+                self.added += 7
+                self.reply(400)
+                self.hook("PostToolUse", tool_name=step[1].split("(")[0])
+            elif step[0] == "say":
+                self.lines.append(("● ", step[1], "", None))
+                self.reply(900)
+                self.record({"type": "cost-state", "totalCostUSD": round(self.cost, 2),
+                             "totalLinesAdded": self.added, "totalLinesRemoved": self.added // 4})
+                if not self.steps:
+                    self.hook("Stop")
+
+    def answer(self, yes):
+        self.steps.pop(0)
+        self.asking = None
+        self.step_started = time.time()
+        if not yes:
+            self.steps = [("say", "OK, I won't run it. What should I do instead?")]
+
+    def key(self, c):
+        if self.asking:
+            if c in ("1", "y", "\r", "\n"):
+                self.answer(True)
+            elif c in ("2", "3", "n", "\x1b"):
+                self.answer(False)
+        elif self.steps:
+            return
+        elif c in ("\r", "\n"):
+            if self.input.strip():
+                self.submit(self.input.strip())
+            self.input = ""
+        elif c in ("\x7f", "\b"):
+            self.input = self.input[:-1]
+        elif c.isprintable():
+            self.input += c
+
+    def draw(self, now):
+        cols, rows = os.get_terminal_size(sys.stdout.fileno())
+        width = max(20, min(cols - 1, 100))
+        out = []
+        box = width - 2
+        home = self.cwd.replace(os.path.expanduser("~"), "~", 1)
+        out.append(ACCENT + "╭" + "─" * box + "╮" + RESET)
+        for text in [f"{BOLD}✻ Demo agent{RESET}{DIM}, a scripted stand-in for Claude Code",
+                     f"  {self.alias} · {home}"]:
+            visible = len(strip(text))
+            out.append(ACCENT + "│ " + RESET + text + RESET + " " * max(0, box - 1 - visible)
+                       + ACCENT + "│" + RESET)
+        out.append(ACCENT + "╰" + "─" * box + "╯" + RESET)
+        out.append("")
+        body = []
+        for prefix, text, style, result in self.lines:
+            for i, part in enumerate(wrap(text, width - len(prefix))):
+                lead = prefix if i == 0 else " " * len(prefix)
+                body.append(style + lead + part + RESET)
+            if result:
+                body.append(DIM + "  └ " + result + RESET)
+            body.append("")
+        bottom = []
+        if self.steps and not self.asking:
+            step = self.steps[0]
+            if step[0] == "tool":
+                body.append(DIM + "● " + step[1] + RESET)
+            spin = SPINNER[int(now * 8) % len(SPINNER)]
+            verb = VERBS[int(self.turn_started) % len(VERBS)]
+            seconds = int(now - self.turn_started)
+            bottom.append(f"{ACCENT}{spin} {verb}…{RESET}{DIM} ({seconds}s · esc to interrupt){RESET}")
+            bottom.append("")
+        if self.asking:
+            _, tool, command = self.asking
+            bottom += [ACCENT + "╭" + "─" * box + "╮" + RESET]
+            for text in [f"{BOLD}{tool} command{RESET}", "", f"  {command}", "",
+                         "Do you want to proceed?", f"{ACCENT}> 1. Yes{RESET}",
+                         "  2. No, and tell the agent what to do differently"]:
+                visible = len(strip(text))
+                bottom.append(ACCENT + "│ " + RESET + text + RESET
+                              + " " * max(0, box - 1 - visible) + ACCENT + "│" + RESET)
+            bottom.append(ACCENT + "╰" + "─" * box + "╯" + RESET)
+        else:
+            text = "> " + self.input + ("█" if not self.steps else "")
+            bottom += [DIM + "╭" + "─" * box + "╮" + RESET,
+                       DIM + "│ " + RESET + text + " " * max(0, box - 1 - len(text))
+                       + DIM + "│" + RESET,
+                       DIM + "╰" + "─" * box + "╯" + RESET,
+                       DIM + "  ? for shortcuts" + RESET]
+        # Like Claude: the input follows the conversation, which scrolls up once
+        # the screen is full.
+        room = max(0, rows - len(out) - len(bottom))
+        screen = out + (body[-room:] if room else []) + bottom
+        sys.stdout.write("\033[H" + "\r\n".join(line + "\033[K" for line in screen[:rows])
+                         + "\033[J")
+        sys.stdout.flush()
+
+
+def strip(text):
+    out, skip = "", False
+    for c in text:
+        if c == "\033":
+            skip = True
+        elif skip:
+            skip = c != "m"
+        else:
+            out += c
+    return out
+
+
+def wrap(text, width):
+    lines, line = [], ""
+    for word in text.split():
+        if line and len(line) + 1 + len(word) > width:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    return lines + [line]
+
+
+def main():
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    tty.setraw(fd)
+    sys.stdout.write("\033[?25l\033[2J")
+    agent = Agent()
+    try:
+        while True:
+            now = time.time()
+            agent.advance(now)
+            agent.draw(now)
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                for c in os.read(fd, 1024).decode(errors="ignore"):
+                    if c == "\x03":
+                        return
+                    agent.key(c)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?25h\r\n")
+
+
+if __name__ == "__main__":
+    main()

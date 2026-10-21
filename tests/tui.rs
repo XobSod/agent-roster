@@ -45,13 +45,21 @@ fn tui_walkthrough() {
     term.keys(&["Enter"]);
     term.wait_for("the rename back", "demo / one");
 
-    // Attach, type to the agent, come back with Ctrl+Q.
+    // Attach, type to the agent, come back with Ctrl+Q. While attached, a line at
+    // the top says where you are, like the preview's header (`#` and a last `;`
+    // show as typed).
+    t.ok(&["edit", "one", "--title", "Fix #42;"]);
     term.keys(&["Enter"]);
     term.wait_for_gone("the agent full screen", "Enter attach");
+    term.wait_for("the line at the top", "C-q back");
+    let top = term.screen().lines().next().unwrap().to_string();
+    assert!(top.starts_with(" DE demo / one / Fix #42; "), "{top}");
+    assert!(top.contains("✱ claude"), "{top}");
     term.text("typed while attached");
     term.keys(&["Enter", "C-q"]);
     term.wait_for("the list again", "Enter attach");
     term.wait_for("the agent's echo in the preview", "typed while attached");
+    t.ok(&["edit", "one", "--title", ""]);
 
     // Stop it: it moves to the Stopped shelf, still selected.
     term.keys(&["s", "x"]);
@@ -154,8 +162,9 @@ fn agents_drawing_full_screen_fit_the_preview() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    // Started outside a terminal, sessions get 160x48.
-    assert_eq!(size("a"), "160x48");
+    // Started outside a terminal, sessions get 160x48, less a row for the line
+    // at the top while attached.
+    assert_eq!(size("a"), "160x47");
 
     // In a 120x30 terminal the preview is 82x26: what's left of the sidebar (36),
     // its divider and a column of space; below the header, statistics and a blank
@@ -171,7 +180,7 @@ fn agents_drawing_full_screen_fit_the_preview() {
         assert!(!screen.contains("Working ("), "{screen}");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert_eq!(size("a"), "160x48");
+    assert_eq!(size("a"), "160x47");
 
     // The terminal resized: so is the preview, and so are they.
     term.resize((140, 34));
@@ -189,10 +198,11 @@ fn agents_drawing_full_screen_fit_the_preview() {
     term.wait_for("b selected", "full / b ");
     term.keys(&["Enter"]);
     term.wait_for_gone("the agent full screen", "Enter attach");
-    t.wait_for("b at the terminal's size", |_| size("b") == "140x34");
+    // (less the line at the top)
+    t.wait_for("b at the terminal's size", |_| size("b") == "140x33");
     term.keys(&["C-q"]);
     term.wait_for("the list again", "Enter attach");
     t.wait_for("b fitted again", |_| size("b") == "96x30");
     // The classic agent (normal screen, scrollback in tmux) was never resized.
-    assert_eq!(size("a"), "160x48");
+    assert_eq!(size("a"), "160x47");
 }

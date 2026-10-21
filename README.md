@@ -28,12 +28,13 @@ To scroll back through an agent's history while attached, also set up
 
 Run `roster` for the TUI: sessions on the left, the selected agent's screen on the right.
 
-Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds
-a heading); in an agent, Ctrl+Q comes back and marks it read. `/` filters the list as
-you type, fuzzily (`atrw` finds "Auth rework"; `'word` matches exactly): `Enter` keeps
-the filter, `Esc` clears it. `?` shows every key, and `q` quits (in the projects and
-server views it goes back, like `Esc`). Everything else is in three menus, which pop
-up their keys:
+Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds a
+heading); in an agent, a line at the top says where you are, like the preview's header
+(project, the session's name if you gave it one, and its title), and Ctrl+Q comes back
+and marks it read. `/` filters the list as you type, fuzzily (`atrw` finds "Auth
+rework"; `'word` matches exactly): `Enter` keeps the filter, `Esc` clears it. `?` shows
+every key, and `q` quits (in the projects and server views it goes back, like `Esc`).
+Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
@@ -96,6 +97,10 @@ All files are optional and live in `~/.config/agent-roster/`:
 - `config.toml`:
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
   - `chats_dir`: where chats run (default inside roster's state directory).
+  - `status_line`: `false` drops the line at the top while you're attached (it takes
+    a row from the agent). It's set as you attach, so a title the agent picks
+    meanwhile shows from the next attach. Turning it on or off changes sessions'
+    height by a row on their next attach.
   - `fit_preview`: agents drawing full screen (in the terminal's alternate screen, as
     Claude Code's fullscreen renderer does) are sized to the preview while you're not
     attached, so it shows all of their screen; `"never"` turns that off, also per agent

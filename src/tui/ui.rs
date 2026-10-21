@@ -503,29 +503,89 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     f.render_widget(Paragraph::new(Text::from(lines[skip..].to_vec())), body);
 }
 
+/// Project / name / title, as headers show a session: the name only if it
+/// was chosen (not the made-up `claude-1`), the title in bold; with no title
+/// the name takes its place.
+fn whereabouts(s: &Session) -> Vec<Span<'static>> {
+    let slash = || Span::styled(" / ", Style::new().fg(FAINT));
+    let mut spans = vec![Span::styled(s.project.clone(), Style::new().fg(MUTED))];
+    let bold = Style::new().add_modifier(Modifier::BOLD);
+    match s.title() {
+        Some(title) => {
+            if !s.has_default_name() {
+                spans.extend([slash(), Span::raw(s.name.clone())]);
+            }
+            spans.extend([slash(), Span::styled(title.to_string(), bold)]);
+        }
+        None => spans.extend([slash(), Span::styled(s.name.clone(), bold)]),
+    }
+    spans
+}
+
+/// The agent's glyph and name, model and effort, as in the header.
+fn agent_spans(s: &Session) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        glyph(&s.agent),
+        Span::raw(" "),
+        Span::styled(s.agent.clone(), Style::new().fg(MUTED)),
+    ];
+    for value in [s.model_label(), s.effort_label()].into_iter().flatten() {
+        spans.push(Span::styled(" · ", Style::new().fg(FAINT)));
+        spans.push(Span::styled(value, Style::new().fg(MUTED)));
+    }
+    spans
+}
+
+/// The line roster's tmux shows at the top while attached to `s`, left and
+/// right, as tmux markup: the preview's header, with the back key where the
+/// state would go stale.
+pub fn status_line(s: &Session, detach_key: &str) -> (String, String) {
+    let left = [
+        vec![Span::raw(" "), badge(&s.project), Span::raw(" ")],
+        whereabouts(s),
+    ]
+    .concat();
+    let mut right = agent_spans(s);
+    right.extend([
+        Span::raw("   "),
+        Span::styled(
+            detach_key.to_string(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" back ", Style::new().fg(MUTED)),
+    ]);
+    (tmux_markup(&left), tmux_markup(&right))
+}
+
+/// Spans as tmux status-line markup, each with its colour (`terminal`: the
+/// terminal's own; `default` would be the line's muted one) and weight, `#`
+/// doubled so text shows as typed (verified on tmux 3.5a).
+fn tmux_markup(spans: &[Span]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        let fg = match span.style.fg {
+            Some(ratatui::style::Color::Rgb(r, g, b)) => format!("#{r:02x}{g:02x}{b:02x}"),
+            _ => "terminal".to_string(),
+        };
+        let weight = if span.style.add_modifier.contains(Modifier::BOLD) {
+            "bold"
+        } else {
+            "nobold"
+        };
+        out.push_str(&format!(
+            "#[fg={fg},{weight}]{}",
+            span.content.replace('#', "##")
+        ));
+    }
+    out
+}
+
 fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
     let sep = || Span::styled(" · ", Style::new().fg(FAINT));
     match app.selected_entry() {
         Some(Entry::Card(s) | Entry::Row(s)) => {
-            let left = vec![
-                badge(&s.project),
-                Span::raw(" "),
-                Span::styled(s.project.clone(), Style::new().fg(MUTED)),
-                Span::styled(" / ", Style::new().fg(FAINT)),
-                Span::styled(
-                    s.display_title().to_string(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                ),
-            ];
-            let mut right = vec![
-                glyph(&s.agent),
-                Span::raw(" "),
-                Span::styled(s.agent.clone(), Style::new().fg(MUTED)),
-            ];
-            for value in [s.model_label(), s.effort_label()].into_iter().flatten() {
-                right.push(sep());
-                right.push(Span::styled(value, Style::new().fg(MUTED)));
-            }
+            let left = [vec![badge(&s.project), Span::raw(" ")], whereabouts(s)].concat();
+            let mut right = agent_spans(s);
             right.push(sep());
             if s.deleted_at.is_some() {
                 right.push(Span::styled("archived", Style::new().fg(MUTED)));
@@ -1337,10 +1397,50 @@ mod tests {
         assert!(screen.contains("api · opus high"), "{screen}");
         assert!(screen.contains("Working (1)"), "{screen}");
         assert!(screen.contains("3m"), "{screen}");
-        assert!(screen.contains("roster / Fix scrollback"), "{screen}");
+        // The header: the name was chosen, so it's there, before the title.
+        assert!(
+            screen.contains("RO roster / api / Fix scrollback"),
+            "{screen}"
+        );
         assert!(screen.contains("needs input"), "{screen}");
         assert!(screen.contains("agent screen line"), "{screen}");
         assert!(screen.contains("Enter attach"), "{screen}");
+    }
+
+    #[test]
+    fn the_status_line_is_the_header_with_the_name() {
+        let mut s = session("a1");
+        s.project = "roster".into();
+        s.name = "api".into();
+        s.model = Some("opus".into());
+        let (left, right) = status_line(&s, "C-q");
+        let text = |markup: &str| -> String {
+            // Without the markup: what shows.
+            let mut out = String::new();
+            let mut rest = markup;
+            while let Some(i) = rest.find("#[") {
+                out.push_str(&rest[..i]);
+                rest = &rest[i + rest[i..].find(']').unwrap() + 1..];
+            }
+            out + rest
+        };
+        assert_eq!(text(&left), " RO roster / api");
+        let right = text(&right);
+        assert!(right.starts_with("✱ claude · opus"), "{right}");
+        assert!(right.ends_with("   C-q back "), "{right}");
+        // The title, yours over the agent's, in bold; a `#` shows as typed.
+        s.title = Some("Agent's".into());
+        s.title_override = Some("Fix #42".into());
+        let (left, _) = status_line(&s, "C-q");
+        assert_eq!(text(&left), " RO roster / api / Fix ##42");
+        assert!(left.ends_with("#[fg=terminal,bold]Fix ##42"), "{left}");
+        assert!(left.contains("#[fg=#7d8296,nobold]roster"), "{left}");
+        // A made-up name says nothing: left out, unless there's no title yet.
+        s.name = "claude-1".into();
+        assert_eq!(text(&status_line(&s, "C-q").0), " RO roster / Fix ##42");
+        s.title = None;
+        s.title_override = None;
+        assert_eq!(text(&status_line(&s, "C-q").0), " RO roster / claude-1");
     }
 
     #[test]

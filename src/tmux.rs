@@ -80,11 +80,15 @@ impl Tmux {
         Tmux { socket, conf }
     }
 
-    /// Writes the generated config. tmux reads it when the server starts.
     /// Writes the generated config, which tmux reads when the server starts.
     /// Returns true if it changed (including edits to the user's tmux.conf).
-    pub fn write_config(&self, detach_key: &str, user_conf: &Path) -> Result<bool> {
-        let text = config_text(detach_key, user_conf);
+    pub fn write_config(
+        &self,
+        detach_key: &str,
+        user_conf: &Path,
+        status_line: bool,
+    ) -> Result<bool> {
+        let text = config_text(detach_key, user_conf, status_line);
         if fs::read_to_string(&self.conf).ok().as_deref() == Some(text.as_str()) {
             return Ok(false);
         }
@@ -123,7 +127,10 @@ impl Tmux {
         S: AsRef<OsStr>,
     {
         let mut cmd = self.command();
-        cmd.args(args);
+        // tmux takes an argument ending in `;` for the end of a command and
+        // drops the `;`; `\;` keeps it. So text (a title, a first prompt) keeps
+        // its last `;`, and a lone `;` still separates commands.
+        cmd.args(args.into_iter().map(|a| literal_end(a.as_ref())));
         let out = cmd.output().context("can't run tmux (is it installed?)")?;
         if !out.status.success() {
             bail!("tmux: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -394,6 +401,27 @@ impl Tmux {
         .map(drop)
     }
 
+    /// What the status line shows while attached to the session
+    /// (`config_text`): tmux markup for its left and right.
+    pub fn label(&self, name: &str, left: &str, right: &str) -> Result<()> {
+        let target = pane_target(name);
+        let t = target.as_str();
+        self.run([
+            "set-option",
+            "-t",
+            t,
+            "@roster_left",
+            left,
+            ";",
+            "set-option",
+            "-t",
+            t,
+            "@roster_right",
+            right,
+        ])
+        .map(drop)
+    }
+
     pub fn kill_session(&self, name: &str) -> Result<()> {
         match self.run(["kill-session", "-t", &format!("={name}")]) {
             Err(e) if is_missing(&e) => Ok(()),
@@ -429,6 +457,15 @@ impl Tmux {
     }
 }
 
+/// `arg` as tmux should read it (see `Tmux::run`).
+fn literal_end(arg: &OsStr) -> std::ffi::OsString {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    match arg.as_bytes().strip_suffix(b";") {
+        Some(rest) if !rest.is_empty() => std::ffi::OsString::from_vec([rest, b"\\;"].concat()),
+        _ => arg.to_os_string(),
+    }
+}
+
 fn pane_target(name: &str) -> String {
     format!("={name}:")
 }
@@ -440,13 +477,32 @@ fn is_missing(e: &anyhow::Error) -> bool {
         || msg.contains("error connecting")
 }
 
-fn config_text(detach_key: &str, user_conf: &Path) -> String {
+fn config_text(detach_key: &str, user_conf: &Path, status_line: bool) -> String {
     // Noted in the text so that editing the user's file changes it.
     let modified = fs::metadata(user_conf)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or("absent".to_string(), |d| d.as_nanos().to_string());
+    // While attached, where you are, like the preview's header (set before
+    // each attach, `Tmux::label`); the back key stands in for one not set yet.
+    // Its spans bring their own colours; the base is theme::MUTED.
+    let status = if status_line {
+        format!(
+            "set -g status on
+set -g status-position top
+set -g status-style 'bg=default,fg=#7d8296'
+set -g status-left-length 300
+set -g status-right-length 300
+set -g status-left '#{{@roster_left}}'
+set -g status-right '#{{?#{{@roster_right}},#{{@roster_right}},{detach_key} back }}'
+set -g window-status-format ''
+set -g window-status-current-format ''
+set -g window-status-separator ''"
+        )
+    } else {
+        "set -g status off".to_string()
+    };
     let user_conf = user_conf
         .to_string_lossy()
         .replace('\\', "\\\\")
@@ -464,7 +520,7 @@ unbind -aq -T root
 # ...except the back key.
 bind -n {detach_key} detach-client
 
-set -g status off
+{status}
 set -g mouse off
 set -s escape-time 10
 set -s extended-keys on
@@ -483,15 +539,33 @@ mod tests {
 
     #[test]
     fn config_binds_only_the_detach_key_and_sources_user_file() {
-        let text = config_text("C-q", Path::new("/home/u/.config/agent-roster/tmux.conf"));
+        let text = config_text(
+            "C-q",
+            Path::new("/home/u/.config/agent-roster/tmux.conf"),
+            false,
+        );
         assert!(text.contains("bind -n C-q detach-client"));
+        assert!(text.contains("set -g status off"));
         assert!(text.contains("unbind -aq -T root"));
         assert!(text.contains("source-file -q \"/home/u/.config/agent-roster/tmux.conf\""));
     }
 
     #[test]
     fn config_escapes_the_user_path() {
-        let text = config_text("C-q", Path::new("/we\"ird/$HOME/tmux.conf"));
+        let text = config_text("C-q", Path::new("/we\"ird/$HOME/tmux.conf"), true);
+        assert!(text.contains("set -g status on") && text.contains("#{@roster_left}"));
+        assert!(text.contains("C-q back"));
         assert!(text.contains(r#"source-file -q "/we\"ird/\$HOME/tmux.conf""#));
+    }
+
+    #[test]
+    fn a_last_semicolon_stays_text() {
+        let end = |a: &str| literal_end(OsStr::new(a)).into_string().unwrap();
+        assert_eq!(end("Fix the parser;"), "Fix the parser\\;");
+        // A lone `;` still separates commands.
+        assert_eq!(
+            (end(";"), end("a;b"), end("")),
+            (";".into(), "a;b".into(), "".into())
+        );
     }
 }

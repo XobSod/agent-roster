@@ -51,7 +51,11 @@ impl Roster {
         backfill_models(&db)?;
         let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
         // A changed detach key or user tmux.conf also applies to a running server.
-        if tmux.write_config(&config.keys.detach, &paths.user_tmux_conf())? {
+        if tmux.write_config(
+            &config.keys.detach,
+            &paths.user_tmux_conf(),
+            config.status_line(),
+        )? {
             tmux.reload_config()?;
         }
         let exe = std::env::current_exe().context("can't find roster's own path")?;
@@ -477,7 +481,9 @@ impl Roster {
         if self.tmux.panes()?.contains_key(&name) {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)?;
         } else {
-            let size = util::terminal_size().unwrap_or(DEFAULT_SIZE);
+            let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
+            // A row less for the status line, so attaching doesn't resize it.
+            let size = (w, h - u16::from(self.config.status_line() && h > 1));
             self.tmux
                 .new_session(&name, &s.workdir, size, &env, &argv)?;
         }
@@ -601,6 +607,12 @@ impl Roster {
         }
         if s.state == State::Stopped {
             self.start(id)?;
+        }
+        // The status line says where you are, drawn like the TUI's header. Only
+        // a nicety: if tmux won't take it, attach anyway.
+        if self.config.status_line() {
+            let (left, right) = crate::tui::status_line(&s, &self.config.keys.detach);
+            self.tmux.label(&s.tmux_name(), &left, &right).ok();
         }
         let since = now_ms();
         let status = self.tmux.attach(&s.tmux_name())?;

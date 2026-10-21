@@ -4,6 +4,8 @@
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
 //! chats_dir = "~/chats"           # where chats run; default: roster's state directory
+//! status_line = false             # default true: while attached, a line at the top
+//!                                 # with the project, session and title
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
 //!                                 # sized to the TUI's preview while no one's attached
 //!
@@ -48,6 +50,8 @@ pub struct Config {
     pub keys: Keys,
     pub agents: BTreeMap<String, AgentConfig>,
     pub fit_preview: Option<FitPreview>,
+    /// While attached, a line at the top saying where you are (default on).
+    pub status_line: Option<bool>,
 }
 
 /// Whether an agent drawing full screen (in the terminal's alternate screen,
@@ -282,6 +286,10 @@ impl Config {
         Ok(config)
     }
 
+    pub fn status_line(&self) -> bool {
+        self.status_line.unwrap_or(true)
+    }
+
     pub fn agent(&self, name: &str) -> AgentConfig {
         self.agents.get(name).cloned().unwrap_or_default()
     }
@@ -297,6 +305,8 @@ mod tests {
         assert_eq!(config.keys.detach, "C-q");
         assert!(config.shell.is_none());
         assert!(config.agent("claude").command.is_none());
+        assert!(config.status_line());
+        assert!(!Config::parse("status_line = false").unwrap().status_line());
     }
 
     #[test]

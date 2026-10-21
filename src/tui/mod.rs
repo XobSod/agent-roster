@@ -9,6 +9,8 @@ mod picker;
 mod theme;
 mod ui;
 
+pub use ui::status_line;
+
 use std::io::stdout;
 use std::path::Path;
 use std::time::{Duration, Instant};

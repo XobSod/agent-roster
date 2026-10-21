@@ -143,6 +143,15 @@ impl Session {
         format!("r-{}", self.id)
     }
 
+    /// Whether the name is one roster made up (`<agent>-<n>`): it says nothing
+    /// a header would need. A chosen one (a role, say) does.
+    pub fn has_default_name(&self) -> bool {
+        self.name
+            .strip_prefix(self.agent.as_str())
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
     /// `project/name`, how sessions are shown and addressed.
     pub fn label(&self) -> String {
         format!("{}/{}", self.project, self.name)
@@ -222,11 +231,13 @@ impl Session {
     }
 
     /// The user's title, else the agent's, else the session's name.
+    /// The title: yours if you set one, else the agent's.
+    pub fn title(&self) -> Option<&str> {
+        self.title_override.as_deref().or(self.title.as_deref())
+    }
+
     pub fn display_title(&self) -> &str {
-        self.title_override
-            .as_deref()
-            .or(self.title.as_deref())
-            .unwrap_or(&self.name)
+        self.title().unwrap_or(&self.name)
     }
 
     /// Applies a reported event.
@@ -354,6 +365,25 @@ impl Session {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn default_names_are_the_agent_and_a_number() {
+        let mut s = session("a");
+        for (name, default) in [
+            ("claude-1", true),
+            ("claude-12", true),
+            ("claude-", false),
+            ("claude-1b", false),
+            ("tester", false),
+            ("aider-1", false),
+        ] {
+            s.name = name.into();
+            assert_eq!(s.has_default_name(), default, "{name}");
+        }
+        s.agent = "aider".into();
+        s.name = "aider-1".into();
+        assert!(s.has_default_name());
+    }
 
     pub fn session(id: &str) -> Session {
         Session {

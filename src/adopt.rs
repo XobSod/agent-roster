@@ -63,8 +63,9 @@ pub fn claude_dir() -> Option<PathBuf> {
     }
 }
 
-/// Every conversation Claude has kept, newest first.
-pub fn conversations(claude_dir: &Path) -> Vec<Conversation> {
+/// The conversations Claude has kept whose id `wanted` says yes to (only
+/// their files are read), newest first.
+pub fn conversations(claude_dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Conversation> {
     let open = open_conversations(claude_dir);
     let mut found: Vec<Conversation> = fs::read_dir(claude_dir.join("projects"))
         .into_iter()
@@ -73,6 +74,7 @@ pub fn conversations(claude_dir: &Path) -> Vec<Conversation> {
         .flat_map(|dir| fs::read_dir(dir.path()).into_iter().flatten().flatten())
         .map(|entry| entry.path())
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .filter(|p| p.file_stem().and_then(|s| s.to_str()).is_some_and(&wanted))
         .filter_map(|p| read(&p))
         .map(|mut c| {
             c.open_in = open.get(&c.id).copied();
@@ -94,12 +96,14 @@ fn read(path: &Path) -> Option<Conversation> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis() as i64;
+    // A small file whole; a larger one's start and end.
     let mut head = Vec::new();
-    (&mut file).take(HEAD).read_to_end(&mut head).ok()?;
     let mut tail = Vec::new();
-    let tail_start = meta.len().saturating_sub(TAIL);
-    if tail_start > 0 {
-        file.seek(SeekFrom::Start(tail_start)).ok()?;
+    if meta.len() <= HEAD + TAIL {
+        file.read_to_end(&mut head).ok()?;
+    } else {
+        (&mut file).take(HEAD).read_to_end(&mut head).ok()?;
+        file.seek(SeekFrom::Start(meta.len() - TAIL)).ok()?;
         file.read_to_end(&mut tail).ok()?;
         // The first line is likely cut.
         let cut = tail
@@ -107,8 +111,6 @@ fn read(path: &Path) -> Option<Conversation> {
             .position(|b| *b == b'\n')
             .map_or(tail.len(), |i| i + 1);
         tail.drain(..cut);
-    } else {
-        tail = head.clone();
     }
     let mut c = Conversation {
         id,
@@ -279,7 +281,7 @@ mod tests {
             "empty",
             &[r#"{"type":"mode","cwd":"/work/app"}"#],
         );
-        let found = conversations(dir.path());
+        let found = conversations(dir.path(), |_| true);
         assert_eq!(found.len(), 2);
         let c = found.iter().find(|c| c.id == "c-2").unwrap();
         assert_eq!(c.first_prompt.as_deref(), Some("review\n the PR"));
@@ -302,6 +304,28 @@ mod tests {
             (Some("and the tests"), Some("claude-opus-5-5"))
         );
         assert_eq!(c.open_in, None);
+    }
+
+    #[test]
+    fn reads_all_of_a_file_up_to_the_size_of_its_start_and_end() {
+        // A title near the end of a 200 KB file (found in real use: files
+        // between 64 and 512 KB were read only for their first 64 KB).
+        let dir = tempfile::tempdir().unwrap();
+        let filler = format!(r#"{{"type":"progress","data":"{}"}}"#, "x".repeat(1000));
+        let mut lines =
+            vec![r#"{"type":"user","cwd":"/w","message":{"content":"hi"}}"#.to_string()];
+        lines.extend(std::iter::repeat_n(filler, 200));
+        lines.push(r#"{"type":"ai-title","aiTitle":"Late title"}"#.into());
+        lines.push(r#"{"type":"custom-title","customTitle":"Renamed"}"#.into());
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        conversation_file(dir.path(), "c-1", &lines);
+        conversation_file(dir.path(), "c-2", &lines);
+        let found = conversations(dir.path(), |id| id == "c-1");
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (found[0].title.as_deref(), found[0].custom_title.as_deref()),
+            (Some("Late title"), Some("Renamed"))
+        );
     }
 
     #[test]
@@ -333,9 +357,12 @@ mod tests {
             r#"{"pid":999999,"sessionId":"c-2"}"#,
         )
         .unwrap();
-        assert_eq!(conversations(dir.path())[0].open_in, Some(pid as i32));
+        assert_eq!(
+            conversations(dir.path(), |_| true)[0].open_in,
+            Some(pid as i32)
+        );
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(conversations(dir.path())[0].open_in, None);
+        assert_eq!(conversations(dir.path(), |_| true)[0].open_in, None);
     }
 }

@@ -118,25 +118,32 @@ impl Db {
         Db::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Db> {
+    fn init(mut conn: Connection) -> Result<Db> {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        // In one transaction, with the version read inside it: two rosters
+        // starting at once don't both migrate, and an interrupted migration
+        // leaves the database as it was.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
-            0 => conn.execute_batch(SCHEMA)?,
+            0 => tx.execute_batch(SCHEMA)?,
             v if v > SCHEMA_VERSION => {
                 bail!("the database is from a newer roster (schema {v}); upgrade roster")
             }
             v => {
                 for (_, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > v) {
-                    conn.execute_batch(sql)?;
+                    tx.execute_batch(sql)?;
                 }
             }
         }
         if version != SCHEMA_VERSION {
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        // Not a schema change: older rosters use the index without knowing it.
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS events_session ON events(session_id);")?;
+        tx.commit()?;
         Ok(Db { conn })
     }
 
@@ -484,19 +491,20 @@ impl Db {
     }
 
     /// Learns what each alias (or the default) turned out to be from sessions
-    /// that know both, per agent (`agent::learned_key`); the most recent
-    /// session wins. The default only from a model the agent reported on
-    /// starting: a resumed conversation keeps its own.
+    /// that know both, per agent (the rule of `agent::learned_key`); the most
+    /// recent session wins. Only from a model the agent reported on starting:
+    /// a resumed conversation keeps its own, and a model switched to later
+    /// isn't what was asked.
     pub fn learn_model_names(&self) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value)
              SELECT 'model:' || CASE WHEN agent = ?1 THEN '' ELSE agent || ':' END
                     || coalesce(model, 'default'), running_model FROM sessions s
              WHERE running_model IS NOT NULL
-               AND (model IS NOT NULL OR EXISTS (
+               AND EXISTS (
                  SELECT 1 FROM events e WHERE e.session_id = s.id AND e.kind = 'session'
                    AND json_valid(e.payload)
-                   AND json_extract(e.payload, '$.model') = s.running_model))
+                   AND json_extract(e.payload, '$.model') = s.running_model)
              ORDER BY coalesce(state_since, created_at)",
             [crate::agent::CLAUDE],
         )?;

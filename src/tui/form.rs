@@ -49,7 +49,8 @@ pub struct Field {
     pub kind: Kind,
     pub value: String,
     pub hidden: bool,
-    /// Shown after a value: what a model alias turns out to be.
+    /// Shown after a value: what a model alias turns out to be, what a choice
+    /// means.
     pub notes: std::collections::HashMap<String, String>,
     /// Changed by the user, so no longer filled in from other fields.
     edited: bool,
@@ -604,7 +605,7 @@ impl Form {
             }
             (Kind::Text { .. } | Kind::Combo(_), KeyCode::Char('u')) if ctrl => field.value.clear(),
             (Kind::Combo(_), KeyCode::Char(c)) if !ctrl && !alt => {
-                // Typing replaces a listed choice rather than appending to it.
+                // Typing replaces "default" rather than appending to it.
                 if field.value == DEFAULT {
                     field.value.clear();
                 }

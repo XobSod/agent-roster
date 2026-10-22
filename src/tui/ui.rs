@@ -241,19 +241,21 @@ fn heading(
     width: usize,
 ) -> Vec<Span<'static>> {
     let chevron = Span::styled(if open { " ⌄ " } else { " › " }, Style::new().fg(MUTED));
+    let count = Span::styled(format!(" ({count}) "), Style::new().fg(MUTED));
+    // A long name is cut, so the count and the chevron always show.
+    let room = width.saturating_sub(count.width() + chevron.width());
     let mut left = match group {
-        Group::Project(_) => vec![
-            badge(label),
-            Span::raw(" "),
-            label.to_string().bold(),
-            Span::styled(format!(" ({count}) "), Style::new().fg(MUTED)),
-        ],
+        Group::Project(_) => {
+            let badge = badge(label);
+            let name = truncate(label, room.saturating_sub(badge.width() + 1));
+            vec![badge, Span::raw(" "), name.bold(), count]
+        }
         Group::Shelf(_) => vec![
             Span::styled(
-                label.to_string(),
+                truncate(label, room),
                 Style::new().fg(MUTED).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" ({count}) "), Style::new().fg(MUTED)),
+            count,
         ],
     };
     let used: usize = left.iter().map(Span::width).sum::<usize>() + chevron.width();
@@ -661,7 +663,6 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(fit(width, hints, message))), area);
 }
 
-/// The tmux server and database report, full width.
 /// Every project: name, directory, sessions, defaults; the selected one's
 /// details below.
 fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
@@ -720,7 +721,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     let name_w = widest(&|i| app.projects[i].name.width(), 24).max(7);
     let dir_w = widest(&|i| rows[i][0].width(), width * 2 / 5).max(9);
     let sessions_w = widest(&|i| rows[i][1].width(), 24).max(8);
-    let pad = |s: &str, w: usize| format!("{:<w$}  ", truncate(s, w), w = w);
+    let pad = |s: &str, w: usize| pad(s, w) + "  ";
     let header = Line::styled(
         format!(
             "    {}{}{}DEFAULTS",
@@ -764,6 +765,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// The tmux server and database report, full width.
 fn draw_server(f: &mut Frame, app: &App, area: Rect) {
     use crate::doctor::Level;
     let inner = Rect {
@@ -1002,8 +1004,7 @@ fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
             .areas(inner);
             // Show the end of a value that's longer than the box.
             let room = inner.width.saturating_sub(3) as usize;
-            let count = value.chars().count();
-            let shown: String = value.chars().skip(count.saturating_sub(room)).collect();
+            let shown = tail(value, room);
             f.render_widget(Paragraph::new(prompt.clone()), prompt_area);
             f.render_widget(Paragraph::new(format!("> {shown}")), value_area);
             f.set_cursor_position((value_area.x + 2 + shown.width() as u16, value_area.y));
@@ -1113,7 +1114,7 @@ fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
 }
 
 /// Conversations to adopt: a filter line, one row per conversation (age, project,
-/// title, and whether it's open in Claude or a deleted session's), and where the
+/// title, and whether it's open in Claude or an archived session's), and where the
 /// selected one ran.
 fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
     let now = now_ms();
@@ -1182,10 +1183,7 @@ fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
                 format!("{:>4}  ", crate::util::ago(now - c.modified)),
                 Style::new().fg(MUTED),
             ),
-            Span::styled(
-                format!("{:<project_width$}  ", truncate(&project, project_width)),
-                project_style,
-            ),
+            Span::styled(pad(&project, project_width) + "  ", project_style),
             Span::raw(what),
         ];
         let right = match (&a.archived, c.open_in) {
@@ -1238,30 +1236,38 @@ fn tail(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
     }
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::new();
-    for c in chars.iter().rev() {
-        if out.width() + c.to_string().width() + 1 > width {
+    if width == 0 {
+        return String::new();
+    }
+    let (mut start, mut used) = (s.len(), 0);
+    for (i, g) in s.grapheme_indices(true).rev() {
+        if used + g.width() + 1 > width {
             break;
         }
-        out.insert(0, *c);
+        used += g.width();
+        start = i;
     }
-    format!("…{out}")
+    format!("…{}", &s[start..])
 }
 
 // Helpers
 
-/// How many lines `text` takes wrapped at word boundaries to `width`.
+/// How many lines `text` takes wrapped at word boundaries to `width`; a word
+/// wider than that is broken over several.
 fn wrapped_lines(text: &str, width: usize) -> usize {
+    let width = width.max(1);
     let mut lines = 1;
     let mut used = 0;
     for word in text.split_whitespace() {
-        let w = word.width();
-        if used > 0 && used + 1 + w > width {
-            lines += 1;
-            used = w;
+        let w = word.width().max(1);
+        if used > 0 && used + 1 + w <= width {
+            used += 1 + w;
         } else {
-            used += w + usize::from(used > 0);
+            if used > 0 {
+                lines += 1;
+            }
+            lines += (w - 1) / width;
+            used = (w - 1) % width + 1;
         }
     }
     lines
@@ -1289,15 +1295,27 @@ fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
     }
+    if width == 0 {
+        return String::new();
+    }
     let mut out = String::new();
-    for c in s.chars() {
-        if out.width() + c.to_string().width() + 1 > width {
+    let mut used = 0;
+    for g in s.graphemes(true) {
+        if used + g.width() + 1 > width {
             break;
         }
-        out.push(c);
+        used += g.width();
+        out.push_str(g);
     }
     out.push('…');
     out
+}
+
+/// `s` cut or padded to exactly `width` columns (wide characters take two).
+fn pad(s: &str, width: usize) -> String {
+    let s = truncate(s, width);
+    let fill = width.saturating_sub(s.width());
+    s + &" ".repeat(fill)
 }
 
 /// A line `width` columns wide: `left` cut to fit, `right` flush right.
@@ -1644,6 +1662,11 @@ mod tests {
     fn long_questions_wrap_and_keep_their_keys() {
         assert_eq!(wrapped_lines("one two three", 9), 2);
         assert_eq!(wrapped_lines("one two", 7), 1);
+        // A word wider than the line is broken over several.
+        assert_eq!(
+            wrapped_lines("Archive some-project/a-long-session-name?", 10),
+            5
+        );
         let mut app = app();
         app.dialog = Some(Dialog::Confirm {
             question: "word ".repeat(40),
@@ -1718,7 +1741,7 @@ mod tests {
         assert!(screen.contains("✗ r-x"), "{screen}");
         assert!(screen.contains("Enter kill orphans"), "{screen}");
         assert!(screen.contains("Esc back"), "{screen}");
-        assert!(!screen.contains("Needs you"), "{screen}");
+        assert!(!screen.contains("Needs input"), "{screen}");
     }
 
     #[test]
@@ -1766,5 +1789,28 @@ mod tests {
         .map(|s| s.content.to_string())
         .collect();
         assert_eq!(line, "long t… 3m");
+        // No room at all: nothing, not a "…" past the edge.
+        assert_eq!(
+            (truncate("abc", 0), tail("abc", 0)),
+            (String::new(), String::new())
+        );
+        assert_eq!(tail("abcdef", 4), "…def");
+        // Columns are measured in cells: a wide character takes two.
+        assert_eq!(pad("日本", 6), "日本  ");
+        assert_eq!(pad("日本語です", 5), "日本…");
+    }
+
+    #[test]
+    fn long_project_names_keep_their_count_and_fold_mark() {
+        let spans = heading(
+            Group::Project(1),
+            "customer-portal-frontend-migration-2026",
+            3,
+            true,
+            34,
+        );
+        let line: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(line.width(), 34, "{line}");
+        assert!(line.contains("… (3) ") && line.ends_with(" ⌄ "), "{line}");
     }
 }

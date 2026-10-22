@@ -232,12 +232,12 @@ impl Session {
         self.effort.clone().or_else(|| self.running_effort.clone())
     }
 
-    /// The user's title, else the agent's, else the session's name.
     /// The title: yours if you set one, else the agent's.
     pub fn title(&self) -> Option<&str> {
         self.title_override.as_deref().or(self.title.as_deref())
     }
 
+    /// The title, else the session's name.
     pub fn display_title(&self) -> &str {
         self.title().unwrap_or(&self.name)
     }

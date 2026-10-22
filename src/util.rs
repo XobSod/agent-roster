@@ -1,4 +1,5 @@
-//! Small helpers: clock, terminal size, shell quoting, hashing.
+//! Small helpers: time, terminal size, shell quoting, hashing, paths, model
+//! names.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -94,8 +95,6 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
-/// A project name from a directory: its last part, with anything a name can't
-/// hold replaced by '-'.
 /// `~/…` as a path in the home directory.
 pub fn expand_tilde(path: &str) -> String {
     match (path.strip_prefix('~'), dirs::home_dir()) {
@@ -108,13 +107,16 @@ pub fn expand_tilde(path: &str) -> String {
 
 /// `~` instead of the home directory, for shorter paths.
 pub fn short_path(path: &std::path::Path) -> String {
-    let path = path.display().to_string();
-    match dirs::home_dir().map(|h| h.display().to_string()) {
-        Some(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
-        _ => path,
+    let home = dirs::home_dir();
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
+/// A project name from a directory: its last part, with anything a name can't
+/// hold replaced by '-'.
 pub fn directory_name(directory: &std::path::Path) -> String {
     let base = directory
         .file_name()
@@ -166,6 +168,15 @@ pub fn clock(elapsed_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_is_shortened_by_whole_directories() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(short_path(&home.join("src/app")), "~/src/app");
+        assert_eq!(short_path(&home), "~");
+        let sibling = format!("{}2/app", home.display());
+        assert_eq!(short_path(std::path::Path::new(&sibling)), sibling);
+    }
 
     #[test]
     fn finds_commands_on_the_path() {

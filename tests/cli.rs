@@ -227,6 +227,9 @@ fn addressing_and_validation() {
 
     let out = t.run(&["show", "same"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("matches several sessions"));
+    // Commands that also look among archived sessions say so too.
+    let out = t.run(&["info", "same"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("matches several sessions"));
     t.ok(&["read", "a/same"]);
     let id = t.session("same", false).unwrap()["id"]
         .as_str()

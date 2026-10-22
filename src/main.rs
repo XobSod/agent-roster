@@ -410,8 +410,10 @@ fn run(cli: Cli) -> Result<()> {
             r.attach(&s.id)?;
         }
         Cmd::Start { session, yes } => {
+            r.refresh()?;
             let s = r.resolve(&session, false)?;
-            if !confirm_new_conversation(&r, &s, yes)? {
+            // A running one fails to start anyway; don't ask about it first.
+            if s.state == State::Stopped && !confirm_new_conversation(&r, &s, yes)? {
                 return Ok(());
             }
             r.start(&s.id)?;
@@ -551,9 +553,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Info { session } => {
             r.refresh()?;
-            let s = r
-                .resolve(&session, false)
-                .or_else(|_| r.resolve(&session, true))?;
+            let s = r.resolve_any(&session)?;
             print_info(&r, &s);
         }
         Cmd::Retitle { session } => {
@@ -904,11 +904,7 @@ fn print_table(header: &[&str], rows: &[Vec<String>]) {
 
 fn events(r: &Roster, follow: bool, session: Option<&str>) -> Result<()> {
     let filter = match session {
-        Some(addr) => Some(
-            r.resolve(addr, false)
-                .or_else(|_| r.resolve(addr, true))?
-                .id,
-        ),
+        Some(addr) => Some(r.resolve_any(addr)?.id),
         None => None,
     };
     let mut labels: HashMap<String, String> = HashMap::new();

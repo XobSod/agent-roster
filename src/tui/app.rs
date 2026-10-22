@@ -168,7 +168,7 @@ pub struct App {
     pub chat_project: Option<i64>,
     message: Option<Message>,
     pub projects: Vec<Project>,
-    /// Live and deleted.
+    /// Live and archived.
     pub sessions: Vec<Session>,
     select_next: Option<EntryKey>,
     /// The cursor's row when attaching, while attached.
@@ -420,10 +420,12 @@ impl App {
         }
         let actions: Vec<(Action, &'static str)> = match self.mode {
             Mode::Live => {
-                let archived = self
-                    .selected_session()
-                    .is_some_and(|s| s.deleted_at.is_some());
-                let enter = if archived { "restore" } else { "attach" };
+                let enter = match self.selected_entry() {
+                    Some(Entry::Heading { open: true, .. }) => "fold",
+                    Some(Entry::Heading { open: false, .. }) => "unfold",
+                    Some(e) if e.session().is_some_and(|s| s.deleted_at.is_some()) => "restore",
+                    _ => "attach",
+                };
                 let mut actions = vec![(Action::Confirm, enter)];
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
                 actions.push((Action::Search, "filter"));
@@ -826,6 +828,10 @@ impl App {
     /// The form for adopting `a`, or for an archived session's conversation, restoring it.
     fn adopt(&mut self, a: crate::engine::Adoptable) {
         match a.archived {
+            // Its name taken meanwhile: restoring asks for another.
+            Some(s) if self.name_taken(&s) => {
+                self.restore(s);
+            }
             Some(s) => self.confirm(
                 format!(
                     "That conversation is the archived session {}. Restore it?",
@@ -950,26 +956,43 @@ impl App {
             self.fail("Select a project (group by project) or one of its sessions first");
             return;
         };
-        if self
+        let (archived, live): (Vec<&Session>, Vec<&Session>) = self
             .sessions
             .iter()
-            .any(|s| s.project_id == p.id && s.deleted_at.is_none())
-        {
-            self.fail(format!("{} still has sessions; delete them first", p.name));
-        } else {
-            self.confirm(
-                format!("Remove project {}?", p.name),
-                Op::RemoveProject(p.name),
-            );
+            .filter(|s| s.project_id == p.id)
+            .partition(|s| s.deleted_at.is_some());
+        if !live.is_empty() {
+            let archive = self.chord(Menu::Session, Action::Archive);
+            self.fail(format!(
+                "{} still has sessions; archive them first ({archive})",
+                p.name
+            ));
+            return;
         }
+        // Removing a project deletes its archived sessions for good.
+        let question = match archived.len() {
+            0 => format!("Remove project {}?", p.name),
+            1 => format!(
+                "Remove project {}? Its archived session goes for good.",
+                p.name
+            ),
+            n => format!(
+                "Remove project {}? Its {n} archived sessions go for good.",
+                p.name
+            ),
+        };
+        self.confirm(question, Op::RemoveProject(p.name));
+    }
+
+    /// Whether a live session in `s`'s project has its name.
+    fn name_taken(&self, s: &Session) -> bool {
+        self.sessions
+            .iter()
+            .any(|o| o.deleted_at.is_none() && o.project_id == s.project_id && o.name == s.name)
     }
 
     fn restore(&mut self, s: Session) -> Option<Op> {
-        let taken = self
-            .sessions
-            .iter()
-            .any(|o| o.deleted_at.is_none() && o.project_id == s.project_id && o.name == s.name);
-        if taken {
+        if self.name_taken(&s) {
             let prompt = format!(
                 "{} already has a session named {}. Restore as:",
                 s.project, s.name
@@ -1731,6 +1754,21 @@ mod tests {
                 name: None
             })
         );
+
+        // Its name taken meanwhile: restoring it asks for another.
+        let mut taken = with("s5", (1, "alpha"), State::Idle, false, 1);
+        taken.name = "s-s3".into();
+        let mut sessions = app.sessions.clone();
+        sessions.push(taken);
+        app.set_data(app.projects.clone(), sessions);
+        let mut deleted = adoptable("c3", "Old one", Some("alpha"));
+        deleted.archived = Some(with("s3", (1, "alpha"), State::Stopped, false, 1));
+        app.pick_conversation(vec![deleted]);
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert!(matches!(&app.dialog, Some(Dialog::Input { prompt, .. })
+            if prompt.contains("already has a session named s-s3")));
+        app.on_key(key(KeyCode::Esc));
+
         app.pick_conversation(Vec::new());
         assert!(app.dialog.is_none() && !app.message().unwrap().error);
     }

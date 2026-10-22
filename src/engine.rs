@@ -69,12 +69,17 @@ impl Roster {
     }
 
     /// Brings the database up to date: applies reported events, notices agents
-    /// that have exited, and corrects stale "working" states from the screen.
+    /// that have exited, follows agents' titles and screens (correcting stale
+    /// "working" states, watching agents without hooks), and types first
+    /// prompts into agents that are ready for them.
     pub fn refresh(&mut self) -> Result<()> {
         let now = now_ms();
         self.db.fold_events(now)?;
         let panes = self.tmux.panes()?;
         self.resized.retain(|_, until| *until > now);
+        // Typed once every session is saved: typing takes a moment, and rows
+        // loaded before it could overwrite what another roster saved meanwhile.
+        let mut prompts = Vec::new();
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
             let redrawing = self.resized.contains_key(&s.id);
@@ -120,7 +125,7 @@ impl Roster {
                     if s.pending_prompt.is_some() && self.ready_for_prompt(&s, now) {
                         // Claimed in the database first, so only one process types it.
                         if let Some(prompt) = self.db.take_pending_prompt(&s.id)? {
-                            self.tmux.type_line(&s.tmux_name(), &prompt)?;
+                            prompts.push((s.tmux_name(), prompt));
                         }
                         s.pending_prompt = None;
                     }
@@ -129,6 +134,9 @@ impl Roster {
             if s != before {
                 self.db.save_session(&s)?;
             }
+        }
+        for (name, prompt) in prompts {
+            self.tmux.type_line(&name, &prompt)?;
         }
         Ok(())
     }
@@ -317,6 +325,26 @@ impl Roster {
     /// Finds a live (or, with `archived`, an archived) session by id,
     /// `project/name`, name, or id prefix of at least 4 characters.
     pub fn resolve(&self, addr: &str, archived: bool) -> Result<Session> {
+        match self.find(addr, archived)? {
+            Some(s) => Ok(s),
+            None => bail!(
+                "no {}session {addr:?}",
+                if archived { "archived " } else { "" }
+            ),
+        }
+    }
+
+    /// `resolve` among live sessions, else archived ones. An address that
+    /// matches several live sessions says so instead of looking further.
+    pub fn resolve_any(&self, addr: &str) -> Result<Session> {
+        match self.find(addr, false)? {
+            Some(s) => Ok(s),
+            None => self.resolve(addr, true),
+        }
+    }
+
+    /// The session `addr` names, None if none does, an error if several do.
+    fn find(&self, addr: &str, archived: bool) -> Result<Option<Session>> {
         let pool: Vec<Session> = self
             .db
             .sessions(true)?
@@ -333,7 +361,7 @@ impl Roster {
             let found: Vec<&Session> = pool.iter().filter(|s| rule(s)).collect();
             match found[..] {
                 [] => continue,
-                [s] => return Ok(s.clone()),
+                [s] => return Ok(Some(s.clone())),
                 _ => {
                     let labels: Vec<String> = found
                         .iter()
@@ -343,10 +371,7 @@ impl Roster {
                 }
             }
         }
-        bail!(
-            "no {}session {addr:?}",
-            if archived { "archived " } else { "" }
-        )
+        Ok(None)
     }
 
     /// Creates a session in `project` and starts its agent.
@@ -599,7 +624,7 @@ impl Roster {
     /// Attaches the terminal to a session, starting it first if it's stopped, and
     /// marks it read once the user detaches.
     /// Returns whether you submitted a prompt while attached (for agents that
-    /// report prompts: Claude).
+    /// report prompts: Claude, pi).
     pub fn attach(&mut self, id: &str) -> Result<bool> {
         self.refresh()?;
         let s = self.db.session(id)?;
@@ -735,7 +760,7 @@ impl Roster {
         for var in crate::tmux::LEAKY_ENV {
             cmd.env_remove(var);
         }
-        let output = run_with_timeout(cmd, TITLE_TIMEOUT)?;
+        let output = run_with_timeout(cmd, "claude", TITLE_TIMEOUT)?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -755,20 +780,27 @@ impl Roster {
     /// one), if any, and an archived roster session it belongs to, if any. With
     /// `all` false, only those in a project's directory.
     pub fn adoptable(&self, all: bool) -> Result<Vec<Adoptable>> {
+        self.adoptable_where(all, |_| true)
+    }
+
+    /// `adoptable`, for the conversations whose id `wanted` says yes to.
+    fn adoptable_where(&self, all: bool, wanted: impl Fn(&str) -> bool) -> Result<Vec<Adoptable>> {
         let Some(dir) = crate::adopt::claude_dir() else {
             return Ok(Vec::new());
         };
         let projects = self.db.projects()?;
         let sessions = self.db.sessions(true)?;
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        let mut found = Vec::new();
-        for conversation in crate::adopt::conversations(&dir) {
-            let known = sessions
+        let session = |id: &str| {
+            sessions
                 .iter()
-                .find(|s| s.conversation_id.as_deref() == Some(conversation.id.as_str()));
-            if known.is_some_and(|s| s.deleted_at.is_none()) {
-                continue;
-            }
+                .find(|s| s.conversation_id.as_deref() == Some(id))
+        };
+        // Those of live sessions aren't even read: they're often the largest.
+        let live = |id: &str| session(id).is_some_and(|s| s.deleted_at.is_none());
+        let mut found = Vec::new();
+        for conversation in crate::adopt::conversations(&dir, |id| wanted(id) && !live(id)) {
+            let known = session(&conversation.id);
             let project = projects
                 .iter()
                 .filter(|p| conversation.cwd.starts_with(&p.origin))
@@ -793,15 +825,12 @@ impl Roster {
     /// `fork`, a copy of it. A conversation open in Claude is refused unless
     /// `force`: two Claudes would write the same conversation.
     pub fn adopt(&mut self, req: Adopt) -> Result<Session> {
-        let candidates = self.adoptable(true)?;
-        let matches: Vec<&Adoptable> = candidates
-            .iter()
-            .filter(|a| {
-                a.conversation.id == req.conversation
-                    || (req.conversation.len() >= 4
-                        && a.conversation.id.starts_with(&req.conversation))
-            })
-            .collect();
+        let wanted = |id: &str| {
+            id == req.conversation
+                || (req.conversation.len() >= 4 && id.starts_with(&req.conversation))
+        };
+        let candidates = self.adoptable_where(true, wanted)?;
+        let matches: Vec<&Adoptable> = candidates.iter().collect();
         let found = match matches[..] {
             [one] => one.clone(),
             [] => bail!(
@@ -987,20 +1016,43 @@ fn clean_title(reply: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
+/// Runs `cmd` (`what`, in messages) to its end, for at most `timeout`. Its
+/// output is read meanwhile, so a full pipe can't hold it up.
 fn run_with_timeout(
     mut cmd: std::process::Command,
+    what: &str,
     timeout: Duration,
 ) -> Result<std::process::Output> {
-    let mut child = cmd.spawn().context("can't run claude")?;
+    use std::io::Read;
+    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
-    while child.try_wait()?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
         if Instant::now() > deadline {
             let _ = child.kill();
-            bail!("claude took longer than {}s", timeout.as_secs());
+            let _ = child.wait();
+            bail!("{what} took longer than {}s", timeout.as_secs());
         }
         sleep(Duration::from_millis(100));
-    }
-    Ok(child.wait_with_output()?)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// A conversation roster could adopt.

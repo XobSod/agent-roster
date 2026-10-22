@@ -198,7 +198,8 @@ fn offered(name: &str, config: &Config) -> bool {
 
 /// The key under which what a model asked of `agent` (or "default") turned
 /// out to be is learned: Claude's as it is, as before there were other
-/// agents; another's after its name ("pi:default").
+/// agents; another's after its name ("pi:default"). `Db::learn_model_names`
+/// has the same rule in SQL.
 pub fn learned_key(agent: &str, asked: &str) -> String {
     if agent == CLAUDE {
         asked.to_string()

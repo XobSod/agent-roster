@@ -89,11 +89,13 @@ fn write_extension(state_dir: &Path) -> Result<PathBuf> {
         let dir = path.parent().expect("a file in a directory");
         fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
         // Written whole and moved into place: a pi starting meanwhile reads
-        // either version, never half of one.
-        let partial = path.with_extension("ts.partial");
+        // either version, never half of one. Another roster may be doing the
+        // same, so each writes its own file.
+        let partial = path.with_extension(format!("ts.{}.partial", std::process::id()));
         fs::write(&partial, EXTENSION)
             .with_context(|| format!("can't write {}", partial.display()))?;
-        fs::rename(&partial, &path)?;
+        fs::rename(&partial, &path)
+            .with_context(|| format!("can't move {} into place", partial.display()))?;
     }
     Ok(path)
 }

@@ -29,6 +29,8 @@ To scroll back through an agent's history while attached, also set up
 ## Use
 
 Run `roster` for the TUI: sessions on the left, the selected agent's screen on the right.
+One runs at a time (a second one says where the first is); `roster` commands work
+alongside it.
 
 Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or folds a
 heading); in an agent, a line at the top says where you are, like the preview's header

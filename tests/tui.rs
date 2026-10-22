@@ -12,6 +12,16 @@ fn tui_walkthrough() {
     let term = Terminal::start(&t, &command, (120, 30));
     term.wait_for("the empty list", "No projects yet");
 
+    // A second TUI says where the first one is, and doesn't start.
+    let second = Terminal::start_named(&t, "second", &command, (120, 10));
+    second.wait_for("the refusal", "TUI-EXIT=1");
+    let screen = second.screen();
+    assert!(
+        screen.contains("roster is already open (pid ") && screen.contains("roster ls"),
+        "{screen}"
+    );
+    drop(second);
+
     // The project menu's form: directory first (the name follows it), then the name.
     term.keys(&["p"]);
     term.wait_for("the project menu", "n new");

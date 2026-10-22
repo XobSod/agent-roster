@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::execute;
@@ -41,6 +41,7 @@ const TICK: Duration = Duration::from_secs(1);
 const MIN_FIT: (u16, u16) = (60, 10);
 
 pub fn run(roster: &mut Roster) -> Result<()> {
+    let _only = only_one(&roster.paths.state_dir)?;
     let keymap = Keymap::new(&roster.config.keys)?;
     let cwd = std::env::current_dir()
         .map(|d| d.display().to_string())
@@ -51,6 +52,45 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
     result
+}
+
+/// One TUI at a time: two would each act on what they last read, and size
+/// agents' windows each to its own preview. A lock in the state directory,
+/// held while the returned file is open; it goes with the process, so a crash
+/// can't leave it behind. Commands such as `roster ls` don't take it.
+fn only_one(state_dir: &Path) -> Result<std::fs::File> {
+    use std::io::{Read, Seek, Write};
+    use std::os::fd::AsRawFd;
+    let path = state_dir.join("tui.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("can't open {}", path.display()))?;
+    // SAFETY: flock(2) on a descriptor we own has no memory effects.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let mut holder = String::new();
+        file.read_to_string(&mut holder).ok();
+        let holder = holder.trim();
+        let holder = if holder.is_empty() {
+            String::new()
+        } else {
+            format!(" ({holder})")
+        };
+        bail!(
+            "roster is already open{holder}; use that one (commands such as `roster ls` work alongside it)"
+        );
+    }
+    // Who has it, for the message above.
+    let tty = std::fs::read_link("/proc/self/fd/0")
+        .map(|t| format!(" on {}", t.display()))
+        .unwrap_or_default();
+    file.set_len(0)?;
+    file.rewind()?;
+    write!(file, "pid {}{tty}", std::process::id())?;
+    Ok(file)
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App) -> Result<()> {

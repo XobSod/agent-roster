@@ -225,8 +225,13 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn start(env: &TestEnv, command: &str, size: (u16, u16)) -> Terminal {
+        Terminal::start_named(env, "term", command, size)
+    }
+
+    /// Another terminal next to the first, on a server of its own (`name`).
+    pub fn start_named(env: &TestEnv, name: &str, command: &str, size: (u16, u16)) -> Terminal {
         let term = Terminal {
-            socket: format!("{}-term", env.socket),
+            socket: format!("{}-{name}", env.socket),
         };
         let out = term
             .tmux(&["-f", "/dev/null", "new-session", "-d", "-s", "term"])

@@ -99,6 +99,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, "ALTER TABLE sessions ADD COLUMN fork_from TEXT;"),
 ];
 
+/// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
+/// free pages back.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
 /// Applied events older than this are deleted.
 const EVENT_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -144,6 +148,17 @@ impl Db {
         // Not a schema change: older rosters use the index without knowing it.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_session ON events(session_id);")?;
         tx.commit()?;
+        // Pages that pruning old events frees go back to the disk as they're
+        // freed (`fold_events`), so the file doesn't stay at its largest (54
+        // MB, most of it free, found in real use). Switching an existing file
+        // to that takes one VACUUM, done once (73 ms for that file, well
+        // within what hooks wait). Older rosters open it just the same.
+        let incremental: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
+        if incremental != AUTO_VACUUM_INCREMENTAL {
+            conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+            // Busy (another roster at it): the next start tries again.
+            conn.execute_batch("VACUUM").ok();
+        }
         Ok(Db { conn })
     }
 
@@ -402,12 +417,24 @@ impl Db {
             save_session(&tx, s)?;
         }
         set_meta(&tx, "applied_event", &last.to_string())?;
-        tx.execute(
+        let pruned = tx.execute(
             "DELETE FROM events WHERE id <= ?1 AND at < ?2",
             params![last, now - EVENT_RETENTION_MS],
         )?;
         tx.commit()?;
+        if pruned > 0 {
+            self.give_back_free_pages().ok();
+        }
         Ok(events.len())
+    }
+
+    /// Gives the file's free pages back to the disk. SQLite does it a page per
+    /// step, so the statement runs to its end.
+    fn give_back_free_pages(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
+        Ok(())
     }
 
     /// Events with id > `after`, oldest first, optionally for one session.
@@ -953,6 +980,48 @@ mod tests {
         db.insert_session(&adopted).unwrap();
         db.learn_model_names().unwrap();
         assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
+    }
+
+    #[test]
+    fn the_file_gives_back_what_pruning_frees() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.db");
+        // A file from before: no auto-vacuum.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (x)")
+            .unwrap();
+        let mut db = Db::open(&path).unwrap();
+        let mode: i64 = db
+            .conn
+            .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, AUTO_VACUUM_INCREMENTAL);
+        let project = db.add_project(&project("demo"), 0).unwrap();
+        let mut s = session("a1");
+        s.project_id = project.id;
+        db.insert_session(&s).unwrap();
+        let big = format!("{{\"x\":\"{}\"}}", "y".repeat(100_000));
+        for at in 0..20 {
+            db.insert_event(&s.id, "working", at, Some(&big)).unwrap();
+        }
+        db.fold_events(0).unwrap();
+        let pages = |db: &Db| -> i64 {
+            db.conn
+                .pragma_query_value(None, "page_count", |r| r.get(0))
+                .unwrap()
+        };
+        let before = pages(&db);
+        // A day later the events are pruned, and the file shrinks.
+        db.insert_event(&s.id, "idle", EVENT_RETENTION_MS * 2, None)
+            .unwrap();
+        db.fold_events(EVENT_RETENTION_MS * 2).unwrap();
+        let free: i64 = db
+            .conn
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))
+            .unwrap();
+        assert!(pages(&db) < before / 10, "{} of {before}", pages(&db));
+        assert_eq!(free, 0);
     }
 
     #[test]

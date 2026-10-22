@@ -281,7 +281,7 @@ impl Terminal {
 
     /// Types text literally.
     pub fn text(&self, text: &str) {
-        self.tmux(&["send-keys", "-t", "term", "-l", text])
+        self.tmux(&["send-keys", "-t", "term", "-l", "--", text])
             .output()
             .unwrap();
         sleep(Duration::from_millis(50));

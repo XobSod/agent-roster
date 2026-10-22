@@ -19,6 +19,7 @@ pub use dialog::{Dialog, completions};
 use super::form::{self, Form, Outcome};
 use super::input;
 use super::list::{self, Entry, EntryKey, Group, Shelf};
+use super::note::{self, NoteEditor};
 use super::op::Op;
 use super::picker::{Picked, Picker};
 use crate::keys::{Action, Keymap, Menu};
@@ -52,6 +53,8 @@ pub struct Message {
 pub struct Preview {
     /// The screen, or information about the selection.
     pub text: Text<'static>,
+    /// Whether `text` is the selected session's screen.
+    pub screen: bool,
     /// What the selected session's agent can tell about it.
     pub stats: Option<crate::stats::AgentStats>,
     /// Transcript readers by session, kept so each read only takes what's new.
@@ -127,6 +130,10 @@ pub struct App {
     pub capturing: Option<settings::Capture>,
     /// Oldest or newest first, per shelf (config.toml).
     pub order: crate::config::Order,
+    /// A session's note, open to read and write; keys go to it.
+    pub note: Option<NoteEditor>,
+    /// Where notes open, and the editor's keys (config.toml).
+    pub notes: crate::config::Notes,
 }
 
 impl App {
@@ -170,6 +177,8 @@ impl App {
             config_file: std::path::PathBuf::new(),
             capturing: None,
             order: Default::default(),
+            note: None,
+            notes: Default::default(),
         }
     }
 
@@ -376,6 +385,9 @@ impl App {
         if self.dialog.is_some() {
             return self.on_dialog_key(e);
         }
+        if self.note.is_some() {
+            return self.on_note_key(e);
+        }
         if self.typing.is_some() {
             self.on_search_key(e);
             return None;
@@ -409,6 +421,29 @@ impl App {
             self.keymap.top(&e)?
         };
         self.act(action)
+    }
+
+    /// The note editor's keys; what it asks for.
+    fn on_note_key(&mut self, e: KeyEvent) -> Option<Op> {
+        let editor = self.note.as_mut()?;
+        match editor.on_key(e) {
+            note::Outcome::None => None,
+            note::Outcome::Save { close } => Some(Op::SaveNote {
+                id: editor.session.clone(),
+                text: editor.text(),
+                pin: editor.pin,
+                close,
+            }),
+            note::Outcome::Close => {
+                self.note = None;
+                None
+            }
+            note::Outcome::External => Some(Op::EditNote(editor.session.clone())),
+            note::Outcome::Fail(why) => {
+                self.fail(why);
+                None
+            }
+        }
     }
 
     /// The folded groups: while filtering by text, its own.

@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
+use crate::note::{self, Note};
 use crate::paths::{self, PROJECT_ENV, Paths};
 use crate::stats::AgentStats;
 use crate::tmux::{Pane, Tmux};
@@ -765,6 +766,87 @@ impl Roster {
         }
         self.db.save_session(&s)?;
         Ok(s)
+    }
+
+    /// Saves the note of session `id`, its pin on a line it has (`note::tidy`
+    /// may take lines off its end); nothing but blanks removes it. The note
+    /// as saved.
+    pub fn set_note(&self, id: &str, text: &str, pin: Option<usize>) -> Result<Option<Note>> {
+        let text = note::tidy(text);
+        let note = (!text.is_empty()).then(|| {
+            let last = text.lines().count().saturating_sub(1);
+            Note {
+                pin: pin.map(|p| p.min(last)),
+                text,
+                at: now_ms(),
+            }
+        });
+        self.db.set_note(id, note.as_ref())?;
+        Ok(note)
+    }
+
+    /// Saves `text` as the note of `s`, edited from the one it has, so its pin
+    /// follows its line. What happened, to say.
+    pub fn change_note(&self, s: &Session, text: &str) -> Result<String> {
+        let (old, pin) = s
+            .note
+            .as_ref()
+            .map_or(("", None), |n| (n.text.as_str(), n.pin));
+        if note::tidy(text) == old {
+            return Ok(format!("The note of {} is unchanged", s.label()));
+        }
+        let before: Vec<&str> = old.lines().collect();
+        let after: Vec<&str> = text.lines().collect();
+        let pin = note::follow_pin(&before, &after, pin);
+        Ok(match self.set_note(&s.id, text, pin)? {
+            Some(_) => format!("Saved the note of {}", s.label()),
+            None => format!("{} has no note now", s.label()),
+        })
+    }
+
+    /// Pins line `line` (from 1) of the note of `s`, or with None unpins it.
+    /// What happened, to say.
+    pub fn pin_note(&self, s: &Session, line: Option<usize>) -> Result<String> {
+        let Some(note) = &s.note else {
+            bail!("{} has no note", s.label());
+        };
+        let lines: Vec<&str> = note.text.lines().collect();
+        let pin = match line {
+            None => None,
+            Some(n) if (1..=lines.len()).contains(&n) => Some(n - 1),
+            Some(n) => bail!(
+                "the note of {} has {} lines, so no line {n}",
+                s.label(),
+                lines.len()
+            ),
+        };
+        self.set_note(&s.id, &note.text, pin)?;
+        Ok(match pin {
+            Some(p) => format!(
+                "Pinned line {} of the note of {}: {}",
+                p + 1,
+                s.label(),
+                lines[p]
+            ),
+            None => format!("Unpinned the note of {}", s.label()),
+        })
+    }
+
+    /// Where `$EDITOR` edits a session's note: a file named after it in the
+    /// state directory, so the editor's title says whose it is.
+    pub fn note_file(&self, s: &Session) -> PathBuf {
+        let name: String = s
+            .label()
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+                _ => '-',
+            })
+            .collect();
+        self.paths
+            .state_dir
+            .join("notes")
+            .join(format!("{name}.md"))
     }
 
     /// What the session's agent can tell about it, from its transcript; None

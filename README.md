@@ -56,7 +56,7 @@ Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings |
 
@@ -84,6 +84,20 @@ else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--eff
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
 Roster can tell when one is open in Claude, but not in pi.
 
+Each session can have a note, what's left to do in it, say. `s o` opens it under the
+preview's header, the agent's screen still below, in an editor with vim's keys: normal,
+insert and visual mode, motions, `C`, `r` (`rx` ticks a box, `.` the next), `ciw` and
+the like, `/` search, `u`, `.` (no counts). `:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
+unsaved changes, which `:q!` and `ZQ` leave. `Esc` doesn't close it, so pressing it once
+too often is harmless; `escape = "jk"` under `[notes]` makes `jk` typed quickly leave
+insert mode too. `mm` pins the cursor's line (`▸`; again there unpins it): above the
+agent's screen the preview shows the pinned line and the one below, so a to-do list
+shows where you are in it (with no pin, the note's first lines). The pin follows its
+line as you edit. Ctrl+G hands the note to `$VISUAL` or `$EDITOR` and back; with
+`editor = "external"` under `[notes]`, `s o` opens it there. A note stays through
+stops, restarts and archiving, and goes only when its session is deleted for good;
+`✎` marks sessions with one.
+
 Everything is also available from the CLI:
 
 ```sh
@@ -95,11 +109,14 @@ roster chat --prompt "explain tmux copy mode"         # no project needed: a cha
 roster edit api --model sonnet          # applies on the next start
 roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
 roster retitle api                      # a fresh title from its agent, from the recent prompts
-roster info api                         # created, prompts, time worked, context, tokens, cost
+roster info api                         # created, prompts, time worked, context, tokens, cost, its note
+roster note api                         # print its note; --edit opens it in $EDITOR
+roster note api --append "- [ ] check the fork path"   # --set replaces it ("-": from stdin), --clear removes it
+roster note api --pin 3                 # the line the preview shows, with the one below; --unpin
 roster adopt --list                     # Claude and pi conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
-roster ls                               # ● marks sessions with a turn you haven't seen
+roster ls                               # ● marks sessions with a turn you haven't seen, ✎ those with a note
 roster ls --project myproj --sort attention   # like the TUI's shelves
 roster ls auth rework                   # only those matching (fuzzy, like / in the TUI)
 roster show api                         # print its current screen
@@ -140,6 +157,12 @@ All files are optional and live in `~/.config/agent-roster/`:
     a row from the agent). It's set as you attach, so a title the agent picks
     meanwhile shows from the next attach. Turning it on or off changes sessions'
     height by a row on their next attach.
+  - `[notes]`: `editor`, where `s o` opens a session's note: `"builtin"` (default),
+    roster's own editor with vim's keys, or `"external"`, `$VISUAL` or `$EDITOR`;
+    `escape`, keys that leave insert mode when typed quickly, as vim's `inoremap jk
+    <Esc>` (`"jk"`, say; none by default), held back meanwhile; `escape_ms`, how
+    quickly: at most this many milliseconds from one to the next (default 300). Typed
+    slower, they're just text.
   - `fit_preview`: agents drawing full screen (in the terminal's alternate screen, as
     Claude Code's fullscreen renderer does) are sized to the preview while you're not
     attached, so it shows all of their screen; `"never"` turns that off, also per agent
@@ -180,6 +203,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     delete = "D"              # an archived one, for good
     toggle_read = "u"
     retitle = "t"             # a title generated from the recent prompts
+    note = "o"                # the session's note, to read and write
     adopt = "a"               # a conversation started elsewhere
 
     [keys.project]

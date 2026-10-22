@@ -270,10 +270,14 @@ pub(super) fn card(
     let second = fit(
         width,
         [vec![Span::raw("   ")], details(s, &hit.name, meta_style)].concat(),
-        vec![Span::styled(
-            format!("{} ", theme::ago(now - s.created_at)),
-            Style::new().fg(FAINT),
-        )],
+        [
+            note_mark(s),
+            vec![Span::styled(
+                format!("{} ", theme::ago(now - s.created_at)),
+                Style::new().fg(FAINT),
+            )],
+        ]
+        .concat(),
     );
     lines.extend([first, second]);
     lines
@@ -289,6 +293,7 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
         )],
         None => [status(s, now), vec![Span::raw(" ")]].concat(),
     };
+    let right = [note_mark(s), right].concat();
     let none = Hit::default();
     let hit = hit(app, s).unwrap_or(&none);
     let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));
@@ -313,4 +318,12 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
         .concat()
     };
     fit(width, left, right)
+}
+
+/// `✎` for a session with a note.
+fn note_mark(s: &Session) -> Vec<Span<'static>> {
+    match s.note {
+        Some(_) => vec![Span::styled("✎ ", Style::new().fg(MUTED))],
+        None => Vec::new(),
+    }
 }

@@ -1163,3 +1163,127 @@ fn chats_need_no_project() {
         (Some("chats"), mine.to_str())
     );
 }
+
+#[test]
+fn notes_are_kept_with_their_session() {
+    let Some(t) = TestEnv::new("notes") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    let out = t.run(&["note", "one"]);
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("demo/one has no note"));
+
+    assert!(
+        t.ok(&["note", "one", "--set", "TODO"])
+            .contains("Saved the note of demo/one")
+    );
+    t.ok(&["note", "one", "--append", "- [ ] first"]);
+    t.ok(&["note", "one", "--append", "- [ ] second\n\n"]);
+    assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
+    let s = t.session("one", false).unwrap();
+    assert_eq!(s["note"], "TODO\n- [ ] first\n- [ ] second");
+    let info = t.ok(&["info", "one"]);
+    assert!(
+        info.contains("note         TODO\n             - [ ] first\n"),
+        "{info}"
+    );
+    assert!(t.ok(&["note", "one", "--append", ""]).contains("unchanged"));
+    // Pinned from the CLI as with mm in the TUI; ls marks it.
+    let out = t.ok(&["note", "one", "--pin", "2"]);
+    assert!(
+        out.contains("Pinned line 2 of the note of demo/one: - [ ] first"),
+        "{out}"
+    );
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+    assert!(
+        t.ok(&["info", "one"])
+            .contains("             ▸ - [ ] first\n")
+    );
+    assert!(t.ok(&["ls"]).contains("✎ "));
+    assert!(!t.run(&["note", "one", "--pin", "4"]).status.success());
+    assert!(
+        !t.run(&["note", "one", "--pin", "1", "--unpin"])
+            .status
+            .success()
+    );
+    assert!(
+        t.ok(&["note", "one", "--unpin"])
+            .contains("Unpinned the note of demo/one")
+    );
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], Value::Null);
+    t.ok(&["note", "one", "--pin", "3"]);
+    assert!(
+        !t.run(&["note", "one", "--set", "x", "--clear"])
+            .status
+            .success()
+    );
+
+    // In $EDITOR; one that fails leaves the note as it was.
+    let editor = t.path("editor.sh");
+    fs::write(&editor, "#!/bin/sh\nsed -i 's/first/first, done/' \"$1\"\n").unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&editor)
+        .status()
+        .unwrap();
+    let edit = |editor: &str| {
+        t.command(&["note", "one", "--edit"])
+            .env("EDITOR", editor)
+            .env_remove("VISUAL")
+            .output()
+            .unwrap()
+    };
+    assert!(edit(editor.to_str().unwrap()).status.success());
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first, done\n- [ ] second\n"
+    );
+    let out = edit("false");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("the note is as it was"));
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first, done\n- [ ] second\n"
+    );
+    // Its file isn't left behind, unless what was written can't be kept.
+    assert_eq!(
+        fs::read_dir(t.path("state/agent-roster/notes"))
+            .unwrap()
+            .count(),
+        0
+    );
+    fs::write(&editor, "#!/bin/sh\nprintf 'x\\377' > \"$1\"\n").unwrap();
+    let out = edit(editor.to_str().unwrap());
+    assert!(!out.status.success());
+    let kept = t.path("state/agent-roster/notes/demo-one.md");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("kept in {}", kept.display())),
+        "{stderr}"
+    );
+    assert_eq!(fs::read(&kept).unwrap(), b"x\xff");
+    fs::remove_file(&kept).unwrap();
+    // A blank text isn't taken for a note to remove: --clear is.
+    let out = t.run(&["note", "one", "--set", " "]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--clear removes it"));
+
+    // From stdin; through archiving; cleared.
+    let mut child = t
+        .command(&["note", "one", "--set", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"from stdin\n").unwrap();
+    assert!(child.wait().unwrap().success());
+    t.ok(&["archive", "--yes", "one"]);
+    t.ok(&["restore", "one"]);
+    assert_eq!(t.ok(&["note", "one"]), "from stdin\n");
+    assert!(
+        t.ok(&["note", "one", "--clear"])
+            .contains("demo/one has no note now")
+    );
+    assert_eq!(t.session("one", false).unwrap()["note"], Value::Null);
+}

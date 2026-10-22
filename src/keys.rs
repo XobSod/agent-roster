@@ -55,6 +55,8 @@ pub enum Action {
     Delete,
     ToggleRead,
     Retitle,
+    /// The session's note.
+    Note,
     Adopt,
     NewProject,
     EditProject,
@@ -98,6 +100,7 @@ impl Action {
             Action::Delete => "delete for good",
             Action::ToggleRead => "read/unread",
             Action::Retitle => "new title",
+            Action::Note => "note",
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
@@ -322,6 +325,7 @@ impl Keymap {
             &mut labels,
         )?;
         session.bind(t, "retitle", &k.retitle, Action::Retitle, &mut labels)?;
+        session.bind(t, "note", &k.note, Action::Note, &mut labels)?;
         session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
         session.bind(t, "archive", &k.archive, Action::Archive, &mut labels)?;
         session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
@@ -497,7 +501,7 @@ mod tests {
             .collect();
         assert_eq!(
             items,
-            ["n", "c", "e", "s", "x", "r", "u", "t", "a", "d", "D"]
+            ["n", "c", "e", "s", "x", "r", "u", "t", "o", "a", "d", "D"]
         );
     }
 

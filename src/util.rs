@@ -57,6 +57,24 @@ pub fn on_path(command: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| runs(&dir.join(command))))
 }
 
+/// Runs `$VISUAL` or `$EDITOR` (else vi) on `file`, in this terminal; whether
+/// it exited successfully.
+pub fn run_editor(file: &std::path::Path) -> anyhow::Result<bool> {
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()))
+        .unwrap_or_else(|| "vi".into());
+    // Through a shell, so an editor given with options ("code -w") works.
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("roster-edit")
+        .arg(file)
+        .status()
+        .map(|status| status.success())
+        .map_err(|e| anyhow::anyhow!("can't run {editor}: {e}"))
+}
+
 /// A model id as Claude shows it: "claude-opus-5-5[1m]" → "Opus 5.5 (1M)",
 /// "claude-3-5-sonnet-20241022" → "Sonnet 3.5". Anything else stays as it is.
 pub fn model_name(id: &str) -> String {

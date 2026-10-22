@@ -59,7 +59,8 @@ impl App {
             | Action::Archive
             | Action::Delete
             | Action::ToggleRead
-            | Action::Retitle => return self.session_action(action),
+            | Action::Retitle
+            | Action::Note => return self.session_action(action),
             _ => return self.act_on_projects(action),
         }
         None
@@ -185,6 +186,16 @@ impl App {
             self.fail("Select a session first");
             return None;
         };
+        // Archived sessions have notes too.
+        if action == Action::Note {
+            return match self.notes.editor() {
+                crate::config::NoteEditor::External => Some(Op::EditNote(s.id)),
+                crate::config::NoteEditor::Builtin => {
+                    self.note = Some(NoteEditor::new(&s, self.notes.escape()));
+                    None
+                }
+            };
+        }
         let archive = self.chord(Menu::Session, Action::Archive);
         if s.deleted_at.is_some() {
             return match action {
@@ -199,8 +210,16 @@ impl App {
                     } else {
                         String::new()
                     };
+                    let note = if s.note.is_some() {
+                        " and its note"
+                    } else {
+                        ""
+                    };
                     self.confirm(
-                        format!("Delete {} for good? Roster forgets it{kept}.", s.label()),
+                        format!(
+                            "Delete {} for good? Roster forgets it{note}{kept}.",
+                            s.label()
+                        ),
                         Op::Delete(s.id),
                     );
                     None
@@ -358,15 +377,23 @@ impl App {
             ));
             return;
         }
-        // Removing a project deletes its archived sessions for good.
+        // Removing a project deletes its archived sessions for good, and
+        // their notes.
+        let notes = archived.iter().filter(|s| s.note.is_some()).count();
+        let with = match (archived.len(), notes) {
+            (_, 0) => String::new(),
+            (1, _) => ", with its note".into(),
+            (_, 1) => ", one with a note".into(),
+            (_, n) => format!(", {n} with notes"),
+        };
         let question = match archived.len() {
             0 => format!("Remove project {}?", p.name),
             1 => format!(
-                "Remove project {}? Its archived session goes for good.",
+                "Remove project {}? Its archived session goes for good{with}.",
                 p.name
             ),
             n => format!(
-                "Remove project {}? Its {n} archived sessions go for good.",
+                "Remove project {}? Its {n} archived sessions go for good{with}.",
                 p.name
             ),
         };

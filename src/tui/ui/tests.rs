@@ -555,3 +555,63 @@ fn details_name_what_the_mark_doesnt_say() {
     s.name = "reviewer".into();
     assert_eq!(text(&s), "◇ reviewer · aider");
 }
+
+#[test]
+fn a_note_shows_its_pinned_lines_above_the_screen() {
+    let mut app = app();
+    app.sessions[0].note = Some(crate::note::Note {
+        text: "TODO\n- [x] one\n- [ ] two\n- [ ] three".into(),
+        pin: Some(2),
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    app.selected = 1;
+    app.preview.screen = true;
+    let screen = render(&app, 120, 16);
+    let lines: Vec<&str> = screen.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains("✎ - [ ] two"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(lines[at + 1].contains("  - [ ] three"), "{screen}");
+    assert!(lines[at + 1].ends_with("3–4 of 4"), "{screen}");
+    assert!(lines[at + 2].contains("────"), "{screen}");
+    assert!(lines[at + 3].contains("agent screen line"), "{screen}");
+    // The card says it has one.
+    assert!(screen.contains("✎ 2d"), "{screen}");
+    // Not over a session's details (there it's whole), nor without a note.
+    app.preview.screen = false;
+    assert!(!render(&app, 120, 16).contains("✎ - [ ] two"));
+    app.preview.screen = true;
+    app.selected = 3;
+    assert!(!render(&app, 120, 16).contains("✎ -"));
+}
+
+#[test]
+fn the_note_editor_sits_above_the_screen() {
+    let mut app = app();
+    app.sessions[0].note = Some(crate::note::Note {
+        text: "first\nsecond\nthird".into(),
+        pin: Some(1),
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    app.selected = 1;
+    let s = app.selected_session().unwrap().clone();
+    app.note = Some(crate::tui::note::NoteEditor::new(&s, None));
+    app.preview.screen = true;
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("╭ Note "), "{screen}");
+    assert!(screen.contains(" NORMAL "), "{screen}");
+    // The pinned line marked; the cursor starts on it.
+    assert!(screen.contains("│▸ second"), "{screen}");
+    assert!(screen.contains(" 2/3 "), "{screen}");
+    assert!(screen.contains("agent screen line"), "{screen}");
+    assert!(screen.contains(":wq save and close"), "{screen}");
+    // Typing a command shows it at the bottom.
+    app.note
+        .as_mut()
+        .unwrap()
+        .on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+    assert!(render(&app, 120, 16).contains("╰ : "), "{screen}");
+}

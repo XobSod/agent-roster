@@ -120,6 +120,18 @@ pub fn print_info(r: &Roster, s: &Session) {
     for (name, value) in rows {
         println!("{name:<13}{value}");
     }
+    // The note whole, its pinned line marked.
+    if let Some(note) = &s.note {
+        for (i, line) in note.text.lines().enumerate() {
+            let name = if i == 0 { "note" } else { "" };
+            let mark = match note.pin {
+                Some(pin) if pin == i => "▸ ",
+                Some(_) => "  ",
+                None => "",
+            };
+            println!("{name:<13}{mark}{line}");
+        }
+    }
     let stats = r.agent_stats(s);
     println!(
         "{:<13}{}",
@@ -221,6 +233,8 @@ pub fn list_sessions(
                     "running_model": s.running_model, "running_effort": s.running_effort,
                     "title_override": s.title_override, "created_at": s.created_at,
                     "turns": s.turns, "worked_ms": s.worked(util::now_ms()),
+                    "note": s.note.as_ref().map(|n| &n.text),
+                    "note_pin": s.note.as_ref().and_then(|n| n.pin),
                 })
             })
             .collect();
@@ -254,6 +268,11 @@ pub fn list_sessions(
                 ),
             };
             let marker = if s.unread { "●" } else { " " };
+            let title = s.title.as_deref().unwrap_or("-");
+            let title = match s.note {
+                Some(_) => format!("✎ {title}"),
+                None => title.to_string(),
+            };
             let agent = [Some(s.agent.clone()), s.model_label(), s.effort_label()]
                 .into_iter()
                 .flatten();
@@ -261,7 +280,7 @@ pub fn list_sessions(
                 s.project.clone(),
                 s.name.clone(),
                 format!("{marker} {state}"),
-                cut(s.title.as_deref().unwrap_or("-"), 40),
+                cut(&title, 40),
                 agent.collect::<Vec<_>>().join(" · "),
                 s.id.clone(),
             ]

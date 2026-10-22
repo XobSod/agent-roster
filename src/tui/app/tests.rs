@@ -826,3 +826,73 @@ fn the_settings_view_changes_settings() {
         Some(Op::AddAgent("codex".into()))
     );
 }
+
+#[test]
+fn s_o_opens_the_note_and_its_keys_go_to_it() {
+    let mut app = app();
+    select(&mut app, "s1");
+    assert_eq!(keys(&mut app, "so"), None);
+    assert!(app.note.is_some());
+    // Keys go to it: q doesn't quit, s opens no menu, Esc doesn't close it.
+    assert_eq!(keys(&mut app, "isq"), None);
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.note.is_some());
+    assert_eq!(app.menu, None);
+    assert!(app.hints().iter().any(|(key, _)| key == ":wq"));
+    // :q with unsaved changes says so; :wq asks the run loop to save.
+    keys(&mut app, ":q");
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert!(app.message().is_some_and(|m| m.error));
+    keys(&mut app, ":wq");
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(Op::SaveNote {
+            id: "s1".into(),
+            text: "sq".into(),
+            pin: None,
+            close: true,
+        })
+    );
+    // :q! closes, and the list has its keys back.
+    keys(&mut app, ":q!");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.note.is_none());
+    keys(&mut app, "s");
+    assert_eq!(app.menu, Some(Menu::Session));
+}
+
+#[test]
+fn notes_open_in_editor_if_set_and_archived_sessions_have_them_too() {
+    let mut app = app();
+    select(&mut app, "s1");
+    let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    keys(&mut app, "so");
+    assert_eq!(app.on_key(ctrl_g), Some(Op::EditNote("s1".into())));
+    keys(&mut app, ":q");
+    app.on_key(key(KeyCode::Enter));
+    app.notes.editor = Some(crate::config::NoteEditor::External);
+    assert_eq!(keys(&mut app, "so"), Some(Op::EditNote("s1".into())));
+    assert!(app.note.is_none());
+    // Archived: under the folded shelf, opened.
+    app.folded.clear();
+    app.rebuild();
+    select(&mut app, "s3");
+    assert_eq!(keys(&mut app, "so"), Some(Op::EditNote("s3".into())));
+    // Deleting it for good says the note goes too.
+    app.sessions.iter_mut().find(|s| s.id == "s3").unwrap().note = Some(crate::note::Note {
+        text: "why".into(),
+        pin: None,
+        at: 0,
+    });
+    app.rebuild();
+    select(&mut app, "s3");
+    keys(&mut app, "sD");
+    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+        panic!("no confirmation");
+    };
+    assert!(
+        question.contains("Roster forgets it and its note"),
+        "{question}"
+    );
+}

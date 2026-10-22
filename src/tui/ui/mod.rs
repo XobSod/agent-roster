@@ -1,6 +1,7 @@
 //! Drawing: the session list (shelves or projects) on the left, a header and the
 //! selected agent's screen on the right, a footer with hints, and popups on top.
 
+mod note;
 mod popups;
 mod sidebar;
 mod spans;
@@ -15,6 +16,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use note::*;
 use popups::*;
 use sidebar::*;
 pub use spans::status_line;
@@ -116,13 +118,41 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         );
     }
     // The bottom of an agent's screen is where its prompt is; long lines are cut
-    // (agents drawing full screen get this size, so theirs fit).
+    // (agents drawing full screen get this size, so theirs fit). A note takes
+    // rows off its top, so selecting one doesn't resize the agents.
     app.preview.size.set(Some((body.width, body.height)));
+    let note = app
+        .selected_session()
+        .and_then(|s| s.note.as_ref())
+        .filter(|_| app.preview.screen);
+    let screen = if let Some(editor) = &app.note {
+        let height = editor_height(editor, body.width, body.height);
+        let [top, rest] =
+            Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(body);
+        draw_note_editor(f, editor, top);
+        rest
+    } else if let Some(note) = note {
+        let band = note_band(note, body.width as usize);
+        let [top, rule, rest] = Layout::vertical([
+            Constraint::Length(band.len() as u16),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(body);
+        f.render_widget(Paragraph::new(band), top);
+        f.render_widget(
+            Line::styled("─".repeat(rule.width as usize), Style::new().fg(FAINT)),
+            rule,
+        );
+        rest
+    } else {
+        body
+    };
     // Drawn line by line from the preview itself: it's redrawn as often as
     // the spinners move, and copying a colourful screen each time adds up.
     let lines = &app.preview.text.lines;
-    let skip = lines.len().saturating_sub(body.height as usize);
-    for (line, row) in lines[skip..].iter().zip(body.rows()) {
+    let skip = lines.len().saturating_sub(screen.height as usize);
+    for (line, row) in lines[skip..].iter().zip(screen.rows()) {
         f.render_widget(line, row);
     }
 }

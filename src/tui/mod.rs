@@ -6,6 +6,7 @@ mod app;
 mod form;
 mod input;
 mod list;
+mod note;
 mod op;
 mod picker;
 mod theme;
@@ -50,6 +51,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
         .unwrap_or_default();
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
+    app.notes = roster.config.notes.clone();
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -120,6 +122,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     }
     app.set_agents(agent::available(&roster.config));
     app.order = roster.config.order.clone();
+    app.notes = roster.config.notes.clone();
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -133,14 +136,22 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             app.models.offered = offered;
             app.listing = None;
         }
+        // Escape keys held back in the note editor go in once it's too late
+        // for the rest (`notes.escape_ms`).
+        if let Some(editor) = app.note.as_mut() {
+            editor.tick(Instant::now());
+        }
         terminal.draw(|f| ui::draw(f, app))?;
         // Redraw often enough to move the spinners, refresh the data once a tick.
         let until_reload = TICK.saturating_sub(last_reload.elapsed());
-        let wait = if ui::animating(app) {
+        let mut wait = if ui::animating(app) {
             until_reload.min(Duration::from_millis(theme::SPINNER_MS as u64))
         } else {
             until_reload
         };
+        if let Some(deadline) = app.note.as_ref().and_then(|e| e.deadline()) {
+            wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+        }
         if event::poll(wait)?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
@@ -238,6 +249,7 @@ fn update_preview(roster: &Roster, app: &mut App) {
     let prompts = prompts.unwrap_or_default();
     let now = crate::util::now_ms();
     app.preview.stats = stats;
+    app.preview.screen = false;
     app.preview.text = match app.selected_entry().cloned() {
         None => app.empty_info(),
         Some(Entry::Heading {
@@ -256,7 +268,10 @@ fn update_preview(roster: &Roster, app: &mut App) {
             app.session_info(&s, &prompts, now)
         }
         Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s, true) {
-            Ok(screen) => screen_text(&screen),
+            Ok(screen) => {
+                app.preview.screen = true;
+                screen_text(&screen)
+            }
             Err(_) => app.session_info(&s, &prompts, now),
         },
     };
@@ -477,6 +492,24 @@ fn perform(
                 .generate_title(&id)
                 .map(|title| format!("New title: {title}"))
         }
+        Op::SaveNote {
+            id,
+            text,
+            pin,
+            close,
+        } => roster.set_note(&id, &text, pin).map(|note| {
+            if close {
+                app.note = None;
+            } else if let Some(editor) = app.note.as_mut() {
+                editor.saved(note.as_ref());
+            }
+            let label = app.session_label(&id);
+            match note {
+                Some(_) => format!("Saved the note of {label}"),
+                None => format!("{label} has no note now"),
+            }
+        }),
+        Op::EditNote(id) => edit_note(terminal, roster, app, &id)?,
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);
             app.open_chat_form(&roster.projects()?, &chats);
@@ -537,6 +570,54 @@ fn busy(terminal: &mut DefaultTerminal, app: &mut App, message: String) -> Resul
     Ok(())
 }
 
+/// Hands the terminal to `run` (an editor) and takes it back. The outer result
+/// is the terminal's.
+fn in_terminal<T>(terminal: &mut DefaultTerminal, run: impl FnOnce() -> T) -> Result<T> {
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    let ran = run();
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    terminal.hide_cursor()?;
+    Ok(ran)
+}
+
+/// Hands a session's note to `$EDITOR`: the open editor's text, which comes
+/// back into it, or else the note as saved, saved again when the editor exits.
+/// The outer result is the terminal's.
+fn edit_note(
+    terminal: &mut DefaultTerminal,
+    roster: &mut Roster,
+    app: &mut App,
+    id: &str,
+) -> Result<Result<String>> {
+    let s = match roster.resolve_any(id) {
+        Ok(s) => s,
+        Err(e) => return Ok(Err(e)),
+    };
+    let file = roster.note_file(&s);
+    let failed = || anyhow::anyhow!("$EDITOR exited with an error; the note is as it was");
+    if let Some(editor) = app.note.as_mut().filter(|e| e.session == id) {
+        let text = editor.text();
+        let back = in_terminal(terminal, || {
+            crate::note::edit_externally(&file, &text, |back| {
+                editor.replace(&back);
+                Ok(())
+            })
+        })?;
+        return Ok(back.and_then(|done| {
+            done.map(|()| "Back from $EDITOR: :w saves the note".to_string())
+                .ok_or_else(failed)
+        }));
+    }
+    let text = s.note.as_ref().map_or(String::new(), |n| n.text.clone());
+    let saved = in_terminal(terminal, || {
+        crate::note::edit_externally(&file, &text, |back| roster.change_note(&s, &back))
+    })?;
+    Ok(saved.and_then(|said| said.ok_or_else(failed)))
+}
+
 /// Hands the terminal to `$VISUAL` or `$EDITOR` (else vi) on config.toml, made
 /// first from the template of every setting if there's none, then puts what
 /// was saved in use. The outer result is the terminal's.
@@ -552,39 +633,24 @@ fn edit_config(
     {
         return Ok(Err(e));
     }
-    let editor = ["VISUAL", "EDITOR"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()))
-        .unwrap_or_else(|| "vi".into());
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
-    // Through a shell, so an editor given with options ("code -w") works.
-    let ran = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"$1\""))
-        .arg("roster-edit")
-        .arg(&file)
-        .status();
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    terminal.clear()?;
-    terminal.hide_cursor()?;
-    Ok(match ran {
-        Err(e) => Err(anyhow::anyhow!("can't run {editor}: {e}")),
-        Ok(_) => match roster.reload_config_now() {
-            Ok(Reloaded::InUse(problem)) => {
-                use_config(roster, app);
-                match problem {
-                    None => Ok("config.toml saved: its settings are in use".into()),
-                    Some(e) => Err(e.context(
-                        "config.toml's settings are in use, but roster's tmux didn't take them",
-                    )),
+    Ok(
+        match in_terminal(terminal, || crate::util::run_editor(&file))? {
+            Err(e) => Err(e),
+            Ok(_) => match roster.reload_config_now() {
+                Ok(Reloaded::InUse(problem)) => {
+                    use_config(roster, app);
+                    match problem {
+                        None => Ok("config.toml saved: its settings are in use".into()),
+                        Some(e) => Err(e.context(
+                            "config.toml's settings are in use, but roster's tmux didn't take them",
+                        )),
+                    }
                 }
-            }
-            Ok(Reloaded::Same) => Ok("config.toml unchanged".into()),
-            Err(e) => Err(e.context("config.toml has an error, the settings in use stay")),
+                Ok(Reloaded::Same) => Ok("config.toml unchanged".into()),
+                Err(e) => Err(e.context("config.toml has an error, the settings in use stay")),
+            },
         },
-    })
+    )
 }
 
 /// Hands the terminal to `tmux attach` until the user detaches. The outer result

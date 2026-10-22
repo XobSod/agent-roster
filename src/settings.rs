@@ -18,8 +18,8 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 
 use crate::agent;
 use crate::config::{
-    AgentConfig, Config, First, FitPreview, KeyList, Keys, Order, ProjectKeys, SessionKeys,
-    ViewKeys,
+    AgentConfig, Config, First, FitPreview, KeyList, Keys, NoteEditor, Notes, Order, ProjectKeys,
+    SessionKeys, ViewKeys,
 };
 
 impl crate::engine::Roster {
@@ -277,6 +277,8 @@ pub enum Kind {
     Words,
     /// A whole number of seconds, at least 1.
     Seconds,
+    /// A whole number of milliseconds, at least 1.
+    Millis,
     /// TUI keys: one, several, or none.
     Keys,
     /// A tmux key (the back key while attached).
@@ -381,6 +383,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         fit_preview,
         status_line,
         default_agent,
+        notes,
     } = config;
     let fit = |f: &Option<FitPreview>| match f.unwrap_or(FitPreview::Auto) {
         FitPreview::Auto => "auto",
@@ -432,6 +435,45 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         ],
     };
 
+    let Notes {
+        editor,
+        escape,
+        escape_ms,
+    } = notes;
+    let ms = escape_ms.unwrap_or(crate::config::ESCAPE_MS);
+    let notes = Section {
+        title: "Notes".into(),
+        agent: None,
+        table: Some(path(&["notes"])),
+        settings: vec![
+            choice(
+                &["notes", "editor"],
+                &["builtin", "external"],
+                match editor.unwrap_or_default() {
+                    NoteEditor::Builtin => "builtin",
+                    NoteEditor::External => "external",
+                },
+                "where a session's note opens: roster's own editor, with vim's keys, or $VISUAL / $EDITOR",
+            ),
+            Setting {
+                placeholder: Some("\"<keys>\"".into()),
+                ..text_setting(
+                    &["notes", "escape"],
+                    escape.as_deref(),
+                    "none",
+                    "keys typed quickly in insert mode that leave it, as Esc does: \"jk\", say",
+                )
+            },
+            make(
+                &["notes", "escape_ms"],
+                Kind::Millis,
+                format!("{ms} ms"),
+                ms.to_string(),
+                "how quickly: at most this many milliseconds from one of those keys to the next",
+            ),
+        ],
+    };
+
     let Order {
         needs_input,
         idle,
@@ -463,7 +505,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         ],
     };
 
-    let mut sections = vec![general, shelves];
+    let mut sections = vec![general, notes, shelves];
     for name in agents {
         let adapter = agent::adapter(name);
         let agent = configured.get(name).cloned().unwrap_or_default();
@@ -625,6 +667,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         retitle,
         adopt,
         chat,
+        note,
     } = session;
     let s =
         |name: &str, list: &KeyList, doc: &str| keys_setting(&["keys", "session", name], list, doc);
@@ -649,6 +692,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 "a title generated from the recent prompts",
             ),
             s("adopt", adopt, "adopt a conversation started elsewhere"),
+            s("note", note, "the session's note, to read and write"),
         ],
     });
     let ProjectKeys {
@@ -774,6 +818,14 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
                 .parse()
                 .with_context(|| format!("{input:?} isn't a number of seconds"))?;
             toml_edit::value(secs)
+        }
+        Kind::Millis => {
+            let ms: i64 = input
+                .trim_end_matches("ms")
+                .trim()
+                .parse()
+                .with_context(|| format!("{input:?} isn't a number of milliseconds"))?;
+            toml_edit::value(ms)
         }
         Kind::Words => Item::Value(Value::Array(split_words(input)?.into_iter().collect())),
         Kind::Keys => {

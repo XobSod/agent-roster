@@ -251,6 +251,7 @@ fn typing_hint(kind: &Kind) -> &'static str {
         Kind::Model => "Tab completes from the agent's; empty for its default",
         Kind::Words => "words as in a shell; empty for none",
         Kind::Seconds => "seconds",
+        Kind::Millis => "milliseconds",
         Kind::Keys => "key names, e.g. k Up or C-x; empty for none",
         Kind::TmuxKey => "a tmux key, e.g. C-q",
         Kind::Bool | Kind::Choice(_) => "",

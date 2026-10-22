@@ -280,3 +280,92 @@ fn settings_are_changed_in_the_tui_and_followed_on_disk() {
         "config.toml has an error, the settings in use stay",
     );
 }
+
+#[test]
+fn notes_are_written_pinned_and_shown_in_the_tui() {
+    let Some(t) = TestEnv::new("notes") else {
+        return;
+    };
+    // An $EDITOR that ticks the second item, for Ctrl+G.
+    let editor = t.path("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nsed -i 's/second/second, done/' \"$1\"\n",
+    )
+    .unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&editor)
+        .status()
+        .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    t.ok(&["config", "set", "notes.escape", "jk"]);
+    let command = format!(
+        "EDITOR='{}' VISUAL= {}; sleep 600",
+        editor.display(),
+        t.shell_command()
+    );
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("the agent's screen in the preview", "fake agent:");
+
+    // Written in the editor under the header, the agent's screen still below.
+    term.keys(&["s", "o"]);
+    term.wait_for("the editor", "╭ Note ");
+    term.keys(&["i"]);
+    term.wait_for("insert mode", " INSERT ");
+    term.text("TODO");
+    term.keys(&["Enter"]);
+    term.text("- [ ] first");
+    term.keys(&["Enter"]);
+    // j and k typed slowly are text; quickly (notes.escape), they leave
+    // insert mode, typing nothing.
+    term.text("- [ ] second j");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    term.text("k");
+    term.wait_for("j and k, typed slowly", "- [ ] second jk");
+    term.keys(&["BSpace", "BSpace", "BSpace", "j", "k"]);
+    term.wait_for("normal mode", " NORMAL ");
+    term.keys(&["Escape", "Escape"]);
+    assert!(
+        term.screen().contains("│  - [ ] second "),
+        "{}",
+        term.screen()
+    );
+    term.wait_for("normal mode, still open", " NORMAL ");
+    assert!(term.screen().contains("fake agent:"), "{}", term.screen());
+    term.wait_for("unsaved changes", "Note [+]");
+    // Pinned on its first item, saved and closed.
+    term.keys(&["k", "m", "m"]);
+    term.wait_for("the pin", "▸ - [ ] first");
+    term.keys(&[":", "w", "q", "Enter"]);
+    term.wait_for("the save", "Saved the note of demo/one");
+    term.wait_for_gone("the editor closed", "╭ Note ");
+    term.wait_for("the pinned lines above the screen", "✎ - [ ] first");
+    term.wait_for("where they are in the note", "2–3 of 3");
+    assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+
+    // Ctrl+G: to $EDITOR and back into the editor, unsaved until :w.
+    term.keys(&["s", "o", "C-g"]);
+    term.wait_for("the text back from $EDITOR", "second, done");
+    term.wait_for("unsaved", "Note [+]");
+    term.keys(&[":", "x", "Enter"]);
+    term.wait_for_gone("the editor closed", "╭ Note ");
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first\n- [ ] second, done\n"
+    );
+
+    // With notes.editor = "external", s o is $EDITOR, saved when it exits.
+    t.ok(&["config", "set", "notes.editor", "external"]);
+    term.wait_for("the setting in use", "config.toml changed");
+    term.keys(&["s", "o"]);
+    term.wait_for("the save", "Saved the note of demo/one");
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first\n- [ ] second, done, done\n"
+    );
+    assert!(!term.screen().contains("╭ Note "));
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+}

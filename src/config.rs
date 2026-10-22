@@ -17,6 +17,12 @@
 //! working = "oldest"              # (the one working longest on top)
 //! archived = "newest"             # and the most recently archived on top
 //!
+//! [notes]                         # a session's note (s o)
+//! editor = "external"             # "builtin" (default): roster's own editor, with
+//!                                 # vim's keys; "external": $VISUAL or $EDITOR
+//! escape = "jk"                   # typed quickly in insert mode: as Esc (default none)
+//! escape_ms = 300                 # how quickly: at most this long between the keys
+//!
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
 //! down = ["j", "Down"]
@@ -62,6 +68,46 @@ pub struct Config {
     pub status_line: Option<bool>,
     /// The agent new sessions get unless the project or the user picks one.
     pub default_agent: Option<String>,
+    pub notes: Notes,
+}
+
+/// Sessions' notes: where they open, and the editor's keys.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notes {
+    pub editor: Option<NoteEditor>,
+    /// Keys typed quickly in insert mode that leave it, as Esc does (vim's
+    /// `inoremap jk <Esc>`).
+    pub escape: Option<String>,
+    /// How quickly: at most this many milliseconds from one key to the next.
+    pub escape_ms: Option<u64>,
+}
+
+/// `escape_ms` unless set.
+pub const ESCAPE_MS: u64 = 300;
+
+impl Notes {
+    pub fn editor(&self) -> NoteEditor {
+        self.editor.unwrap_or_default()
+    }
+
+    /// The keys that leave insert mode, and how soon each must follow the one
+    /// before.
+    pub fn escape(&self) -> Option<(Vec<char>, std::time::Duration)> {
+        let keys = self.escape.as_ref()?.chars().collect();
+        let ms = self.escape_ms.unwrap_or(ESCAPE_MS);
+        Some((keys, std::time::Duration::from_millis(ms)))
+    }
+}
+
+/// Where a session's note opens: in roster's own editor (vim's keys, the
+/// agent's screen still in view), or in `$VISUAL` / `$EDITOR`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteEditor {
+    #[default]
+    Builtin,
+    External,
 }
 
 /// Whether an agent drawing full screen (in the terminal's alternate screen,
@@ -145,6 +191,8 @@ pub struct SessionKeys {
     pub adopt: KeyList,
     /// A new chat: a session in the built-in chats project.
     pub chat: KeyList,
+    /// The session's note, to read and write.
+    pub note: KeyList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +257,7 @@ impl Default for SessionKeys {
             retitle: keys(&["t"]),
             adopt: keys(&["a"]),
             chat: keys(&["c"]),
+            note: keys(&["o"]),
         }
     }
 }
@@ -319,6 +368,17 @@ impl Config {
                 "default_agent {agent:?} isn't one roster knows: {} or one under [agents]",
                 crate::agent::BUILT_IN.join(", ")
             );
+        }
+        if let Some(escape) = &config.notes.escape
+            && (escape.chars().count() < 2
+                || escape.chars().any(|c| c.is_whitespace() || c.is_control()))
+        {
+            bail!(
+                "notes.escape must be two or more keys typed in a row, such as \"jk\", not {escape:?}"
+            );
+        }
+        if config.notes.escape_ms == Some(0) {
+            bail!("notes.escape_ms must be at least 1 (milliseconds)");
         }
         for (name, agent) in &config.agents {
             if agent.idle_after == Some(0) {
@@ -549,6 +609,33 @@ mod tests {
             "",
         ] {
             assert!(detach(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn notes_escape_is_keys_typed_in_a_row() {
+        let config = Config::parse("[notes]\nescape = \"jk\"\nescape_ms = 200").unwrap();
+        let (keys, within) = config.notes.escape().unwrap();
+        assert_eq!((keys, within.as_millis()), (vec!['j', 'k'], 200));
+        assert_eq!(Config::default().notes.escape(), None);
+        let notes = |text: &str| Config::parse(&format!("[notes]\n{text}"));
+        assert_eq!(
+            notes("escape = \"jj\"")
+                .unwrap()
+                .notes
+                .escape()
+                .unwrap()
+                .1
+                .as_millis(),
+            300
+        );
+        for bad in [
+            "escape = \"j\"",
+            "escape = \"j k\"",
+            "escape = \"\"",
+            "escape_ms = 0",
+        ] {
+            assert!(notes(bad).is_err(), "{bad}");
         }
     }
 }

@@ -132,6 +132,9 @@ pub struct Session {
     /// For an adopted copy: the conversation it was copied from, forked again on
     /// each start until the copy has a transcript of its own.
     pub fork_from: Option<String>,
+    /// What the user wrote about it (saved apart from the rest, so a save of
+    /// the session doesn't overwrite a note saved meanwhile).
+    pub note: Option<crate::note::Note>,
 }
 
 /// The kind of event roster records with a title it made for a session's
@@ -182,6 +185,7 @@ impl Session {
             turns: 0,
             worked_ms: 0,
             fork_from: None,
+            note: None,
         }
     }
 

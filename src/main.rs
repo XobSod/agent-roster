@@ -9,6 +9,7 @@ mod engine;
 mod keys;
 mod launch;
 mod model;
+mod note;
 mod paths;
 mod print;
 mod report;
@@ -175,6 +176,28 @@ enum Cmd {
     },
     /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
     Info { session: String },
+    /// Print a session's note, or change it (in the TUI: s o)
+    Note {
+        session: String,
+        /// Replace it with this text ("-" reads it from stdin)
+        #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["append", "clear", "edit"])]
+        set: Option<String>,
+        /// Add this line at its end
+        #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["clear", "edit"])]
+        append: Option<String>,
+        /// Remove it
+        #[arg(long, conflicts_with = "edit")]
+        clear: bool,
+        /// Open it in $VISUAL or $EDITOR
+        #[arg(long)]
+        edit: bool,
+        /// Pin this line of it (from 1): the preview shows it and the one below
+        #[arg(long, value_name = "LINE", conflicts_with_all = ["set", "append", "clear", "edit", "unpin"])]
+        pin: Option<usize>,
+        /// Unpin its pinned line: the preview shows its first lines
+        #[arg(long, conflicts_with_all = ["set", "append", "clear", "edit"])]
+        unpin: bool,
+    },
     /// Give a Claude or pi session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
     Retitle {
         session: String,
@@ -383,8 +406,13 @@ fn run(cli: Cli) -> Result<()> {
             println!("Removed project {name}");
             for s in purged {
                 let conversation = s.conversation_id.as_deref().unwrap_or("none");
+                let note = if s.note.is_some() {
+                    ", and its note"
+                } else {
+                    ""
+                };
                 println!(
-                    "  with archived session {} (conversation {conversation})",
+                    "  with archived session {} (conversation {conversation}){note}",
                     s.name
                 );
             }
@@ -494,8 +522,16 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 String::new()
             };
+            let note = if s.note.is_some() {
+                " and its note"
+            } else {
+                ""
+            };
             if !confirm(
-                &format!("Delete {} for good? Roster forgets it{kept}", s.label()),
+                &format!(
+                    "Delete {} for good? Roster forgets it{note}{kept}",
+                    s.label()
+                ),
                 yes,
             )? {
                 return Ok(());
@@ -581,6 +617,54 @@ fn run(cli: Cli) -> Result<()> {
             r.refresh()?;
             let s = r.resolve_any(&session)?;
             print_info(&r, &s);
+        }
+        Cmd::Note {
+            session,
+            set,
+            append,
+            clear,
+            edit,
+            pin,
+            unpin,
+        } => {
+            let s = r.resolve_any(&session)?;
+            if pin.is_some() || unpin {
+                println!("{}", r.pin_note(&s, pin)?);
+                return Ok(());
+            }
+            let old = s.note.as_ref().map_or(String::new(), |n| n.text.clone());
+            let new = match (set, append) {
+                (Some(text), _) => {
+                    let text = match text.as_str() {
+                        "-" => io::read_to_string(io::stdin())?,
+                        _ => text,
+                    };
+                    // Not an empty pipe taken for a note to remove.
+                    if note::tidy(&text).is_empty() {
+                        bail!("nothing to set the note to; --clear removes it");
+                    }
+                    text
+                }
+                (None, Some(line)) if old.is_empty() => line,
+                (None, Some(line)) => format!("{old}\n{line}"),
+                (None, None) if clear => String::new(),
+                (None, None) if edit => {
+                    let file = r.note_file(&s);
+                    match note::edit_externally(&file, &old, |text| r.change_note(&s, &text))? {
+                        Some(said) => println!("{said}"),
+                        None => bail!("$EDITOR exited with an error; the note is as it was"),
+                    }
+                    return Ok(());
+                }
+                (None, None) => {
+                    match &s.note {
+                        Some(n) => println!("{}", n.text),
+                        None => eprintln!("{} has no note", s.label()),
+                    }
+                    return Ok(());
+                }
+            };
+            println!("{}", r.change_note(&s, &new)?);
         }
         Cmd::Retitle { session, auto } => {
             let s = r.resolve(&session, false)?;

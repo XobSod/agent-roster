@@ -13,6 +13,7 @@ ansi-to-tui = "8.0.1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
+edtui = { version = "0.11.7", default-features = false }
 libc = "0.2.191"
 memchr = "2.8.3"
 nucleo-matcher = "0.3.1"

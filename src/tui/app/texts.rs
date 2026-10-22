@@ -9,6 +9,9 @@ use crate::tui::theme;
 impl App {
     /// Footer hints: keys that act here and now.
     pub fn hints(&self) -> Vec<(String, &'static str)> {
+        if let Some(editor) = &self.note {
+            return editor.hints();
+        }
         if self.typing.is_some() {
             return [("Enter", "keep"), ("Esc", "cancel"), ("↑↓ C-p C-n", "move")]
                 .map(|(key, what)| (key.to_string(), what))
@@ -260,6 +263,28 @@ impl App {
                     Span::styled(format!("({whose})"), muted),
                 ],
             ));
+        }
+        // Unless it's open in the editor above.
+        if let Some(note) = s.note.as_ref().filter(|_| {
+            self.note
+                .as_ref()
+                .is_none_or(|editor| editor.session != s.id)
+        }) {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Note",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            for (i, line) in note.text.lines().enumerate() {
+                let mark = match note.pin == Some(i) {
+                    true => Span::styled("  ▸ ", Style::new().fg(theme::ACCENT)),
+                    false => Span::raw("    "),
+                };
+                lines.push(Line::from(vec![
+                    mark,
+                    Span::raw(line.replace('\t', "    ")),
+                ]));
+            }
         }
         if !prompts.is_empty() {
             lines.push(Line::default());

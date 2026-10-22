@@ -9,8 +9,9 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_params, params};
 
 use crate::model::{Event, Project, Session, State};
+use crate::note::Note;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -50,7 +51,10 @@ CREATE TABLE sessions (
     title_override    TEXT,
     turns             INTEGER NOT NULL DEFAULT 0,
     worked_ms         INTEGER NOT NULL DEFAULT 0,
-    fork_from         TEXT
+    fork_from         TEXT,
+    note              TEXT,
+    note_pin          INTEGER,
+    note_at           INTEGER
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -67,7 +71,7 @@ const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms, s.fork_from";
+    s.worked_ms, s.fork_from, s.note, s.note_pin, s.note_at";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
 
@@ -97,6 +101,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE sessions ADD COLUMN worked_ms INTEGER NOT NULL DEFAULT 0;",
     ),
     (6, "ALTER TABLE sessions ADD COLUMN fork_from TEXT;"),
+    (
+        7,
+        "ALTER TABLE sessions ADD COLUMN note TEXT;
+         ALTER TABLE sessions ADD COLUMN note_pin INTEGER;
+         ALTER TABLE sessions ADD COLUMN note_at INTEGER;",
+    ),
 ];
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
@@ -336,6 +346,23 @@ impl Db {
 
     pub fn save_session(&self, s: &Session) -> Result<()> {
         save_session(&self.conn, s)
+    }
+
+    /// Saves a session's note (None removes it), and only that.
+    pub fn set_note(&self, id: &str, note: Option<&Note>) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET note = ?2, note_pin = ?3, note_at = ?4 WHERE id = ?1",
+            params![
+                id,
+                note.map(|n| &n.text),
+                note.and_then(|n| n.pin).map(|p| p as i64),
+                note.map(|n| n.at)
+            ],
+        )?;
+        if n == 0 {
+            bail!("no session with id {id}");
+        }
+        Ok(())
     }
 
     /// Takes a session's pending first prompt, so that only one process types it.
@@ -744,6 +771,14 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         turns: r.get("turns")?,
         worked_ms: r.get("worked_ms")?,
         fork_from: r.get("fork_from")?,
+        note: match r.get::<_, Option<String>>("note")? {
+            Some(text) => Some(Note {
+                text,
+                pin: r.get::<_, Option<i64>>("note_pin")?.map(|p| p as usize),
+                at: r.get::<_, Option<i64>>("note_at")?.unwrap_or(0),
+            }),
+            None => None,
+        },
     })
 }
 
@@ -851,6 +886,24 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_note_is_saved_apart_from_the_rest() {
+        let (db, s) = db_with_session();
+        let note = Note {
+            text: "TODO\n- one".into(),
+            pin: Some(1),
+            at: 7,
+        };
+        db.set_note(&s.id, Some(&note)).unwrap();
+        assert_eq!(db.session(&s.id).unwrap().note, Some(note.clone()));
+        // A save of a copy read before (refresh's) leaves it.
+        db.save_session(&s).unwrap();
+        assert_eq!(db.session(&s.id).unwrap().note, Some(note));
+        db.set_note(&s.id, None).unwrap();
+        assert_eq!(db.session(&s.id).unwrap().note, None);
+        assert!(db.set_note("nobody", None).is_err());
     }
 
     #[test]

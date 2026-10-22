@@ -42,6 +42,16 @@ pub enum Op {
         effort: Option<Option<String>>,
     },
     RetitleSession(String),
+    /// A session's note as written (all blank: none), then the editor closed
+    /// or left open.
+    SaveNote {
+        id: String,
+        text: String,
+        pin: Option<usize>,
+        close: bool,
+    },
+    /// A session's note in `$EDITOR`: the open editor's text, or the saved note.
+    EditNote(String),
     /// Make sure the chats project exists, then open the new-chat form.
     NewChat,
     /// Look for conversations to adopt, then pick one.

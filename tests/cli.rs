@@ -546,6 +546,261 @@ fn pi_conversations_can_be_adopted() {
     );
 }
 
+/// Stand-in for codex: reports to roster the way its hooks do, and keeps a
+/// rollout file like codex's. Given a `clear` line, it starts a new
+/// conversation, the way `/clear` does.
+const FAKE_CODEX: &str = r#"#!/bin/sh
+# What roster asked of it: its conversation, its model and effort, its hooks.
+id=; sub=; prev=; model=; effort=; hooks=no
+for a in "$@"; do
+  case "$a" in
+    hooks.SessionStart=*) hooks=yes ;;
+    model=*) model=$(printf '%s' "${a#model=}" | tr -d '"') ;;
+    model_reasoning_effort=*) effort=$(printf '%s' "${a#model_reasoning_effort=}" | tr -d '"') ;;
+    resume|fork) sub=$a ;;
+  esac
+  case "$prev" in resume|fork) [ -z "$id" ] && id=$a ;; esac
+  prev=$a
+done
+[ "$sub" = fork ] && id=$(cat /proc/sys/kernel/random/uuid)
+[ -n "$id" ] || id=$(cat /proc/sys/kernel/random/uuid)
+echo "fake codex: $*"
+[ "$hooks" = yes ] && echo "with the hooks"
+file="$PWD/.codex-$id.jsonl"
+pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model-fake-model-1}\"}"
+report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
+report session "$pay"
+while read -r line; do
+  case "$line" in
+    clear) id=$(cat /proc/sys/kernel/random/uuid); file="$PWD/.codex-$id.jsonl"
+           pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model-fake-model-1}\"}"
+           report session "$pay"; continue ;;
+  esac
+  echo "got: $line"
+  report prompt "$pay"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$PWD" >> "$file"
+  printf '{"type":"turn_context","payload":{"model":"%s","effort":"%s"}}\n' "${model-fake-model-1}" "${effort-medium}" >> "$file"
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$line" >> "$file"
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$file"
+  printf '{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":115}}}\n' >> "$file"
+  printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"output_tokens":5,"total_tokens":115},"last_token_usage":{"total_tokens":115},"model_context_window":400000}}}\n' >> "$file"
+  report working "$pay"
+  report idle "$pay"
+done
+"#;
+
+#[test]
+fn codex_reports_through_the_hooks_it_is_given() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("codex") else {
+        return;
+    };
+    let codex = t.path("fake-codex");
+    fs::write(&codex, FAKE_CODEX).unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "default_agent = \"codex\"\n{text}\n[agents.codex]\ncommand = \"{}\"\n",
+            codex.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // An effort codex has no word for.
+    assert!(
+        !t.run(&["new", "demo", "--agent", "codex", "--effort", "extreme"])
+            .status
+            .success()
+    );
+
+    t.ok(&[
+        "new",
+        "demo",
+        "--name",
+        "c",
+        "--model",
+        "fake-model-1",
+        "--effort",
+        "ultra",
+        "--prompt",
+        "fix the tests",
+    ]);
+    t.wait_for("the first prompt's turn", |t| {
+        let s = t.session("c", false).unwrap();
+        s["state"] == "idle" && s["unread"] == true
+    });
+    let s = t.session("c", false).unwrap();
+    let conversation = s["conversation_id"].as_str().unwrap().to_string();
+    // Codex is told no id: it names its conversation and reports it back.
+    assert_eq!(conversation.len(), 36, "{conversation}");
+    let screen = t.ok(&["show", "c"]);
+    assert!(
+        screen.contains(r#"-c model="fake-model-1""#)
+            && screen.contains(r#"-c model_reasoning_effort="ultra""#)
+            && screen.contains("--dangerously-bypass-hook-trust")
+            && screen.contains("hooks.SessionStart=")
+            && screen.contains("with the hooks")
+            && screen.contains("got: fix the tests"),
+        "{screen}"
+    );
+    assert_eq!(
+        (&s["agent"], &s["running_model"], &s["effort"]),
+        (
+            &Value::from("codex"),
+            &Value::from("fake-model-1"),
+            &Value::from("ultra")
+        )
+    );
+
+    // Statistics from its rollout; what a subscription costs it doesn't say.
+    let info = t.ok(&["info", "c"]);
+    assert!(
+        info.contains("1 prompt") && info.contains("context 115/400k") && info.contains("5 out"),
+        "{info}"
+    );
+
+    // Codex names no task: after its first turn roster has it make a title.
+    t.wait_for("the automatic title", |t| {
+        t.session("c", false).unwrap()["title"]
+            .as_str()
+            .is_some_and(|title| title.starts_with("fake codex: exec"))
+    });
+
+    // It resumes: a restart opens the same conversation, without asking.
+    t.ok(&["restart", "c"]);
+    t.wait_for("the restart", |t| {
+        let screen = t.ok(&["show", "c"]);
+        screen.contains("fake codex:") && !screen.contains("got:")
+    });
+    assert!(
+        t.ok(&["show", "c"])
+            .contains(&format!("resume {conversation}")),
+        "{}",
+        t.ok(&["show", "c"])
+    );
+    assert_eq!(
+        t.session("c", false).unwrap()["conversation_id"],
+        conversation.as_str()
+    );
+
+    // Clearing it, codex starts a conversation of its own: the session follows.
+    let target = format!("=r-{}:", s["id"].as_str().unwrap());
+    for key in ["-l", "Enter"] {
+        Command::new("tmux")
+            .args(["-L", &t.socket, "send-keys", "-t", &target, key])
+            .output()
+            .unwrap();
+    }
+    Command::new("tmux")
+        .args(["-L", &t.socket, "send-keys", "-t", &target, "-l", "clear"])
+        .output()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &t.socket, "send-keys", "-t", &target, "Enter"])
+        .output()
+        .unwrap();
+    t.wait_for("the new conversation", |t| {
+        let s = t.session("c", false).unwrap();
+        s["conversation_id"] != conversation.as_str() && s["state"] == "idle"
+    });
+}
+
+#[test]
+fn codex_conversations_can_be_adopted() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("codex-adopt") else {
+        return;
+    };
+    let codex = t.path("fake-codex");
+    fs::write(&codex, FAKE_CODEX).unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[agents.codex]\ncommand = \"{}\"\n",
+        codex.display()
+    ));
+    fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+
+    // Two conversations codex kept, started outside roster in the project's
+    // directory, dated the way it files them.
+    let folder = t
+        .codex_dir()
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("21");
+    fs::create_dir_all(&folder).unwrap();
+    let (one, two) = (
+        "01a10001-0000-4000-8000-000000000001",
+        "01a10002-0000-4000-8000-000000000002",
+    );
+    for id in [one, two] {
+        let lines = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": t.path("proj"), "git": {"branch": "main"}}}),
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-6.1-sol", "effort": "high"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>not a prompt</environment_context>"}]}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}]}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(
+            folder.join(format!("rollout-2026-10-21T06-00-00-{id}.jsonl")),
+            text,
+        )
+        .unwrap();
+    }
+    fs::write(
+        t.codex_dir().join("session_index.jsonl"),
+        format!(
+            r#"{{"id":"{one}","thread_name":"Fixing it","updated_at":"2026-10-21T06:05:00Z"}}"#,
+        ) + "\n",
+    )
+    .unwrap();
+
+    let list = t.ok(&["adopt", "--list"]);
+    // Listed by the short id `roster adopt` takes.
+    assert!(
+        list.contains(&one[..8]) && list.contains(" codex ") && list.contains("Fixing it"),
+        "{list}"
+    );
+
+    // Adopted, it's a codex session in its project that resumes it.
+    t.ok(&["adopt", one, "--name", "a"]);
+    let s = t.session("a", false).unwrap();
+    assert_eq!(
+        (&s["agent"], &s["conversation_id"]),
+        (&Value::from("codex"), &Value::from(one))
+    );
+    t.wait_for("codex started", |t| {
+        t.ok(&["show", "a"]).contains("fake codex:")
+    });
+    let screen = t.ok(&["show", "a"]);
+    assert!(
+        screen.contains(&format!("resume {one}")) && !screen.contains("fork"),
+        "{screen}"
+    );
+    assert!(!t.ok(&["adopt", "--list"]).contains(&one[..8]));
+
+    // A copy forks the original into a conversation of its own, which codex
+    // names and reports back.
+    t.ok(&["adopt", two, "--fork", "--name", "b"]);
+    t.wait_for("the copy's conversation", |t| {
+        let s = t.session("b", false).unwrap();
+        s["conversation_id"].as_str().is_some_and(|id| id != two)
+    });
+    let copy = t.session("b", false).unwrap()["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let screen = t.ok(&["show", "b"]);
+    assert!(screen.contains(&format!("fork {two}")), "{screen}");
+    assert_ne!(copy, two);
+}
+
 #[test]
 fn settings_change_config_toml_in_place() {
     let Some(t) = TestEnv::new("settings") else {

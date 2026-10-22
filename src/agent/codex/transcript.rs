@@ -1,0 +1,333 @@
+//! Codex's rollout: the JSONL file where it keeps a conversation, one entry per
+//! line, each with a `type` and a `payload` that names its own kind. An
+//! internal format that may change (it's already kept two ways, as `legacy`
+//! and `paginated` history), so whatever can't be read is simply left out.
+
+use serde::Deserialize;
+
+use crate::stats::{AgentStats, Jsonl, Prompts, Tally};
+
+/// Reads a codex rollout as it grows.
+pub type CodexTranscript = Jsonl<Totals>;
+
+/// A rollout's running totals.
+#[derive(Debug, Default)]
+pub struct Totals {
+    prompts: Prompts,
+    /// Output tokens, counted once per model call.
+    output: u64,
+    /// What the last call sent: the tokens in context. Unknown after a
+    /// compaction until the next one.
+    context: Option<u64>,
+    /// The window of the model it last called, as codex reports it.
+    window: Option<u64>,
+    /// Output tokens summed from the per-call records, if there were any.
+    counted: bool,
+}
+
+impl Tally for Totals {
+    fn line(&mut self, line: &[u8]) {
+        if !wanted(line) {
+            return;
+        }
+        let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
+            return;
+        };
+        let Some(payload) = entry.payload else {
+            return;
+        };
+        match entry.kind.as_deref() {
+            // What the conversation holds: the prompts, and nothing else of
+            // it that roster counts.
+            Some("response_item") => match payload.kind.as_deref() {
+                Some("message") if payload.role.as_deref() == Some("user") => {
+                    // A typed prompt is text; tool results are lists of
+                    // outputs, and the context codex injects is wrapped in
+                    // tags.
+                    if let Some(text) = payload.text()
+                        && !text.trim_start().starts_with('<')
+                    {
+                        self.prompts.push(text);
+                    }
+                }
+                Some("compaction") => self.context = None,
+                _ => {}
+            },
+            // The tokens of one model call, summed as they come.
+            Some("token_usage_record") => {
+                if let Some(usage) = payload.usage.as_ref() {
+                    self.output += usage.output_tokens.unwrap_or(0);
+                    self.counted = true;
+                }
+            }
+            Some("event_msg") => match payload.kind.as_deref() {
+                Some("token_count") => {
+                    let info = payload.info.unwrap_or_default();
+                    if let Some(usage) = info.last
+                        && usage.total_tokens > 0
+                    {
+                        self.context = Some(usage.total_tokens);
+                    }
+                    if let Some(window) = info.window {
+                        self.window = Some(window);
+                    }
+                    // Without the per-call records, its own total is all there is.
+                    if !self.counted {
+                        self.output = info
+                            .total
+                            .as_ref()
+                            .and_then(|u| u.output_tokens)
+                            .unwrap_or(self.output);
+                    }
+                }
+                Some("context_compacted") => self.context = None,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Codex says which window it's calling into, so `model` isn't needed.
+    /// What a subscription costs it doesn't say at all.
+    fn stats(&self, _model: Option<&str>) -> AgentStats {
+        AgentStats {
+            prompts: Some(self.prompts.count),
+            context_used: self.context,
+            context_limit: self.window,
+            output_tokens: (self.output > 0).then_some(self.output),
+            ..AgentStats::default()
+        }
+    }
+
+    fn prompts(&self) -> &Prompts {
+        &self.prompts
+    }
+}
+
+/// What roster reads of an entry; the rest of it is skipped unread.
+#[derive(Deserialize)]
+struct Entry {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    payload: Option<Payload>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Payload {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    role: Option<String>,
+    content: Option<Content>,
+    usage: Option<Usage>,
+    info: Option<Info>,
+}
+
+/// Tokens, as codex counts them: `output_tokens` of a call, `total_tokens` of
+/// a request (what was in context for it).
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Usage {
+    #[serde(rename = "outputTokens", alias = "output_tokens")]
+    output_tokens: Option<u64>,
+    #[serde(alias = "total_tokens")]
+    total_tokens: u64,
+}
+
+/// A `token_count`'s counts: the session's, the last call's, and the window.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Info {
+    #[serde(rename = "totalTokenUsage", alias = "total_token_usage")]
+    total: Option<Usage>,
+    #[serde(rename = "lastTokenUsage", alias = "last_token_usage")]
+    last: Option<Usage>,
+    #[serde(rename = "modelContextWindow", alias = "model_context_window")]
+    window: Option<u64>,
+}
+
+impl Payload {
+    /// The text of a message: one string, or the text blocks of a list (the
+    /// images, files and tool outputs in it are skipped).
+    fn text(&self) -> Option<String> {
+        match self.content.as_ref()? {
+            Content::Text(text) => Some(text.clone()),
+            Content::Blocks(blocks) => {
+                let parts: Vec<&str> = blocks
+                    .iter()
+                    .filter(|b| {
+                        b.kind
+                            .as_deref()
+                            .is_none_or(|k| matches!(k, "input_text" | "text"))
+                    })
+                    .filter_map(|b| b.text.as_deref())
+                    .collect();
+                (!parts.is_empty()).then(|| parts.join("\n"))
+            }
+        }
+    }
+}
+
+/// A message's content, either way codex writes it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Content {
+    Text(String),
+    Blocks(Vec<Block>),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Block {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
+}
+
+/// The lines worth parsing: codex writes a line per thing that happens, and
+/// most of them say nothing roster counts. (Its `type` comes after its
+/// timestamp, so `stats::leading_type` can't tell them apart.)
+fn wanted(line: &[u8]) -> bool {
+    const MARKS: &[&[u8]] = &[
+        br#""response_item""#,
+        br#""token_usage_record""#,
+        br#""token_count""#,
+        br#""compaction""#,
+        br#""context_compacted""#,
+    ];
+    MARKS
+        .iter()
+        .any(|mark| memchr::memmem::find(line, mark).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats::Transcript;
+    use serde_json::json;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    /// A turn as codex writes it: your prompt, what it cost, and where it is.
+    fn turn(text: &str, output: u64, total: u64, window: u64) -> Vec<String> {
+        vec![
+            json!({"timestamp": "t", "type": "response_item", "payload": {"type": "message",
+                "role": "user", "content": [{"type": "input_text", "text": text},
+                                            {"type": "image", "image_url": "…"}]}})
+            .to_string(),
+            json!({"timestamp": "t", "type": "response_item", "payload": {"type": "message",
+                "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}})
+            .to_string(),
+            json!({"type": "token_usage_record", "payload": {"usage": {"input_tokens": 10,
+                "output_tokens": output, "total_tokens": total}}})
+            .to_string(),
+            json!({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"output_tokens": output, "total_tokens": total},
+                "last_token_usage": {"total_tokens": total},
+                "model_context_window": window},
+                "rate_limits": {"credits": {"has_credits": false}}}})
+            .to_string(),
+        ]
+    }
+
+    /// What a rollout adds up to, and the prompts it remembers: read whole,
+    /// from a file that goes with the temporary directory.
+    fn totals(lines: &[String]) -> (AgentStats, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-10-22T10-00-00-01a1.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let mut transcript = CodexTranscript::new(&path);
+        transcript.update().unwrap();
+        (transcript.stats(None), transcript.recent_prompts())
+    }
+
+    #[test]
+    fn counts_prompts_tokens_and_the_window() {
+        let lines: Vec<String> = turn("fix it", 5, 115, 400_000)
+            .into_iter()
+            .chain(turn("and the tests", 7, 230, 400_000))
+            .collect();
+        let (stats, prompts) = totals(&lines);
+        assert_eq!(stats.prompts, Some(2));
+        assert_eq!(stats.output_tokens, Some(12));
+        assert_eq!(stats.context_used, Some(230));
+        assert_eq!(stats.context_limit, Some(400_000));
+        // What a subscription costs it, codex doesn't say.
+        assert_eq!(stats.cost_usd, None);
+        assert_eq!(prompts, ["fix it", "and the tests"]);
+    }
+
+    #[test]
+    fn counts_a_prompt_once_and_skips_what_codex_injects() {
+        let mut lines = turn("fix it", 5, 115, 400_000);
+        for injected in [
+            "<environment_context>…</environment_context>",
+            "<model_switch>use another model</model_switch>",
+        ] {
+            lines.push(
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": injected}]}})
+                .to_string(),
+            );
+        }
+        // A developer message, a tool call, and a line that isn't JSON.
+        lines.push(
+            json!({"type": "response_item", "payload": {"type": "message", "role": "developer",
+                "content": [{"type": "input_text", "text": "instructions"}]}})
+            .to_string(),
+        );
+        lines.push(json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}"}}).to_string());
+        lines.push("{not json".into());
+        let (stats, prompts) = totals(&lines);
+        assert_eq!(stats.prompts, Some(1));
+        assert_eq!(prompts, ["fix it"]);
+    }
+
+    #[test]
+    fn reads_what_was_added_since_the_last_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut t = CodexTranscript::new(&path);
+        t.update().unwrap();
+        assert_eq!(t.stats(None).prompts, Some(0));
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(turn("first", 5, 115, 400_000).join("\n").as_bytes())
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        t.update().unwrap();
+        assert_eq!(t.stats(None).context_used, Some(115));
+        // Half a line: it waits for the rest, and counts nothing twice.
+        file.write_all(b"{\"type\": \"token_usage_record\", \"payload\": {\"usage\": {\"output")
+            .unwrap();
+        t.update().unwrap();
+        assert_eq!(t.stats(None).output_tokens, Some(5));
+        file.write_all(b"_tokens\": 5, \"total_tokens\": 115}}}\n")
+            .unwrap();
+        file.write_all(turn("second", 7, 230, 400_000).join("\n").as_bytes())
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        t.update().unwrap();
+        let stats = t.stats(None);
+        assert_eq!(stats.prompts, Some(2));
+        assert_eq!(stats.output_tokens, Some(17));
+        assert_eq!(stats.context_used, Some(230));
+        assert_eq!(t.recent_prompts(), ["first", "second"]);
+    }
+
+    #[test]
+    fn a_compaction_leaves_the_context_unknown_until_the_next_call() {
+        let mut lines = turn("fix it", 5, 115, 400_000);
+        lines.push(
+            json!({"type": "event_msg", "payload": {"type": "context_compacted"}}).to_string(),
+        );
+        let (stats, _) = totals(&lines);
+        assert_eq!(stats.context_used, None);
+        assert_eq!(stats.output_tokens, Some(5));
+    }
+}

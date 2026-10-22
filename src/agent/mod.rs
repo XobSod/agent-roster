@@ -15,7 +15,8 @@
 //! - `session`: it (re)started or cleared its conversation, and waits for a
 //!   prompt. Its payload names the transcript: until then, a first prompt
 //!   isn't typed in (the agent may still be asking something else, such as
-//!   whether to trust the directory).
+//!   whether to trust the directory). An agent whose hooks never say it (codex,
+//!   in its terminal) is ready once it has been up and quiet a while.
 //! - `prompt`: you gave it a task; it's working.
 //! - `working`: it's still at it (after a tool, or a question answered).
 //! - `needs-input`: it's waiting for you in the middle of a turn.
@@ -26,6 +27,7 @@
 //! end: its screen only corrects an end that went unreported.
 
 pub mod claude;
+pub mod codex;
 pub mod pi;
 
 use std::path::Path;
@@ -38,11 +40,12 @@ use crate::model::{QUIET_MS, Session};
 use crate::stats::Transcript;
 
 pub use claude::CLAUDE;
+pub use codex::CODEX;
 pub use pi::PI;
 
 /// Agents with an adapter. Claude is always offered; the others once they're
 /// installed (their command is found) or configured.
-pub const BUILT_IN: &[&str] = &[CLAUDE, PI];
+pub const BUILT_IN: &[&str] = &[CLAUDE, PI, CODEX];
 
 /// What a built-in agent can do beyond running. Every method has a default for
 /// an agent that doesn't, so an adapter implements only what its agent supports.
@@ -51,6 +54,13 @@ pub trait Adapter: Sync {
     /// if not, its screen is all roster has to go on.
     fn reports(&self) -> bool {
         false
+    }
+
+    /// Whether its reports include the start of a conversation (`session`),
+    /// which is where roster learns its transcript. Codex's hooks never say it
+    /// in its terminal, so roster has to go on its being up and idle instead.
+    fn reports_its_start(&self) -> bool {
+        true
     }
 
     /// Whether starting it again resumes its conversation.
@@ -142,6 +152,7 @@ pub fn adapter(name: &str) -> &'static dyn Adapter {
     match name {
         CLAUDE => &claude::Claude,
         PI => &pi::Pi,
+        CODEX => &codex::Codex,
         _ => &Generic,
     }
 }
@@ -418,7 +429,7 @@ mod tests {
     #[test]
     fn configured_agents_are_generic() {
         let mut s = session("a");
-        s.agent = "codex".into();
+        s.agent = "aider".into();
         assert!(launch(&s, &Config::default(), &cx("/bin/roster")).is_err());
 
         let agent = AgentConfig {
@@ -426,31 +437,34 @@ mod tests {
             idle_after: Some(2),
             ..AgentConfig::default()
         };
-        let config = config_with("codex", agent);
+        let config = config_with("aider", agent);
         let l = launch(&s, &config, &cx("/bin/roster")).unwrap();
         // The command defaults to the agent's name; no hooks, no conversation.
-        assert_eq!(l.argv, ["codex", "--quiet"]);
+        assert_eq!(l.argv, ["aider", "--quiet"]);
         assert_eq!(l.conversation_id, None);
-        let codex = known("codex", &config).unwrap();
-        assert!(!codex.reports() && !codex.resumes() && codex.choices().is_none());
+        let aider = known("aider", &config).unwrap();
+        assert!(!aider.reports() && !aider.resumes() && aider.choices().is_none());
         assert!(adapter(CLAUDE).resumes());
         // An effort means nothing to it.
-        assert!(check_effort("codex", "extreme").is_ok());
+        assert!(check_effort("aider", "extreme").is_ok());
         // Fitting the preview: the agent's setting, else the global one, else yes.
         let mut config = config;
-        assert!(fits_preview("codex", &config));
+        assert!(fits_preview("aider", &config));
         config.fit_preview = Some(crate::config::FitPreview::Never);
-        assert!(!fits_preview("codex", &config) && !fits_preview("claude", &config));
-        config.agents.get_mut("codex").unwrap().fit_preview = Some(crate::config::FitPreview::Auto);
-        assert!(fits_preview("codex", &config) && !fits_preview("claude", &config));
-        // Built-in agents first: Claude, then Pi if it's installed here.
-        let expected: &[&str] = if crate::util::on_path("pi") {
-            &["claude", "pi", "codex"]
-        } else {
-            &["claude", "codex"]
-        };
+        assert!(!fits_preview("aider", &config) && !fits_preview("claude", &config));
+        config.agents.get_mut("aider").unwrap().fit_preview = Some(crate::config::FitPreview::Auto);
+        assert!(fits_preview("aider", &config) && !fits_preview("claude", &config));
+        // Built-in agents first: Claude, then the others installed here, then
+        // the one only the config knows.
+        let mut expected: Vec<String> = vec![CLAUDE.into()];
+        for other in [PI, CODEX] {
+            if crate::util::on_path(other) {
+                expected.push(other.into());
+            }
+        }
+        expected.push("aider".into());
         assert_eq!(available(&config), expected);
-        assert_eq!(idle_after_ms("codex", &config), 2000);
+        assert_eq!(idle_after_ms("aider", &config), 2000);
         assert_eq!(idle_after_ms("claude", &config), QUIET_MS);
     }
 
@@ -459,7 +473,8 @@ mod tests {
         let mut config = Config::default();
         config.agents.insert("pi".into(), AgentConfig::default());
         assert!(known("pi", &config).unwrap().reports());
-        assert_eq!(available(&config), ["claude", "pi"]);
+        // Configured, so offered whether or not it's installed here.
+        assert!(available(&config).contains(&"pi".to_string()));
         assert!(known("claude", &Config::default()).is_ok());
     }
 

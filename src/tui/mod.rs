@@ -14,7 +14,6 @@ mod ui;
 
 pub use ui::status_line;
 
-use std::collections::HashMap;
 use std::io::stdout;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -100,15 +99,17 @@ fn only_one(state_dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// The agents' models, asked in the background: pi takes a moment to list
-/// its own. Forms offer what's known meanwhile.
-fn list_models(roster: &Roster) -> std::sync::mpsc::Receiver<HashMap<String, Vec<agent::Model>>> {
+/// The agents' models, asked in the background: pi takes a moment to list its
+/// own, and codex asks its server. Each agent's arrive as they're known, so a
+/// slow one holds up neither the forms nor the others.
+fn list_models(roster: &Roster) -> std::sync::mpsc::Receiver<(String, Vec<agent::Model>)> {
     let (send, models) = std::sync::mpsc::channel();
     let list = roster.model_lister();
     let agents = agent::available(&roster.config);
     std::thread::spawn(move || {
-        let offered = agents.iter().map(|a| (a.clone(), list(a))).collect();
-        send.send(offered).ok();
+        for agent in agents {
+            send.send((agent.clone(), list(&agent))).ok();
+        }
     });
     models
 }
@@ -132,9 +133,24 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
     reload(roster, app);
     let mut last_reload = Instant::now();
     loop {
-        if let Some(offered) = app.listing.as_ref().and_then(|r| r.try_recv().ok()) {
-            app.models.offered = offered;
-            app.listing = None;
+        // What each agent has answered of its models, as it answers; the
+        // receiver is kept only while its thread is still running.
+        if let Some(listing) = app.listing.take() {
+            let (mut offered, mut listing) = (Vec::new(), Some(listing));
+            loop {
+                match listing.as_ref().map(|r| r.try_recv()) {
+                    Some(Ok(one)) => offered.push(one),
+                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) => break,
+                    _ => {
+                        listing = None;
+                        break;
+                    }
+                }
+            }
+            for (agent, models) in offered {
+                app.models.offered.insert(agent, models);
+            }
+            app.listing = listing;
         }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).

@@ -121,7 +121,7 @@ pub struct App {
     /// The agents' models, for the forms: which to offer, what each is.
     pub models: form::Models,
     /// The agents' models being listed in the background (see `tui::run`).
-    pub listing: Option<std::sync::mpsc::Receiver<HashMap<String, Vec<crate::agent::Model>>>>,
+    pub listing: Option<std::sync::mpsc::Receiver<(String, Vec<crate::agent::Model>)>>,
     /// The settings view's settings, and the one selected (of all, in order).
     pub settings: Vec<crate::settings::Section>,
     pub setting_row: usize,

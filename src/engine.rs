@@ -917,11 +917,16 @@ impl Roster {
 
     /// Whether an agent is waiting for its first prompt: for one with hooks,
     /// after it has reported its session, which names its transcript (a new
-    /// conversation has none before that); for others, idle after starting up.
+    /// conversation has none before that); for one whose hooks never name it
+    /// (codex), once it has been up and quiet a while; for others, idle after
+    /// starting up.
     fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
+        let adapter = agent::adapter(&s.agent);
         s.state == State::Idle
-            && if agent::adapter(&s.agent).reports() {
+            && if adapter.reports() {
                 s.transcript_path.is_some()
+                    || (!adapter.reports_its_start()
+                        && s.last_event_at.is_some_and(|at| now - at > BOOT_GRACE_MS))
             } else {
                 s.baseline_at.is_some_and(|b| now > b)
             }

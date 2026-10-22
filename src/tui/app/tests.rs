@@ -820,10 +820,10 @@ fn the_settings_view_changes_settings() {
     );
     assert_eq!(keys(&mut app, "y"), Some(change("agents.aider", None)));
     keys(&mut app, "n");
-    keys(&mut app, "codex");
+    keys(&mut app, "gemini");
     assert_eq!(
         app.on_key(key(KeyCode::Enter)),
-        Some(Op::AddAgent("codex".into()))
+        Some(Op::AddAgent("gemini".into()))
     );
 }
 

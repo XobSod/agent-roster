@@ -62,7 +62,7 @@ enum Cmd {
         #[command(flatten)]
         session: SessionArgs,
     },
-    /// Take over a Claude or pi conversation started elsewhere, resuming it here
+    /// Take over a Claude, pi or codex conversation started elsewhere, resuming it here
     Adopt {
         /// The conversation's id (4+ characters are enough); without it, lists them
         conversation: Option<String>,
@@ -108,7 +108,7 @@ enum Cmd {
         /// A title of your own ("" follows the agent's title again)
         #[arg(long)]
         title: Option<String>,
-        /// Model for Claude or pi ("default" for the agent's in config.toml, else its own)
+        /// Model for Claude, pi or codex ("default" for the agent's in config.toml, else its own)
         #[arg(long)]
         model: Option<String>,
         /// Effort for Claude, thinking level for pi ("default" for the agent's in config.toml, else its own)
@@ -161,7 +161,7 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Delete an archived session for good (its Claude or pi conversation stays, and can be adopted again)
+    /// Delete an archived session for good (its Claude, pi or codex conversation stays, and can be adopted again)
     Rm {
         session: String,
         #[arg(short, long)]
@@ -198,7 +198,7 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["set", "append", "clear", "edit"])]
         unpin: bool,
     },
-    /// Give a Claude or pi session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
+    /// Give a Claude, pi or codex session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
     Retitle {
         session: String,
         /// As roster does on its own after a first turn: the agent's title,
@@ -274,7 +274,7 @@ struct SessionArgs {
     /// claude, pi, or an agent from [agents] in config.toml (default: the project's, else default_agent)
     #[arg(long)]
     agent: Option<String>,
-    /// Model for Claude or pi (default: the project's, else the agent's in config.toml, else its own)
+    /// Model for Claude, pi or codex (default: the project's, else the agent's in config.toml, else its own)
     #[arg(long)]
     model: Option<String>,
     /// Effort for Claude, thinking level for pi (default: the project's, else the agent's in config.toml, else its own)

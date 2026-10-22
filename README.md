@@ -113,6 +113,8 @@ lists every command.
 All files are optional and live in `~/.config/agent-roster/`:
 
 - `config.toml`:
+  - `default_agent`: the agent new sessions get unless their project names one
+    (default `claude`; `"pi"`, or any agent under `[agents]`).
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
   - `chats_dir`: where chats run (default inside roster's state directory).
   - `status_line`: `false` drops the line at the top while you're attached (it takes

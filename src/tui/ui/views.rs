@@ -40,7 +40,7 @@ pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
         .projects
         .iter()
         .map(|p| {
-            let mut defaults = p.defaults_label(&app.models.names);
+            let mut defaults = p.defaults_label(app.default_agent(), &app.models.names);
             if p.origin.join(crate::paths::PROJECT_ENV).exists() {
                 defaults.push_str(" · env file");
             }

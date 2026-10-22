@@ -50,9 +50,14 @@ pub struct Project {
 
 impl Project {
     /// Its defaults for new sessions, e.g. "claude · opus (Opus 5.5) · high": an
-    /// alias with what it last turned out to be (`models`).
-    pub fn defaults_label(&self, models: &std::collections::HashMap<String, String>) -> String {
-        let agent = self.agent.as_deref().unwrap_or(crate::agent::DEFAULT);
+    /// alias with what it last turned out to be (`models`); without an agent
+    /// of its own, `default_agent`.
+    pub fn defaults_label(
+        &self,
+        default_agent: &str,
+        models: &std::collections::HashMap<String, String>,
+    ) -> String {
+        let agent = self.agent.as_deref().unwrap_or(default_agent);
         let learned = |m: &str| models.get(&crate::agent::learned_key(agent, m));
         let model = self.model.as_ref().map(|m| match learned(m) {
             Some(name) if name != m => format!("{m} ({name})"),

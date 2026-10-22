@@ -263,7 +263,10 @@ impl Roster {
         if !origin.is_dir() {
             bail!("{} is not a directory", origin.display());
         }
-        let agent = defaults.agent.as_deref().unwrap_or(agent::DEFAULT);
+        let agent = defaults
+            .agent
+            .as_deref()
+            .unwrap_or(self.config.default_agent());
         agent::known(agent, &self.config)?;
         if let Some(effort) = &defaults.effort {
             agent::check_effort(agent, effort)?;
@@ -414,7 +417,7 @@ impl Roster {
         let agent = req
             .agent
             .or_else(|| project.agent.clone())
-            .unwrap_or_else(|| agent::DEFAULT.to_string());
+            .unwrap_or_else(|| self.config.default_agent().to_string());
         let adapter = agent::known(&agent, &self.config)?;
         if let Some(effort) = &req.effort {
             agent::check_effort(&agent, effort)?;

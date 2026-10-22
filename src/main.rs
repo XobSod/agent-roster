@@ -229,7 +229,7 @@ struct SessionArgs {
     /// The agent's name in the project, a role say (default: <agent>-1, <agent>-2, …)
     #[arg(short, long)]
     name: Option<String>,
-    /// claude, pi, or an agent from [agents] in config.toml (default: the project's)
+    /// claude, pi, or an agent from [agents] in config.toml (default: the project's, else default_agent)
     #[arg(long)]
     agent: Option<String>,
     /// Model for Claude or pi (default: the project's; "default" for the agent's own)

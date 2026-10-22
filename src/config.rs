@@ -4,6 +4,7 @@
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
 //! chats_dir = "~/chats"           # where chats run; default: roster's state directory
+//! default_agent = "pi"            # for new sessions, unless the project says; default claude
 //! status_line = false             # default true: while attached, a line at the top
 //!                                 # with the project, session and title
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
@@ -56,6 +57,8 @@ pub struct Config {
     pub fit_preview: Option<FitPreview>,
     /// While attached, a line at the top saying where you are (default on).
     pub status_line: Option<bool>,
+    /// The agent new sessions get unless the project or the user picks one.
+    pub default_agent: Option<String>,
 }
 
 /// Whether an agent drawing full screen (in the terminal's alternate screen,
@@ -284,6 +287,15 @@ impl Config {
             bail!("keys.detach must be a tmux key name such as \"C-q\", not {key:?}");
         }
         crate::keys::Keymap::new(&config.keys)?;
+        if let Some(agent) = &config.default_agent
+            && !crate::agent::BUILT_IN.contains(&agent.as_str())
+            && !config.agents.contains_key(agent)
+        {
+            bail!(
+                "default_agent {agent:?} isn't one roster knows: {} or one under [agents]",
+                crate::agent::BUILT_IN.join(", ")
+            );
+        }
         for (name, agent) in &config.agents {
             if agent.idle_after == Some(0) {
                 bail!("agents.{name}.idle_after must be at least 1 (seconds)");
@@ -294,6 +306,13 @@ impl Config {
 
     pub fn status_line(&self) -> bool {
         self.status_line.unwrap_or(true)
+    }
+
+    /// `default_agent`, else Claude.
+    pub fn default_agent(&self) -> &str {
+        self.default_agent
+            .as_deref()
+            .unwrap_or(crate::agent::CLAUDE)
     }
 
     pub fn agent(&self, name: &str) -> AgentConfig {
@@ -388,6 +407,20 @@ mod tests {
             format!("{:?}", config.keys),
             format!("{:?}", Keys::default())
         );
+    }
+
+    #[test]
+    fn the_default_agent_is_one_roster_knows() {
+        assert_eq!(Config::parse("").unwrap().default_agent(), "claude");
+        assert_eq!(
+            Config::parse("default_agent = \"pi\"")
+                .unwrap()
+                .default_agent(),
+            "pi"
+        );
+        let config = Config::parse("default_agent = \"aider\"\n[agents.aider]").unwrap();
+        assert_eq!(config.default_agent(), "aider");
+        assert!(Config::parse("default_agent = \"nope\"").is_err());
     }
 
     #[test]

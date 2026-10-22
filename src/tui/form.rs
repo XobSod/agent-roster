@@ -151,6 +151,11 @@ fn options(first: &str, rest: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// The first of `agents`: the default one, as `agent::available` lists them.
+fn first(agents: &[String]) -> &str {
+    agents.first().map_or("", String::as_str)
+}
+
 fn or_default(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| DEFAULT.to_string())
 }
@@ -189,7 +194,7 @@ impl Form {
                 Id::Agent,
                 "Agent",
                 Kind::Choice(agents.to_vec()),
-                agent::DEFAULT,
+                first(agents),
             ),
             model_field(DEFAULT),
             effort_field(DEFAULT),
@@ -228,7 +233,7 @@ impl Form {
                 Id::Agent,
                 "Agent",
                 Kind::Choice(agents.to_vec()),
-                p.agent.as_deref().unwrap_or(agent::DEFAULT),
+                p.agent.as_deref().unwrap_or(first(agents)),
             ),
             model_field(or_default(&p.model)),
             effort_field(or_default(&p.effort)),
@@ -257,7 +262,7 @@ impl Form {
                 Id::Agent,
                 "Agent",
                 Kind::Choice(agents.to_vec()),
-                agent::DEFAULT,
+                first(agents),
             ),
             // The agent's name in the project (a role, say); its title is
             // another thing, the task it's on.
@@ -418,6 +423,15 @@ impl Form {
         self.field(id).map_or("", |f| f.value.as_str())
     }
 
+    /// The default agent: the first of the Agent field's choices (as
+    /// `agent::available` lists them), else the agent it's about.
+    fn default_agent(&self) -> String {
+        match self.field(Id::Agent).map(|f| &f.kind) {
+            Some(Kind::Choice(agents)) if !agents.is_empty() => agents[0].clone(),
+            _ => self.agent().to_string(),
+        }
+    }
+
     /// The agent the form is about: its Agent field's.
     fn agent(&self) -> &str {
         self.field(Id::Agent).map_or(CLAUDE, |f| f.value.as_str())
@@ -501,9 +515,7 @@ impl Form {
                 let defaults = [
                     (
                         Id::Agent,
-                        p.agent
-                            .clone()
-                            .unwrap_or_else(|| agent::DEFAULT.to_string()),
+                        p.agent.clone().unwrap_or_else(|| self.default_agent()),
                     ),
                     (Id::Model, or_default(&p.model)),
                     (Id::Effort, or_default(&p.effort)),
@@ -629,7 +641,8 @@ impl Form {
             }
         };
         // A project's default agent: None for the default one.
-        let agent = || self.setting(Id::Agent).filter(|a| a != agent::DEFAULT);
+        let default = self.default_agent();
+        let agent = || self.setting(Id::Agent).filter(|a| *a != default);
         // Only for an agent that takes them.
         let takes = agent::adapter(self.agent()).choices().is_some();
         let model = || if takes { self.setting(Id::Model) } else { None };

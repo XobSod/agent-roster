@@ -133,7 +133,7 @@ pub fn list_projects(r: &Roster) -> Result<()> {
     let rows: Vec<Vec<String>> = projects
         .iter()
         .map(|p| {
-            let mut defaults = p.defaults_label(&models);
+            let mut defaults = p.defaults_label(r.config.default_agent(), &models);
             if chats == Some(p.id) {
                 defaults.push_str(" · built-in, for chats");
             }

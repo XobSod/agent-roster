@@ -157,6 +157,12 @@ impl App {
     }
 
     /// Whether starting a session of `agent` again resumes its conversation.
+    /// The agent new sessions get unless their project picks one: the first
+    /// of those that can be started (`agent::available`).
+    pub fn default_agent(&self) -> &str {
+        self.agents.first().map_or("", String::as_str)
+    }
+
     pub fn resumes(&self, agent: &str) -> bool {
         crate::agent::adapter(agent).resumes()
     }

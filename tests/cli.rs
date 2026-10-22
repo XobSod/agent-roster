@@ -364,7 +364,8 @@ fn pi_reports_through_rosters_extension() {
     let config = t.config_dir().join("config.toml");
     let mut text = fs::read_to_string(&config).unwrap();
     text.push_str(&format!("[agents.pi]\ncommand = \"{}\"\n", pi.display()));
-    fs::write(&config, text).unwrap();
+    // pi is what new sessions get unless they ask for another.
+    fs::write(&config, format!("default_agent = \"pi\"\n{text}")).unwrap();
     t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
     assert!(
         !t.run(&["new", "demo", "--agent", "pi", "--effort", "extreme"])
@@ -377,8 +378,6 @@ fn pi_reports_through_rosters_extension() {
     t.ok(&[
         "new",
         "demo",
-        "--agent",
-        "pi",
         "--name",
         "p",
         "--model",
@@ -534,6 +533,11 @@ fn first_prompts_are_typed_in_once_the_agent_is_ready() {
         (Some("opus"), Some("high"))
     );
     let id = s["id"].as_str().unwrap().to_string();
+    // (Once the stand-in has printed its arguments: on a busy machine that
+    // comes a moment after the session.)
+    t.wait_for("the agent's arguments", |t| {
+        t.ok(&["show", "c"]).contains("fake agent:")
+    });
     let screen = t.ok(&["show", "c"]);
     assert!(screen.contains("--model opus --effort high"), "{screen}");
     assert!(
@@ -576,8 +580,10 @@ fn first_prompts_are_typed_in_once_the_agent_is_ready() {
         "hello generic",
     ]);
     assert!(out.contains("Sent the first prompt"), "{out}");
-    assert!(t.ok(&["show", "g"]).contains("hello generic"));
-    // Model and effort are Claude's; a generic session doesn't keep them.
+    t.wait_for("the prompt in the generic agent", |t| {
+        t.ok(&["show", "g"]).contains("hello generic")
+    });
+    // A generic agent takes no model or effort, so its session doesn't keep them.
     assert_eq!(t.session("g", false).unwrap()["model"], Value::Null);
 }
 

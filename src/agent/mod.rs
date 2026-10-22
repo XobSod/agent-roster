@@ -40,9 +40,6 @@ use crate::stats::Transcript;
 pub use claude::CLAUDE;
 pub use pi::PI;
 
-/// The agent new sessions get unless the project or the user picks another.
-pub const DEFAULT: &str = CLAUDE;
-
 /// Agents with an adapter. Claude is always offered; the others once they're
 /// installed (their command is found) or configured.
 pub const BUILT_IN: &[&str] = &[CLAUDE, PI];
@@ -223,8 +220,9 @@ pub fn known(name: &str, config: &Config) -> Result<&'static dyn Adapter> {
     }
 }
 
-/// Agents that can be started: the built-in ones that are installed or
-/// configured (Claude always), then the others from the config.
+/// Agents that can be started: the default one first, then the built-in ones
+/// that are installed or configured (Claude always), then the others from the
+/// config.
 pub fn available(config: &Config) -> Vec<String> {
     let mut names: Vec<String> = BUILT_IN
         .iter()
@@ -238,6 +236,10 @@ pub fn available(config: &Config) -> Vec<String> {
             .filter(|n| !BUILT_IN.contains(&n.as_str()))
             .cloned(),
     );
+    if let Some(i) = names.iter().position(|n| n == config.default_agent()) {
+        let default = names.remove(i);
+        names.insert(0, default);
+    }
     names
 }
 
@@ -365,6 +367,17 @@ mod tests {
         assert!(known("pi", &config).unwrap().reports());
         assert_eq!(available(&config), ["claude", "pi"]);
         assert!(known("claude", &Config::default()).is_ok());
+    }
+
+    #[test]
+    fn the_default_agent_comes_first() {
+        let mut config = config_with("aider", AgentConfig::default());
+        config.default_agent = Some("aider".into());
+        assert_eq!(
+            available(&config).first().map(String::as_str),
+            Some("aider")
+        );
+        assert!(available(&config).contains(&"claude".to_string()));
     }
 
     #[test]

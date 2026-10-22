@@ -1,11 +1,13 @@
 # agent-roster
 
-A keyboard-first terminal manager for AI coding agent sessions (Claude Code for now).
+A keyboard-first terminal manager for AI coding agent sessions: Claude Code, pi, or
+any other CLI agent.
 Agents run in roster's own private tmux server; roster tracks whether each one is
 working, needs input, is idle or stopped, and whether you've seen its latest turn.
 
-Claude Code is tracked through its hooks; any other CLI agent can be added as a
-generic agent, tracked by its screen.
+Claude Code is tracked through its hooks, [pi](#pi) through a small extension roster
+loads into it; any other CLI agent can be added as a generic agent, tracked by its
+screen.
 
 ![roster: a finished turn read and given a follow-up, a question that came in meanwhile answered, and the follow-up coming back up](demo/gifs/roster.gif)
 
@@ -14,7 +16,7 @@ generic agent, tracked by its screen.
 
 ## Install
 
-Requires tmux ≥ 3.2 and Claude Code on `PATH`.
+Requires tmux ≥ 3.2 and Claude Code on `PATH`; pi is offered too once it's installed.
 
 ```sh
 cargo install --path .     # installs `roster` into ~/.cargo/bin
@@ -111,8 +113,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
   - `[keys]`: every TUI key, plus `detach` for Ctrl+Q.
-  - `[agents.claude] command`/`args`. Any other agent goes in its own table and is
-    then offered for new sessions:
+  - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
+    for pi's classic screen, `args = ["--tui-mode", "regular"]`). Any other agent goes
+    in its own table and is then offered for new sessions:
 
     ```toml
     [agents.aider]          # runs `aider`; or set command = "..."
@@ -129,6 +132,18 @@ All files are optional and live in `~/.config/agent-roster/`:
 
 State lives in `~/.local/state/agent-roster/`. Uninstall: remove the binary and both
 directories, and `tmux -L agent-roster kill-server`.
+
+## pi
+
+Roster starts [pi](https://github.com/earendil-works/pi) with an extension of its own,
+`-e ~/.local/state/agent-roster/pi/agent-roster.ts`, for its sessions only; your pi
+settings and extensions stay as they are. The extension reports pi's state to roster:
+working, idle, needs input while a dialog (an extension asking permission, say) holds
+up a turn. A session's model is anything pi's `--model` takes, its effort pi's
+thinking level, and its title the name you give pi's session (`/name`). `/new` starts
+a new conversation in the same session; starting it again resumes the last one
+(`--session-id`). The statistics come from pi's session file, cost included, with the
+context window pi reports for the model. Adopting conversations is for Claude's only.
 
 ## Scrolling back
 

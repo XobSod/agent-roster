@@ -352,13 +352,23 @@ impl Db {
             if let Some(s) = touched.get_mut(&e.session_id) {
                 let report = crate::agent::read_report(&s.agent, e.payload.as_deref());
                 s.apply(e, &report);
-                // Learn what the model asked for (or the default) turned out to be.
-                if let Some(model) = report.model {
-                    let asked = s.model.clone().unwrap_or_else(|| "default".into());
+                let mut learned = Vec::new();
+                // What the model asked for (or the default) turned out to be, as
+                // the agent started; switched to later, it isn't what was asked.
+                if let Some(model) = report.model.clone().filter(|_| e.kind == "session") {
+                    let asked = s.model.as_deref().unwrap_or("default");
+                    let key = crate::agent::learned_key(&s.agent, asked);
+                    learned.push((format!("model:{key}"), model));
+                }
+                // The context window of the model it's running, for the statistics.
+                if let (Some(window), Some(model)) = (report.context_window, &s.running_model) {
+                    learned.push((format!("window:{model}"), window.to_string()));
+                }
+                for (key, value) in learned {
                     tx.execute(
                         "INSERT INTO meta (key, value) VALUES (?1, ?2)
                          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                        [format!("model:{asked}"), model],
+                        [key, value],
                     )?;
                 }
             }
@@ -474,20 +484,36 @@ impl Db {
     }
 
     /// Learns what each alias (or the default) turned out to be from sessions
-    /// that know both; the most recent session wins. The default only from a
-    /// model Claude reported on starting: a resumed conversation keeps its own.
+    /// that know both, per agent (`agent::learned_key`); the most recent
+    /// session wins. The default only from a model the agent reported on
+    /// starting: a resumed conversation keeps its own.
     pub fn learn_model_names(&self) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value)
-             SELECT 'model:' || coalesce(model, 'default'), running_model FROM sessions s
+             SELECT 'model:' || CASE WHEN agent = ?1 THEN '' ELSE agent || ':' END
+                    || coalesce(model, 'default'), running_model FROM sessions s
              WHERE running_model IS NOT NULL
                AND (model IS NOT NULL OR EXISTS (
-                 SELECT 1 FROM events e WHERE e.session_id = s.id AND json_valid(e.payload)
+                 SELECT 1 FROM events e WHERE e.session_id = s.id AND e.kind = 'session'
+                   AND json_valid(e.payload)
                    AND json_extract(e.payload, '$.model') = s.running_model))
              ORDER BY coalesce(state_since, created_at)",
-            [],
+            [crate::agent::CLAUDE],
         )?;
         Ok(())
+    }
+
+    /// The context window an agent reported for `model`, if one did.
+    pub fn learned_window(&self, model: &str) -> Result<Option<u64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [format!("window:{model}")],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|v| v.parse().ok()))
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -791,6 +817,49 @@ mod tests {
         assert_eq!(
             db.session(&s.id).unwrap().running_model.as_deref(),
             Some("claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn learns_other_agents_models_apart_and_the_windows_they_report() {
+        let (mut db, claude) = db_with_session();
+        let mut pi = session("b1");
+        pi.project_id = claude.project_id;
+        pi.agent = "pi".into();
+        db.insert_session(&pi).unwrap();
+        let started = r#"{"model":"claude-opus-4-8","context_window":1000000}"#;
+        db.insert_event(&pi.id, "session", 10, Some(started))
+            .unwrap();
+        db.insert_event(
+            &claude.id,
+            "session",
+            10,
+            Some(r#"{"model":"claude-opus-5-5"}"#),
+        )
+        .unwrap();
+        // A model switched to later is what it runs, not what "default" means.
+        db.insert_event(&pi.id, "info", 20, Some(r#"{"model":"claude-haiku-4-5"}"#))
+            .unwrap();
+        db.fold_events(100).unwrap();
+        let names = db.model_names().unwrap();
+        assert_eq!(
+            (names["default"].as_str(), names["pi:default"].as_str()),
+            ("Opus 5.5", "Opus 4.8")
+        );
+        assert_eq!(
+            db.session(&pi.id).unwrap().running_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            db.learned_window("claude-opus-4-8").unwrap(),
+            Some(1_000_000)
+        );
+        assert_eq!(db.learned_window("claude-haiku-4-5").unwrap(), None);
+        db.learn_model_names().unwrap();
+        let names = db.model_names().unwrap();
+        assert_eq!(
+            (names["default"].as_str(), names["pi:default"].as_str()),
+            ("Opus 5.5", "Opus 4.8")
         );
     }
 

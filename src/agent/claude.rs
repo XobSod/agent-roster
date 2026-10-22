@@ -6,9 +6,10 @@ mod transcript;
 use std::fs;
 use std::path::Path;
 
+use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::{Adapter, Choices, Launch, Report};
+use super::{Adapter, Choices, Context, Launch, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -55,7 +56,7 @@ impl Adapter for Claude {
     }
 
     /// A new conversation, or its existing one resumed.
-    fn launch(&self, s: &Session, mut argv: Vec<String>, roster: &Path) -> Launch {
+    fn launch(&self, s: &Session, mut argv: Vec<String>, cx: &Context) -> Result<Launch> {
         // After the config's args, so the session's choice wins.
         if let Some(model) = &s.model {
             argv.extend(["--model".into(), model.clone()]);
@@ -99,11 +100,11 @@ impl Adapter for Claude {
                 id
             }
         };
-        argv.extend(["--settings".into(), settings(roster)]);
-        Launch {
+        argv.extend(["--settings".into(), settings(cx.roster)]);
+        Ok(Launch {
             argv,
             conversation_id: Some(conversation_id),
-        }
+        })
     }
 
     /// Hook payloads carry the current conversation, which changes after
@@ -116,6 +117,7 @@ impl Adapter for Claude {
             cleared: payload.get("source").and_then(Value::as_str) == Some("clear"),
             model: text(payload.get("model")),
             effort: text(payload.pointer("/effort/level")),
+            ..Report::default()
         }
     }
 
@@ -194,7 +196,7 @@ pub fn last_model_in(transcript: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tests::config_with;
+    use crate::agent::tests::{config_with, cx};
     use crate::agent::{check_effort, launch, read_report};
     use crate::config::AgentConfig;
     use crate::model::tests::session;
@@ -208,7 +210,7 @@ mod tests {
     #[test]
     fn first_start_assigns_a_conversation_id() {
         let s = session("a");
-        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), &cx("/bin/roster")).unwrap();
         assert_eq!(l.argv[0], "claude");
         assert_eq!(
             arg_after(&l.argv, "--session-id"),
@@ -226,11 +228,11 @@ mod tests {
         s.transcript_path = Some(transcript.to_string_lossy().into());
 
         // No transcript yet (e.g. right after /clear): reuse the ID as a new conversation.
-        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), &cx("/bin/roster")).unwrap();
         assert_eq!(arg_after(&l.argv, "--session-id"), Some("c-1"));
 
         std::fs::write(&transcript, "{}").unwrap();
-        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), &cx("/bin/roster")).unwrap();
         assert_eq!(arg_after(&l.argv, "--resume"), Some("c-1"));
         assert_eq!(l.conversation_id.as_deref(), Some("c-1"));
     }
@@ -245,7 +247,7 @@ mod tests {
         let l = launch(
             &session("a"),
             &config_with("claude", agent),
-            Path::new("/bin/roster"),
+            &cx("/bin/roster"),
         )
         .unwrap();
         assert_eq!(l.argv[..3], ["/opt/claude", "--model", "haiku"]);
@@ -253,12 +255,7 @@ mod tests {
 
     #[test]
     fn hooks_report_through_the_quoted_roster_path() {
-        let l = launch(
-            &session("a"),
-            &Config::default(),
-            Path::new("/my tools/roster"),
-        )
-        .unwrap();
+        let l = launch(&session("a"), &Config::default(), &cx("/my tools/roster")).unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(arg_after(&l.argv, "--settings").unwrap()).unwrap();
         let stop = &settings["hooks"]["Stop"][0]["hooks"][0]["command"];
@@ -274,7 +271,7 @@ mod tests {
         let mut s = session("a");
         s.conversation_id = Some("copy".into());
         s.fork_from = Some("original".into());
-        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), &cx("/bin/roster")).unwrap();
         let i = l.argv.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(
             l.argv[i..i + 5],
@@ -292,7 +289,7 @@ mod tests {
         let transcript = dir.path().join("copy.jsonl");
         std::fs::write(&transcript, "{}\n").unwrap();
         s.transcript_path = Some(transcript.to_string_lossy().into_owned());
-        let l = launch(&s, &Config::default(), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &Config::default(), &cx("/bin/roster")).unwrap();
         let i = l.argv.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(l.argv[i..i + 2], ["--resume", "copy"]);
         assert!(!l.argv.contains(&"--fork-session".to_string()));
@@ -307,7 +304,7 @@ mod tests {
         let mut s = session("a");
         s.model = Some("opus".into());
         s.effort = Some("high".into());
-        let l = launch(&s, &config_with("claude", agent), Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &config_with("claude", agent), &cx("/bin/roster")).unwrap();
         assert_eq!(
             l.argv[1..7],
             ["--model", "sonnet", "--model", "opus", "--effort", "high"]
@@ -330,7 +327,7 @@ mod tests {
                 transcript_path: Some("/t/c-1.jsonl".into()),
                 cleared: false,
                 model: Some("claude-opus-5-5[1m]".into()),
-                effort: None,
+                ..Report::default()
             }
         );
         let report = read_report(CLAUDE, Some(r#"{"session_id":"c-2","source":"clear"}"#));

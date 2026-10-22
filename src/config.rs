@@ -26,6 +26,8 @@
 //! [agents.claude]
 //! command = "claude"              # default: the agent's name, found on PATH
 //! args = ["--model", "haiku"]     # added to every launch
+//! [agents.pi]                     # pi is offered once installed; this only adds to it
+//! args = ["--tui-mode", "regular"]
 //!
 //! [agents.aider]                  # any other agent: state from its screen
 //! idle_after = 4                  # seconds without screen changes = idle

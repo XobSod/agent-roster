@@ -114,6 +114,8 @@ pub struct Form {
     projects: Vec<Project>,
     /// The project the session fields were last filled in from.
     filled_from: Option<String>,
+    /// What models asked for turned out to be (`Db::model_names`).
+    model_names: std::collections::HashMap<String, String>,
 }
 
 fn options(first: &str, rest: &[&str]) -> Vec<String> {
@@ -403,43 +405,18 @@ impl Form {
             note: None,
             projects,
             filled_from: None,
+            model_names: Default::default(),
         };
         form.update();
         form
     }
 
-    /// Adds what each model alias turned out to be, to show next to the choices.
-    /// What each model choice is: an alias as it turned out (`names`, learned
-    /// from sessions) or "latest" until known, a pinned id by its name.
+    /// What each model choice is, shown next to it: the default or an alias
+    /// as it turned out (`names`, learned from sessions; "latest" until known),
+    /// a pinned id by its name.
     pub fn with_model_names(mut self, names: &std::collections::HashMap<String, String>) -> Form {
-        let mut notes = std::collections::HashMap::new();
-        notes.insert(
-            DEFAULT.to_string(),
-            names
-                .get(DEFAULT)
-                .cloned()
-                .unwrap_or_else(|| "Claude's default".into()),
-        );
-        let choices = agent::BUILT_IN
-            .iter()
-            .filter_map(|a| agent::adapter(a).choices());
-        for c in choices {
-            for alias in c.aliases {
-                notes.insert(
-                    alias.to_string(),
-                    names
-                        .get(*alias)
-                        .cloned()
-                        .unwrap_or_else(|| "latest".into()),
-                );
-            }
-            for id in c.pinned {
-                notes.insert(id.to_string(), crate::util::model_name(id));
-            }
-        }
-        if let Some(field) = self.field_mut(Id::Model) {
-            field.notes = notes;
-        }
+        self.model_names = names.clone();
+        self.update();
         self
     }
 
@@ -471,6 +448,40 @@ impl Form {
         self.field(Id::Agent).map_or(CLAUDE, |f| f.value.as_str())
     }
 
+    /// What the agent's model choices are (see `with_model_names`).
+    fn model_notes(&self) -> std::collections::HashMap<String, String> {
+        let agent = self.agent();
+        let learned = |asked: &str| {
+            self.model_names
+                .get(&agent::learned_key(agent, asked))
+                .cloned()
+        };
+        let mut notes = std::collections::HashMap::new();
+        let mut name = agent.chars();
+        let name: String = name
+            .next()
+            .into_iter()
+            .flat_map(char::to_uppercase)
+            .chain(name)
+            .collect();
+        notes.insert(
+            DEFAULT.to_string(),
+            learned(DEFAULT).unwrap_or_else(|| format!("{name}'s default")),
+        );
+        if let Some(c) = agent::adapter(agent).choices() {
+            for alias in c.aliases {
+                notes.insert(
+                    alias.to_string(),
+                    learned(alias).unwrap_or_else(|| "latest".into()),
+                );
+            }
+            for id in c.pinned {
+                notes.insert(id.to_string(), crate::util::model_name(id));
+            }
+        }
+        notes
+    }
+
     /// The value, or None for "default" or empty.
     fn setting(&self, id: Id) -> Option<String> {
         let value = self.value(id).trim();
@@ -481,12 +492,14 @@ impl Form {
     fn update(&mut self) {
         // Model and effort choices are the agent's; one that takes neither hides them.
         let choices = agent::adapter(self.agent()).choices();
+        let notes = self.model_notes();
         if let Some(f) = self.field_mut(Id::Model) {
             f.hidden = choices.is_none();
             f.kind = Kind::Combo(options(
                 DEFAULT,
                 &choices.map_or(Vec::new(), |c| c.models()),
             ));
+            f.notes = notes;
         }
         if let Some(f) = self.field_mut(Id::Effort) {
             f.hidden = choices.is_none();

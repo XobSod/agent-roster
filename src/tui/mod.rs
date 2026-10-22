@@ -162,11 +162,15 @@ fn update_preview(roster: &Roster, app: &mut App) {
     app.stats = app
         .selected_session()
         .cloned()
-        .and_then(|s| agent_stats(app, &s));
+        .and_then(|s| agent_stats(roster, app, &s));
 }
 
 /// What the agent can tell about a session, its transcript read incrementally.
-fn agent_stats(app: &mut App, s: &crate::model::Session) -> Option<crate::stats::AgentStats> {
+fn agent_stats(
+    roster: &Roster,
+    app: &mut App,
+    s: &crate::model::Session,
+) -> Option<crate::stats::AgentStats> {
     if s.deleted_at.is_some() {
         return None;
     }
@@ -178,7 +182,7 @@ fn agent_stats(app: &mut App, s: &crate::model::Session) -> Option<crate::stats:
     }
     let reader = app.transcripts.get_mut(&s.id)?;
     reader.update().ok()?;
-    Some(reader.stats(s.running_model.as_deref()))
+    Some(roster.with_window(reader.stats(s.running_model.as_deref()), s))
 }
 
 /// A captured screen as styled text, without the empty lines below the content.

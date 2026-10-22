@@ -5,26 +5,30 @@
 //! a new conversation. A built-in agent has an `Adapter` that tells more: how
 //! to start and resume it, what its reports (hooks calling `roster report`)
 //! say, which models and efforts it takes, and where its transcript is.
-//! Adding one is a module here, implementing what it supports, and a line in
-//! `adapter`.
+//! Adding one is a module here, implementing what it supports, a line in
+//! `adapter` and its name in `BUILT_IN`.
 
 pub mod claude;
+pub mod pi;
 
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use serde::{Deserialize, Deserializer};
 
 use crate::config::Config;
 use crate::model::{QUIET_MS, Session};
 use crate::stats::Transcript;
 
 pub use claude::CLAUDE;
+pub use pi::PI;
 
 /// The agent new sessions get unless the project or the user picks another.
 pub const DEFAULT: &str = CLAUDE;
 
-/// Agents with an adapter, which can be started without configuring them.
-pub const BUILT_IN: &[&str] = &[CLAUDE];
+/// Agents with an adapter. Claude is always offered; the others once they're
+/// installed (their command is found) or configured.
+pub const BUILT_IN: &[&str] = &[CLAUDE, PI];
 
 /// What a built-in agent can do beyond running. Every method has a default for
 /// an agent that doesn't, so an adapter implements only what its agent supports.
@@ -51,12 +55,12 @@ pub trait Adapter: Sync {
     }
 
     /// The command line that starts `s`, given its command and the config's
-    /// arguments; the agent reports through `roster`.
-    fn launch(&self, _s: &Session, argv: Vec<String>, _roster: &Path) -> Launch {
-        Launch {
+    /// arguments.
+    fn launch(&self, _s: &Session, argv: Vec<String>, _cx: &Context) -> Result<Launch> {
+        Ok(Launch {
             argv,
             conversation_id: None,
-        }
+        })
     }
 
     /// What a report's payload says, in roster's terms.
@@ -85,6 +89,7 @@ impl Adapter for Generic {}
 pub fn adapter(name: &str) -> &'static dyn Adapter {
     match name {
         CLAUDE => &claude::Claude,
+        PI => &pi::Pi,
         _ => &Generic,
     }
 }
@@ -107,8 +112,11 @@ impl Choices {
 }
 
 /// What an agent reported besides its state: `Adapter::report` reads it from
-/// the payload, whatever its agent calls things.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// the payload, whatever its agent calls things. An agent whose reports roster
+/// writes itself (Pi's, through roster's extension) sends it as JSON with
+/// these names.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Report {
     /// The conversation it's on now (it changes when the agent clears it).
     pub conversation_id: Option<String>,
@@ -118,6 +126,16 @@ pub struct Report {
     /// The model and effort it's running.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// What it says it's working on; Some(None): it no longer says.
+    #[serde(deserialize_with = "present")]
+    pub title: Option<Option<String>>,
+    /// The context window of the model it's running, in tokens.
+    pub context_window: Option<u64>,
+}
+
+/// A field that's there, even as null (missing ones get the default, None).
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 /// What a report from agent `name` says; nothing if its payload isn't JSON.
@@ -128,16 +146,23 @@ pub fn read_report(name: &str, payload: Option<&str>) -> Report {
         .unwrap_or_default()
 }
 
+/// What an adapter may use to start its agent.
+pub struct Context<'a> {
+    /// roster's own executable, which the agent's hooks call (`roster report`).
+    pub roster: &'a Path,
+    /// roster's state directory, for files an adapter gives its agent.
+    pub state_dir: &'a Path,
+}
+
 pub struct Launch {
     pub argv: Vec<String>,
     /// The conversation the agent will use, to store with the session.
     pub conversation_id: Option<String>,
 }
 
-/// `name`'s adapter, if it's an agent that can be started: built in, or
-/// configured under `[agents.<name>]`.
+/// `name`'s adapter, if it's an agent that can be started (see `available`).
 pub fn known(name: &str, config: &Config) -> Result<&'static dyn Adapter> {
-    if BUILT_IN.contains(&name) || config.agents.contains_key(name) {
+    if offered(name, config) {
         Ok(adapter(name))
     } else {
         bail!(
@@ -147,9 +172,14 @@ pub fn known(name: &str, config: &Config) -> Result<&'static dyn Adapter> {
     }
 }
 
-/// Agents that can be started: the built-in ones, then the others from the config.
+/// Agents that can be started: the built-in ones that are installed or
+/// configured (Claude always), then the others from the config.
 pub fn available(config: &Config) -> Vec<String> {
-    let mut names: Vec<String> = BUILT_IN.iter().map(|n| n.to_string()).collect();
+    let mut names: Vec<String> = BUILT_IN
+        .iter()
+        .filter(|n| offered(n, config))
+        .map(|n| n.to_string())
+        .collect();
     names.extend(
         config
             .agents
@@ -158,6 +188,23 @@ pub fn available(config: &Config) -> Vec<String> {
             .cloned(),
     );
     names
+}
+
+fn offered(name: &str, config: &Config) -> bool {
+    name == CLAUDE
+        || config.agents.contains_key(name)
+        || (BUILT_IN.contains(&name) && crate::util::on_path(name))
+}
+
+/// The key under which what a model asked of `agent` (or "default") turned
+/// out to be is learned: Claude's as it is, as before there were other
+/// agents; another's after its name ("pi:default").
+pub fn learned_key(agent: &str, asked: &str) -> String {
+    if agent == CLAUDE {
+        asked.to_string()
+    } else {
+        format!("{agent}:{asked}")
+    }
 }
 
 /// Checks an effort against the ones `agent` takes. An agent that takes none
@@ -192,12 +239,12 @@ pub fn fits_preview(name: &str, config: &Config) -> bool {
 
 /// How to start `s` now: its command and the config's arguments, completed by
 /// its adapter (for Claude, a new conversation or its existing one resumed).
-pub fn launch(s: &Session, config: &Config, roster_exe: &Path) -> Result<Launch> {
+pub fn launch(s: &Session, config: &Config, cx: &Context) -> Result<Launch> {
     let adapter = known(&s.agent, config)?;
     let agent = config.agent(&s.agent);
     let mut argv = vec![agent.command.clone().unwrap_or_else(|| s.agent.clone())];
     argv.extend(agent.args.iter().cloned());
-    Ok(adapter.launch(s, argv, roster_exe))
+    adapter.launch(s, argv, cx)
 }
 
 #[cfg(test)]
@@ -212,11 +259,19 @@ mod tests {
         config
     }
 
+    /// A launch context with roster at `roster` and nowhere to keep files.
+    pub(super) fn cx(roster: &str) -> Context<'_> {
+        Context {
+            roster: Path::new(roster),
+            state_dir: Path::new("/nonexistent"),
+        }
+    }
+
     #[test]
     fn configured_agents_are_generic() {
         let mut s = session("a");
         s.agent = "codex".into();
-        assert!(launch(&s, &Config::default(), Path::new("/bin/roster")).is_err());
+        assert!(launch(&s, &Config::default(), &cx("/bin/roster")).is_err());
 
         let agent = AgentConfig {
             args: vec!["--quiet".into()],
@@ -224,7 +279,7 @@ mod tests {
             ..AgentConfig::default()
         };
         let config = config_with("codex", agent);
-        let l = launch(&s, &config, Path::new("/bin/roster")).unwrap();
+        let l = launch(&s, &config, &cx("/bin/roster")).unwrap();
         // The command defaults to the agent's name; no hooks, no conversation.
         assert_eq!(l.argv, ["codex", "--quiet"]);
         assert_eq!(l.conversation_id, None);
@@ -240,8 +295,48 @@ mod tests {
         assert!(!fits_preview("codex", &config) && !fits_preview("claude", &config));
         config.agents.get_mut("codex").unwrap().fit_preview = Some(crate::config::FitPreview::Auto);
         assert!(fits_preview("codex", &config) && !fits_preview("claude", &config));
-        assert_eq!(available(&config), ["claude", "codex"]);
+        // Built-in agents first: Claude, then Pi if it's installed here.
+        let expected: &[&str] = if crate::util::on_path("pi") {
+            &["claude", "pi", "codex"]
+        } else {
+            &["claude", "codex"]
+        };
+        assert_eq!(available(&config), expected);
         assert_eq!(idle_after_ms("codex", &config), 2000);
         assert_eq!(idle_after_ms("claude", &config), QUIET_MS);
+    }
+
+    #[test]
+    fn built_in_agents_are_offered_once_installed_or_configured() {
+        let mut config = Config::default();
+        config.agents.insert("pi".into(), AgentConfig::default());
+        assert!(known("pi", &config).unwrap().reports());
+        assert_eq!(available(&config), ["claude", "pi"]);
+        assert!(known("claude", &Config::default()).is_ok());
+    }
+
+    #[test]
+    fn models_are_learned_per_agent() {
+        assert_eq!(learned_key("claude", "opus"), "opus");
+        assert_eq!(learned_key("pi", "default"), "pi:default");
+    }
+
+    #[test]
+    fn reports_in_rosters_own_terms() {
+        let report: Report = serde_json::from_str(
+            r#"{"conversation_id":"c-1","cleared":true,"title":null,"context_window":200000,"extra":1}"#,
+        )
+        .unwrap();
+        assert_eq!(report.conversation_id.as_deref(), Some("c-1"));
+        assert!(report.cleared);
+        // A title that's gone is told apart from one not reported.
+        assert_eq!(report.title, Some(None));
+        assert_eq!(report.context_window, Some(200_000));
+        let report: Report = serde_json::from_str(r#"{"title":"Fix it"}"#).unwrap();
+        assert_eq!(report.title, Some(Some("Fix it".into())));
+        assert_eq!(
+            serde_json::from_str::<Report>("{}").unwrap(),
+            Report::default()
+        );
     }
 }

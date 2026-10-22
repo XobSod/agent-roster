@@ -461,7 +461,11 @@ impl Roster {
             .into_iter()
             .find(|p| p.id == s.project_id)
             .with_context(|| format!("{} has no project", s.label()))?;
-        let launch = agent::launch(&s, &self.config, &self.exe)?;
+        let cx = agent::Context {
+            roster: &self.exe,
+            state_dir: &self.paths.state_dir,
+        };
+        let launch = agent::launch(&s, &self.config, &cx)?;
         let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
         let argv = launch::wrap(
             &shell,
@@ -469,9 +473,11 @@ impl Roster {
             &project.origin.join(PROJECT_ENV),
             &launch.argv,
         );
+        // What an agent's hooks need to report (`roster report`).
         let env = [
             ("ROSTER_SESSION", s.id.clone()),
             ("ROSTER_DB", self.paths.db().to_string_lossy().into_owned()),
+            ("ROSTER_EXE", self.exe.to_string_lossy().into_owned()),
         ];
         let name = s.tmux_name();
         if self.tmux.panes()?.contains_key(&name) {
@@ -666,7 +672,24 @@ impl Roster {
         let path = Path::new(s.transcript_path.as_deref()?);
         let mut transcript = agent::adapter(&s.agent).transcript(path)?;
         transcript.update().ok()?;
-        Some(transcript.stats(s.running_model.as_deref()))
+        Some(self.with_window(transcript.stats(s.running_model.as_deref()), s))
+    }
+
+    /// `stats` with the context window the agent reported for the session's
+    /// model, when its transcript doesn't tell. A window smaller than what's in
+    /// use is the wrong one.
+    pub fn with_window(&self, mut stats: AgentStats, s: &Session) -> AgentStats {
+        if stats.context_limit.is_none()
+            && let (Some(used), Some(model)) = (stats.context_used, &s.running_model)
+        {
+            stats.context_limit = self
+                .db
+                .learned_window(model)
+                .ok()
+                .flatten()
+                .filter(|w| *w >= used);
+        }
+        stats
     }
 
     /// Asks Haiku for a title from the session's recent prompts and keeps it as

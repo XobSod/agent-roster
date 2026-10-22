@@ -53,13 +53,13 @@ enum Cmd {
         project: String,
         #[arg(short, long)]
         name: Option<String>,
-        /// claude, or an agent from [agents] in config.toml (default: the project's)
+        /// claude, pi, or an agent from [agents] in config.toml (default: the project's)
         #[arg(long)]
         agent: Option<String>,
-        /// Claude model (default: the project's; "default" for Claude's own)
+        /// Model for Claude or pi (default: the project's; "default" for the agent's own)
         #[arg(long)]
         model: Option<String>,
-        /// Claude effort (default: the project's; "default" for Claude's own)
+        /// Effort for Claude, thinking level for pi (default: the project's; "default" for the agent's own)
         #[arg(long)]
         effort: Option<String>,
         /// A first prompt, typed into the agent once it's ready
@@ -73,13 +73,13 @@ enum Cmd {
     Chat {
         #[arg(short, long)]
         name: Option<String>,
-        /// claude, or an agent from [agents] in config.toml (default: the chats project's)
+        /// claude, pi, or an agent from [agents] in config.toml (default: the chats project's)
         #[arg(long)]
         agent: Option<String>,
-        /// Claude model (default: the chats project's; "default" for Claude's own)
+        /// Model for Claude or pi (default: the chats project's; "default" for the agent's own)
         #[arg(long)]
         model: Option<String>,
-        /// Claude effort (default: the chats project's; "default" for Claude's own)
+        /// Effort for Claude, thinking level for pi (default: the chats project's; "default" for the agent's own)
         #[arg(long)]
         effort: Option<String>,
         /// A first prompt, typed into the agent once it's ready
@@ -130,10 +130,10 @@ enum Cmd {
         /// A title of your own ("" follows the agent's title again)
         #[arg(long)]
         title: Option<String>,
-        /// Claude model ("default" for Claude's own)
+        /// Model for Claude or pi ("default" for the agent's own)
         #[arg(long)]
         model: Option<String>,
-        /// Claude effort ("default" for Claude's own)
+        /// Effort for Claude, thinking level for pi ("default" for the agent's own)
         #[arg(long)]
         effort: Option<String>,
     },
@@ -198,7 +198,7 @@ enum Cmd {
     },
     /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
     Info { session: String },
-    /// Give a Claude session a fresh title, made by Haiku from its recent prompts
+    /// Give a Claude or pi session a fresh title, made by Haiku from its recent prompts
     Retitle { session: String },
     /// Mark a session read
     Read { session: String },
@@ -257,10 +257,10 @@ struct DefaultsArgs {
     /// Default agent for new sessions
     #[arg(long)]
     agent: Option<String>,
-    /// Default Claude model (opus, sonnet, haiku, fable, or a full name)
+    /// Default model: for Claude opus, sonnet, haiku, fable or a full name; for pi any it knows
     #[arg(long)]
     model: Option<String>,
-    /// Default Claude effort (low, medium, high, xhigh, max)
+    /// Default effort: for Claude low … max; for pi a thinking level, off … max
     #[arg(long)]
     effort: Option<String>,
 }

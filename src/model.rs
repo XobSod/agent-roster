@@ -53,7 +53,8 @@ impl Project {
     /// alias with what it last turned out to be (`models`).
     pub fn defaults_label(&self, models: &std::collections::HashMap<String, String>) -> String {
         let agent = self.agent.as_deref().unwrap_or(crate::agent::DEFAULT);
-        let model = self.model.as_ref().map(|m| match models.get(m) {
+        let learned = |m: &str| models.get(&crate::agent::learned_key(agent, m));
+        let model = self.model.as_ref().map(|m| match learned(m) {
             Some(name) if name != m => format!("{m} ({name})"),
             _ => m.clone(),
         });
@@ -105,7 +106,8 @@ pub struct Session {
     /// Screen activity up to this time has been seen by the user (or is the agent
     /// starting up); only later activity can make a session unread.
     pub baseline_at: Option<i64>,
-    /// What the agent says it's working on (for Claude, its terminal title).
+    /// What the agent says it's working on (Claude's terminal title, the name
+    /// pi's session was given).
     pub title: Option<String>,
     /// Passed to the agent on every start; None means its own default.
     pub model: Option<String>,
@@ -260,6 +262,9 @@ impl Session {
         }
         if let Some(effort) = &report.effort {
             self.running_effort = Some(effort.clone());
+        }
+        if let Some(title) = &report.title {
+            self.title = title.clone();
         }
         match e.kind.as_str() {
             // A prompt you submitted starts a turn.

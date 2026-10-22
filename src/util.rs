@@ -41,6 +41,21 @@ pub fn fnv1a(data: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+/// Whether `command` would run: an executable file at that path, or (a bare
+/// name) in a directory of `$PATH`.
+pub fn on_path(command: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let runs = |p: &std::path::Path| {
+        p.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if command.contains('/') {
+        return runs(std::path::Path::new(command));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| runs(&dir.join(command))))
+}
+
 /// A model id as Claude shows it: "claude-opus-5-5[1m]" → "Opus 5.5 (1M)",
 /// "claude-3-5-sonnet-20241022" → "Sonnet 3.5". Anything else stays as it is.
 pub fn model_name(id: &str) -> String {
@@ -151,6 +166,12 @@ pub fn clock(elapsed_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_commands_on_the_path() {
+        assert!(on_path("sh") && on_path("/bin/sh"));
+        assert!(!on_path("no-such-command-here") && !on_path("/no/such/sh"));
+    }
 
     #[test]
     fn quotes_single_quotes() {

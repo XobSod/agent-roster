@@ -264,9 +264,11 @@ fn generic_agents_are_tracked_by_their_screen() {
     t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
 
     let out = t.run(&["new", "demo", "--agent", "nope"]);
+    // (pi among them if it's installed here.)
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .contains("unknown agent \"nope\" (available: claude, echo)")
+        err.contains("unknown agent \"nope\" (available: claude, ") && err.contains(" echo)"),
+        "{err}"
     );
 
     t.ok(&["new", "demo", "--agent", "echo", "--name", "g"]);
@@ -322,6 +324,140 @@ fn generic_agents_are_tracked_by_their_screen() {
     t.wait_for("the new conversation", |t| {
         t.ok(&["show", "g"]).contains("generic agent ready")
     });
+}
+
+/// Stand-in for pi: reports to roster the way roster's extension does, and
+/// keeps a session file like pi's. A line `name …` names its session.
+const FAKE_PI: &str = r#"#!/bin/sh
+id=; extension=; prev=
+for a in "$@"; do
+  case "$prev" in --session-id) id=$a ;; -e) extension=$a ;; esac
+  prev=$a
+done
+echo "fake pi: $*"
+[ -f "$extension" ] && echo "with the extension"
+file="$PWD/.pi-$id.jsonl"
+report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
+report session "{\"conversation_id\":\"$id\",\"transcript_path\":\"$file\",\"model\":\"fake-model-1\",\"effort\":\"high\",\"title\":null,\"context_window\":200000}"
+while read -r line; do
+  report prompt '{}'
+  echo "got: $line"
+  printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"%s"}]}}\n' "$line" >> "$file"
+  printf '{"type":"message","message":{"role":"assistant","usage":{"input":10,"output":5,"cacheRead":100,"cost":{"total":0.5}}}}\n' >> "$file"
+  case "$line" in "name "*) report info "{\"title\":\"${line#name }\"}" ;; esac
+  report idle '{}'
+done
+"#;
+
+#[test]
+fn pi_reports_through_rosters_extension() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("pi") else {
+        return;
+    };
+    let pi = t.path("fake-pi");
+    fs::write(&pi, FAKE_PI).unwrap();
+    fs::set_permissions(&pi, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("[agents.pi]\ncommand = \"{}\"\n", pi.display()));
+    fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    assert!(
+        !t.run(&["new", "demo", "--agent", "pi", "--effort", "extreme"])
+            .status
+            .success()
+    );
+
+    // Started with its model, thinking level, conversation and roster's
+    // extension; it reports its session, then gets the first prompt.
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "pi",
+        "--name",
+        "p",
+        "--model",
+        "fake-model-1",
+        "--effort",
+        "high",
+        "--prompt",
+        "fix the tests",
+    ]);
+    t.wait_for("the first prompt's turn", |t| {
+        let s = t.session("p", false).unwrap();
+        s["state"] == "idle" && s["unread"] == true
+    });
+    let s = t.session("p", false).unwrap();
+    let conversation = s["conversation_id"].as_str().unwrap().to_string();
+    let screen = t.ok(&["show", "p"]);
+    let extension = t.path("state/agent-roster/pi/agent-roster.ts");
+    assert!(
+        screen.contains(&format!(
+            "--model fake-model-1 --thinking high --session-id {conversation} -e {}",
+            extension.display()
+        )) && screen.contains("with the extension")
+            && screen.contains("got: fix the tests"),
+        "{screen}"
+    );
+    assert!(
+        fs::read_to_string(&extension)
+            .unwrap()
+            .contains("report(\"session\"")
+    );
+    assert_eq!(
+        (&s["agent"], &s["running_model"], &s["effort"]),
+        (
+            &Value::from("pi"),
+            &Value::from("fake-model-1"),
+            &Value::from("high")
+        )
+    );
+
+    // Statistics from its session file, with the context window it reported.
+    let info = t.ok(&["info", "p"]);
+    assert!(
+        info.contains("1 prompt") && info.contains("context 115/200k") && info.contains("$0.50"),
+        "{info}"
+    );
+
+    // Naming its session titles it.
+    let target = format!("=r-{}:", s["id"].as_str().unwrap());
+    Command::new("tmux")
+        .args([
+            "-L",
+            &t.socket,
+            "send-keys",
+            "-t",
+            &target,
+            "-l",
+            "name Fix the parser",
+        ])
+        .output()
+        .unwrap();
+    Command::new("tmux")
+        .args(["-L", &t.socket, "send-keys", "-t", &target, "Enter"])
+        .output()
+        .unwrap();
+    t.wait_for("the title", |t| {
+        t.session("p", false).unwrap()["title"] == "Fix the parser"
+    });
+
+    // It resumes: a restart opens the same conversation, without asking.
+    t.ok(&["restart", "p"]);
+    t.wait_for("the restart", |t| {
+        let screen = t.ok(&["show", "p"]);
+        screen.contains("fake pi:") && !screen.contains("got:")
+    });
+    assert!(
+        t.ok(&["show", "p"])
+            .contains(&format!("--session-id {conversation}"))
+    );
+    assert_eq!(
+        t.session("p", false).unwrap()["conversation_id"],
+        conversation.as_str()
+    );
 }
 
 #[test]

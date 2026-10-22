@@ -395,10 +395,11 @@ fn badge(project: &str) -> Span<'static> {
 }
 
 fn glyph(agent: &str) -> Span<'static> {
-    if agent == crate::agent::CLAUDE {
-        Span::styled("✱", Style::new().fg(CLAUDE))
-    } else {
-        Span::styled("◇", Style::new().fg(MUTED))
+    match agent {
+        crate::agent::CLAUDE => Span::styled("✱", Style::new().fg(CLAUDE)),
+        // Pi's logo is in plain black and white.
+        crate::agent::PI => Span::raw("π"),
+        _ => Span::styled("◇", Style::new().fg(MUTED)),
     }
 }
 

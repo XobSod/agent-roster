@@ -317,11 +317,14 @@ impl Config {
         self.status_line.unwrap_or(true)
     }
 
-    /// `default_agent`, else Claude.
+    /// The agent sessions get unless their project picks one: `default_agent`
+    /// if it can be started (a config shared between machines can name one
+    /// that isn't installed on this one), else Claude.
     pub fn default_agent(&self) -> &str {
-        self.default_agent
-            .as_deref()
-            .unwrap_or(crate::agent::CLAUDE)
+        match &self.default_agent {
+            Some(agent) if crate::agent::offered(agent, self) => agent,
+            _ => crate::agent::CLAUDE,
+        }
     }
 
     pub fn agent(&self, name: &str) -> AgentConfig {
@@ -465,11 +468,17 @@ mod tests {
     fn the_default_agent_is_one_roster_knows() {
         assert_eq!(Config::parse("").unwrap().default_agent(), "claude");
         assert_eq!(
-            Config::parse("default_agent = \"pi\"")
+            Config::parse("default_agent = \"pi\"\n[agents.pi]")
                 .unwrap()
                 .default_agent(),
             "pi"
         );
+        // pi, on a machine without it: Claude.
+        let mut config = Config::parse("default_agent = \"pi\"").unwrap();
+        config.agents.clear();
+        if !crate::util::on_path("pi") {
+            assert_eq!(config.default_agent(), "claude");
+        }
         let config = Config::parse("default_agent = \"aider\"\n[agents.aider]").unwrap();
         assert_eq!(config.default_agent(), "aider");
         assert!(Config::parse("default_agent = \"nope\"").is_err());

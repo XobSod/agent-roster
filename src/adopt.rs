@@ -128,7 +128,8 @@ impl Roster {
             s.transcript_path = transcript_path;
             s.fork_from = fork_from;
             s.title = c.title.clone();
-            // A name it was given is like a title of your own.
+            // A name it was given is like a title of your own (pi's is its
+            // title, which it reports itself).
             s.title_override = c.custom_title.clone();
             // What it last ran on, which resuming keeps, unless another is asked for.
             if s.model.is_none() {
@@ -162,7 +163,7 @@ pub struct Adopt {
     /// None: the project's default; Some(None): Claude's own.
     pub model: Option<Option<String>>,
     pub effort: Option<Option<String>>,
-    /// Adopt a copy (`--fork-session`) and leave the original alone.
+    /// Adopt a copy (the agent forks it) and leave the original alone.
     pub fork: bool,
     /// Adopt it even though it's open in its agent.
     pub force: bool,

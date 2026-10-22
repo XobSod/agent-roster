@@ -450,8 +450,9 @@ fn pi_reports_through_rosters_extension() {
         .args(["-L", &t.socket, "send-keys", "-t", &target, "Enter"])
         .output()
         .unwrap();
-    t.wait_for("the title", |t| {
-        t.session("p", false).unwrap()["title"] == "Fix the parser"
+    t.wait_for("the title, and the turn's end", |t| {
+        let s = t.session("p", false).unwrap();
+        s["title"] == "Fix the parser" && s["state"] == "idle"
     });
 
     // It resumes: a restart opens the same conversation, without asking.

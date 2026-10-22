@@ -126,7 +126,8 @@ All files are optional and live in `~/.config/agent-roster/`:
   config kept in dotfiles stays there). Roster also reads the file again when it
   changes, after an editor or a `git pull`, say. The settings:
   - `default_agent`: the agent new sessions get unless their project names one
-    (default `claude`; `"pi"`, or any agent under `[agents]`).
+    (default `claude`; `"pi"`, or any agent under `[agents]`). On a machine where
+    it isn't installed, Claude.
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
   - `chats_dir`: where chats run (default inside roster's state directory).
   - `status_line`: `false` drops the line at the top while you're attached (it takes

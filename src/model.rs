@@ -134,6 +134,11 @@ pub struct Session {
     pub fork_from: Option<String>,
 }
 
+/// The kind of event roster records with a title it made for a session's
+/// conversation (`Roster::auto_title`), in roster's own terms (`Report`):
+/// folded in with the agents' reports, so no save of the session overwrites it.
+pub const AUTO_TITLE: &str = "auto-title";
+
 /// A status change reported by an agent hook through `roster report <kind>`.
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -287,6 +292,21 @@ impl Session {
         if self.deleted_at.is_some() {
             return;
         }
+        if e.kind == AUTO_TITLE {
+            // Unless it's on another conversation by now, or has a title.
+            if report.conversation_id.is_some()
+                && report.conversation_id == self.conversation_id
+                && self.title().is_none()
+            {
+                self.title = report.title.clone().flatten();
+            }
+            return;
+        }
+        // On another conversation than it was.
+        let moved_on = report
+            .conversation_id
+            .as_ref()
+            .is_some_and(|id| self.conversation_id.as_ref() != Some(id));
         if let Some(id) = &report.conversation_id {
             self.conversation_id = Some(id.clone());
         }
@@ -297,13 +317,22 @@ impl Session {
         if report.cleared {
             self.title = None;
         }
+        // A copy that has moved on to another conversation isn't to be made
+        // of the original again.
+        if report.cleared || moved_on {
+            self.fork_from = None;
+        }
         if let Some(model) = &report.model {
             self.running_model = Some(model.clone());
         }
         if let Some(effort) = &report.effort {
             self.running_effort = Some(effort.clone());
         }
-        if let Some(title) = &report.title {
+        // The agent starting again on the conversation without a name for it
+        // (pi, which roster made the title of) leaves the title it has.
+        if let Some(title) = &report.title
+            && (title.is_some() || moved_on || e.kind != "session")
+        {
             self.title = title.clone();
         }
         match e.kind.as_str() {
@@ -496,6 +525,81 @@ pub mod tests {
         s.apply(&event("session", 10), &report);
         assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
         assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn starting_again_keeps_the_title_a_conversation_has() {
+        let mut s = session("a");
+        s.agent = "pi".into();
+        s.conversation_id = Some("c-1".into());
+        s.title = Some("Parser fixes".into());
+        // pi again on c-1, which it has no name for: roster's title stays.
+        let again = Report {
+            conversation_id: Some("c-1".into()),
+            title: Some(None),
+            ..Report::default()
+        };
+        s.apply(&event("session", 10), &again);
+        assert_eq!(s.title.as_deref(), Some("Parser fixes"));
+        // On another (/resume): that one's title, none.
+        let other = Report {
+            conversation_id: Some("c-2".into()),
+            title: Some(None),
+            ..Report::default()
+        };
+        s.apply(&event("session", 20), &other);
+        assert_eq!(s.title, None);
+        // A name taken away in pi is taken away.
+        s.title = Some("Named".into());
+        s.apply(
+            &event("info", 30),
+            &Report {
+                title: Some(None),
+                ..Report::default()
+            },
+        );
+        assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn a_copy_that_moves_on_isnt_forked_again() {
+        let mut s = session("a");
+        s.conversation_id = Some("copy".into());
+        s.fork_from = Some("original".into());
+        // The copy starting: still to be made until it has a file.
+        let started = Report {
+            conversation_id: Some("copy".into()),
+            ..Report::default()
+        };
+        s.apply(&event("session", 10), &started);
+        assert_eq!(s.fork_from.as_deref(), Some("original"));
+        let fresh = Report {
+            conversation_id: Some("new".into()),
+            cleared: true,
+            ..Report::default()
+        };
+        s.apply(&event("session", 20), &fresh);
+        assert_eq!(s.fork_from, None);
+    }
+
+    #[test]
+    fn a_made_title_is_for_its_conversation_only() {
+        let made = |conversation: &str| Report {
+            conversation_id: Some(conversation.into()),
+            title: Some(Some("Parser fixes".into())),
+            ..Report::default()
+        };
+        let mut s = session("a");
+        s.conversation_id = Some("c-2".into());
+        s.apply(&event(AUTO_TITLE, 10), &made("c-1"));
+        assert_eq!(s.title, None);
+        s.apply(&event(AUTO_TITLE, 10), &made("c-2"));
+        assert_eq!(s.title.as_deref(), Some("Parser fixes"));
+        assert_eq!(s.last_event_at, None);
+        // One it got meanwhile stays.
+        s.title = Some("Named".into());
+        s.apply(&event(AUTO_TITLE, 20), &made("c-2"));
+        assert_eq!(s.title.as_deref(), Some("Named"));
     }
 
     #[test]

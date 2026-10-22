@@ -334,7 +334,9 @@ pub fn available(config: &Config) -> Vec<String> {
     names
 }
 
-fn offered(name: &str, config: &Config) -> bool {
+/// Whether `name` can be started: Claude, an agent config.toml has, or a
+/// built-in one that's installed.
+pub(crate) fn offered(name: &str, config: &Config) -> bool {
     name == CLAUDE
         || config.agents.contains_key(name)
         || (BUILT_IN.contains(&name) && crate::util::on_path(name))

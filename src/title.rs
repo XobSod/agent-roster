@@ -22,11 +22,19 @@ impl Roster {
     }
 
     /// `generate_title` for an agent that doesn't name its task itself,
-    /// after its first turn: kept as the agent's title, unless it got one
-    /// meanwhile, so a name given in the agent (pi's `/name`) replaces it.
+    /// after its first turn: kept as the agent's title, so a name given in
+    /// the agent (pi's `/name`) replaces it; unless it got one meanwhile or
+    /// is on another conversation by then (the model takes a while).
     pub fn auto_title(&mut self, id: &str) -> Result<String> {
+        let conversation = self.db.session(id)?.conversation_id;
         let title = self.make_title(id)?;
-        self.db.set_title_if_none(id, &title)?;
+        let made = serde_json::json!({ "conversation_id": conversation, "title": title });
+        self.db.insert_event(
+            id,
+            crate::model::AUTO_TITLE,
+            crate::util::now_ms(),
+            Some(&made.to_string()),
+        )?;
         Ok(title)
     }
 

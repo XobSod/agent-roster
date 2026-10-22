@@ -75,7 +75,7 @@ enum Cmd {
         /// holding its directory, else a new one named after the directory)
         #[arg(long)]
         project: Option<String>,
-        /// The agent's name in the project (default: claude-1, claude-2, …)
+        /// The agent's name in the project (default: its agent's and a number, claude-1, pi-2, …)
         #[arg(long)]
         name: Option<String>,
         /// Claude model (default: the project's; "default" for Claude's own)

@@ -394,7 +394,15 @@ impl Db {
                 };
             }
             if let Some(s) = touched.get_mut(&e.session_id) {
-                let report = crate::agent::read_report(&s.agent, e.payload.as_deref());
+                let report = match e.kind.as_str() {
+                    // roster's own, in its own terms.
+                    crate::model::AUTO_TITLE => e
+                        .payload
+                        .as_deref()
+                        .and_then(|p| serde_json::from_str(p).ok())
+                        .unwrap_or_default(),
+                    _ => crate::agent::read_report(&s.agent, e.payload.as_deref()),
+                };
                 s.apply(e, &report);
                 let mut learned = Vec::new();
                 // What the model asked for (or the default) turned out to be, as
@@ -550,17 +558,6 @@ impl Db {
         Ok(changed > 0)
     }
 
-    /// Sets `id`'s title (the agent's) unless it got one meanwhile, of the
-    /// agent's or of your own.
-    pub fn set_title_if_none(&self, id: &str, title: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET title = ?2
-             WHERE id = ?1 AND title IS NULL AND title_override IS NULL",
-            [id, title],
-        )?;
-        Ok(())
-    }
-
     /// The context window an agent reported for `model`, if one did.
     pub fn learned_window(&self, model: &str) -> Result<Option<u64>> {
         Ok(self
@@ -587,7 +584,6 @@ impl Db {
             .unwrap_or(0))
     }
 
-    #[cfg(test)]
     pub fn insert_event(
         &self,
         session: &str,

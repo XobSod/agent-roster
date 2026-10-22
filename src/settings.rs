@@ -361,21 +361,26 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         FitPreview::Auto => "auto",
         FitPreview::Never => "never",
     };
+    // The one asked for, among the choices even if it can't be started.
+    let asked = default_agent.as_deref().unwrap_or(agent::CLAUDE);
     let mut agents: Vec<&str> = cx.agents.iter().map(String::as_str).collect();
-    if !agents.contains(&config.default_agent()) {
-        agents.insert(0, config.default_agent());
+    if !agents.contains(&asked) {
+        agents.insert(0, asked);
     }
+    let default_doc = if asked == config.default_agent() {
+        "the agent new sessions get unless their project picks one".to_string()
+    } else {
+        format!(
+            "the agent new sessions get unless their project picks one; {asked} isn't installed, so {}",
+            config.default_agent()
+        )
+    };
     let general = Section {
         title: "General".into(),
         agent: None,
         table: None,
         settings: vec![
-            choice(
-                &["default_agent"],
-                &agents,
-                default_agent.as_deref().unwrap_or(agent::CLAUDE),
-                "the agent new sessions get unless their project picks one",
-            ),
+            choice(&["default_agent"], &agents, asked, &default_doc),
             bool_setting(
                 &["status_line"],
                 status_line.unwrap_or(true),

@@ -310,7 +310,7 @@ pub(super) fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
     let width = inner.width as usize;
 
     let scope = match (picker.all, picker.outside()) {
-        (true, _) => "all of Claude's conversations".to_string(),
+        (true, _) => "all the agents' conversations".to_string(),
         (false, 0) => "in your projects".to_string(),
         (false, n) => format!("in your projects ({n} more elsewhere)"),
     };

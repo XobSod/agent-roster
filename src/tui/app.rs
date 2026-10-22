@@ -173,7 +173,6 @@ impl App {
         }
     }
 
-    /// Whether starting a session of `agent` again resumes its conversation.
     /// The agents that can be started, after a change of settings.
     pub fn set_agents(&mut self, agents: Vec<String>) {
         self.agents = agents;
@@ -185,6 +184,7 @@ impl App {
         self.agents.first().map_or("", String::as_str)
     }
 
+    /// Whether starting a session of `agent` again resumes its conversation.
     pub fn resumes(&self, agent: &str) -> bool {
         crate::agent::adapter(agent).resumes()
     }

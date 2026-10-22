@@ -83,11 +83,16 @@ impl Adapter for Pi {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let extension = write_extension(cx.state_dir)?;
-        let has_file = s
-            .transcript_path
-            .as_deref()
-            .is_some_and(|p| Path::new(p).exists());
-        if let Some(from) = s.fork_from.as_ref().filter(|_| !has_file) {
+        // pi makes the copy's file as it starts, before it reports it: it
+        // may have one roster hasn't heard of (and refuses to fork onto it).
+        let has_file = || {
+            s.transcript_path
+                .as_deref()
+                .is_some_and(|p| Path::new(p).exists())
+                || conversations::sessions_dir()
+                    .is_some_and(|dir| conversations::session_file(&dir, &id).is_some())
+        };
+        if let Some(from) = s.fork_from.as_ref().filter(|_| !has_file()) {
             argv.extend(["--fork".into(), from.clone()]);
         }
         argv.extend([

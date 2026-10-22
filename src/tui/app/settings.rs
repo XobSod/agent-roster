@@ -35,10 +35,17 @@ impl App {
         self.all_settings().get(self.setting_row).copied()
     }
 
-    /// The view's own keys, before the keymap's: Some if `e` was one.
+    /// The view's own keys, before the keymap's: Some if `e` was one. Keys
+    /// you bound to move or change (`keys.up = "e"`) stay yours.
     pub(super) fn on_settings_key(&mut self, e: &KeyEvent) -> Option<Option<Op>> {
         if !e.modifiers.is_empty() && e.modifiers != ratatui::crossterm::event::KeyModifiers::SHIFT
         {
+            return None;
+        }
+        if matches!(
+            self.keymap.top(e),
+            Some(Action::Up | Action::Down | Action::Confirm | Action::Collapse | Action::Expand)
+        ) {
             return None;
         }
         match e.code {
@@ -117,7 +124,8 @@ impl App {
     }
 
     /// A key pressed for a key setting waiting for one: it, or one more; Esc
-    /// leaves it as it was, Backspace leaves none.
+    /// leaves it as it was, Backspace leaves none (the back key, which can't
+    /// be none, is left as it was by Backspace and C-c too).
     pub(super) fn on_captured_key(&mut self, capture: Capture, e: &KeyEvent) -> Option<Op> {
         let kind = self
             .all_settings()
@@ -125,12 +133,32 @@ impl App {
             .find(|s| s.dotted() == capture.setting)
             .map(|s| (s.kind.clone(), s.input.clone()));
         let (kind, current) = kind?;
-        let key = crate::keys::Key::from_event(e).label();
+        let key = crate::keys::Key::from_event(e);
+        let back_key = kind == Kind::TmuxKey;
+        let ctrl_c = e.code == KeyCode::Char('c')
+            && e.modifiers
+                .contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+        if e.code == KeyCode::Esc || (back_key && (e.code == KeyCode::Backspace || ctrl_c)) {
+            return None;
+        }
+        let name = if back_key {
+            key.tmux_name()
+        } else {
+            key.name()
+        };
+        let Some(name) = name else {
+            self.capturing = Some(capture);
+            self.fail("roster has no name for that key: press another, or Esc");
+            return None;
+        };
         let input = match e.code {
-            KeyCode::Esc => return None,
             KeyCode::Backspace if kind == Kind::Keys => String::new(),
-            _ if capture.add && !current.is_empty() => format!("{current} {key}"),
-            _ => key,
+            _ if capture.add && current.split_whitespace().any(|k| k == name) => {
+                self.flash(format!("{name} is one of its keys already"));
+                return None;
+            }
+            _ if capture.add && !current.is_empty() => format!("{current} {name}"),
+            _ => name,
         };
         Some(Op::ChangeSetting {
             setting: capture.setting,

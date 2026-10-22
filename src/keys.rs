@@ -180,15 +180,39 @@ impl Key {
 
     /// How hints show the key.
     pub fn label(&self) -> String {
+        self.name().unwrap_or_else(|| "?".into())
+    }
+
+    /// The key as config.toml names it, if it has a name.
+    pub fn name(&self) -> Option<String> {
         let base = match self.code {
             KeyCode::Char(' ') => "Space".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::F(n) => format!("F{n}"),
-            code => NAMED
-                .iter()
-                .find(|(_, c)| *c == code)
-                .map_or("?".to_string(), |(n, _)| n.to_string()),
+            code => NAMED.iter().find(|(_, c)| *c == code)?.0.to_string(),
         };
+        Some(self.modified(&base))
+    }
+
+    /// The key as tmux names it (`keys.detach`), if it has a name.
+    pub fn tmux_name(&self) -> Option<String> {
+        let base = match self.code {
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::F(n) => format!("F{n}"),
+            KeyCode::Backspace => "BSpace".into(),
+            KeyCode::BackTab => "BTab".into(),
+            KeyCode::Esc => "Escape".into(),
+            KeyCode::Delete => "DC".into(),
+            KeyCode::Insert => "IC".into(),
+            KeyCode::PageUp => "PPage".into(),
+            KeyCode::PageDown => "NPage".into(),
+            code => NAMED.iter().find(|(_, c)| *c == code)?.0.to_string(),
+        };
+        Some(self.modified(&base))
+    }
+
+    fn modified(&self, base: &str) -> String {
         format!(
             "{}{}{base}",
             if self.ctrl { "C-" } else { "" },

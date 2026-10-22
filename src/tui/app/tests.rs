@@ -749,6 +749,36 @@ fn the_settings_view_changes_settings() {
         "Esc leaves it as it was"
     );
     assert_eq!(app.mode, Mode::Settings);
+    // A key already among them isn't added again.
+    keys(&mut app, "a");
+    assert_eq!(keys(&mut app, "x"), None);
+    assert!(app.capturing.is_none());
+    // The back key: by tmux's name for it; Backspace and C-c leave it as it
+    // was; a key with no name waits for another.
+    select(&mut app, "keys.detach");
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+        None
+    );
+    assert!(app.capturing.is_none());
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        None
+    );
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(app.on_key(key(KeyCode::KeypadBegin)), None);
+    assert!(app.capturing.is_some());
+    assert_eq!(
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        Some(change("keys.detach", Some("C-b")))
+    );
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT)),
+        Some(change("keys.detach", Some("M-PPage")))
+    );
     // Text is typed.
     select(&mut app, "agents.claude.title_model");
     app.on_key(key(KeyCode::Enter));

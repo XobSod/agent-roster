@@ -32,6 +32,7 @@ use crate::adopt::Adopt;
 use crate::agent;
 use crate::engine::{Defaults, NewSession, Roster};
 use crate::keys::{Action, Keymap, Menu};
+use crate::settings::Reloaded;
 use app::{App, Mode};
 use list::{Entry, EntryKey, Group};
 use op::Op;
@@ -166,11 +167,17 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
 /// (and config.toml, if it changed).
 fn reload(roster: &mut Roster, app: &mut App) {
     match roster.reload_config() {
-        Ok(true) => {
+        Ok(Reloaded::InUse(None)) => {
             use_config(roster, app);
             app.flash("config.toml changed: its settings are in use");
         }
-        Ok(false) => {}
+        Ok(Reloaded::InUse(Some(e))) => {
+            use_config(roster, app);
+            app.fail(format!(
+                "config.toml's settings are in use, but roster's tmux didn't take them: {e:#}"
+            ));
+        }
+        Ok(Reloaded::Same) => {}
         // What matters first: a long message is cut at its end.
         Err(e) => app.fail(format!(
             "config.toml has an error, the settings in use stay: {e:#}"
@@ -302,8 +309,12 @@ fn perform(
     let outcome: Result<String> = match op {
         Op::ChangeSetting { setting, input } => {
             let back = input.is_none();
-            roster.change_setting(&setting, input.as_deref()).map(|()| {
+            let before = roster.config_text.clone();
+            let changed = roster.change_setting(&setting, input.as_deref());
+            if roster.config_text != before {
                 use_config(roster, app);
+            }
+            changed.map(|()| {
                 if back {
                     format!("{setting} is back to its default")
                 } else {
@@ -312,10 +323,14 @@ fn perform(
             })
         }
         Op::EditConfig => edit_config(terminal, roster, app)?,
-        Op::AddAgent(line) => roster.add_agent(&line).map(|name| {
-            use_config(roster, app);
-            format!("Added the agent {name}: new sessions can run it")
-        }),
+        Op::AddAgent(line) => {
+            let before = roster.config_text.clone();
+            let added = roster.add_agent(&line);
+            if roster.config_text != before {
+                use_config(roster, app);
+            }
+            added.map(|name| format!("Added the agent {name}: new sessions can run it"))
+        }
         Op::Attach(id) => {
             app.attaching(&id);
             let result = attach(terminal, roster, app, &id)?.map(|prompted| {
@@ -552,12 +567,17 @@ fn edit_config(
     terminal.hide_cursor()?;
     Ok(match ran {
         Err(e) => Err(anyhow::anyhow!("can't run {editor}: {e}")),
-        Ok(_) => match roster.reload_config() {
-            Ok(true) => {
+        Ok(_) => match roster.reload_config_now() {
+            Ok(Reloaded::InUse(problem)) => {
                 use_config(roster, app);
-                Ok("config.toml saved: its settings are in use".into())
+                match problem {
+                    None => Ok("config.toml saved: its settings are in use".into()),
+                    Some(e) => Err(e.context(
+                        "config.toml's settings are in use, but roster's tmux didn't take them",
+                    )),
+                }
             }
-            Ok(false) => Ok("config.toml unchanged".into()),
+            Ok(Reloaded::Same) => Ok("config.toml unchanged".into()),
             Err(e) => Err(e.context("config.toml has an error, the settings in use stay")),
         },
     })

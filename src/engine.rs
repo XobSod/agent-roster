@@ -43,7 +43,8 @@ pub struct Roster {
     panes: Option<HashMap<String, Pane>>,
     /// The text `config` came from, to notice the file changing.
     pub(crate) config_text: String,
-    /// A text of the file refused as invalid, not to refuse it again each tick.
+    /// What roster last refused to use, so it says so once, not each tick:
+    /// the file's text, invalid, or why it couldn't be read.
     pub(crate) config_refused: Option<String>,
 }
 

@@ -595,6 +595,34 @@ fn settings_change_config_toml_in_place() {
     t.ok(&["config", "unset", "status_line"]);
     assert!(!fs::read_to_string(&file).unwrap().contains("status_line"));
     assert!(t.ok(&["config", "--defaults"]).contains("# [keys.session]"));
+
+    // A setting you have, with what you wrote about it: changed, the comments
+    // stay; taken out, its comment goes, and the agent's table stays.
+    let top = "# Agents keep the terminal's size.\nfit_preview = \"never\"  # for now\n\n";
+    let pi = "\n# pi on the normal screen.\n[agents.pi]\nargs = [\"--tui-mode\", \"regular\"]\n";
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(&file, format!("{top}{text}{pi}")).unwrap();
+    t.ok(&["config", "set", "fit_preview", "auto"]);
+    let changed = fs::read_to_string(&file).unwrap();
+    assert!(
+        changed.starts_with(
+            "# Agents keep the terminal's size.\nfit_preview = \"auto\"  # for now\n\n# Mine.\n"
+        ),
+        "{changed}"
+    );
+    t.ok(&["config", "unset", "agents.pi.args"]);
+    let changed = fs::read_to_string(&file).unwrap();
+    assert!(
+        changed.contains("# pi on the normal screen.\n[agents.pi]\n")
+            && !changed.contains("regular"),
+        "{changed}"
+    );
+    // A back key tmux doesn't know, or that takes a key from the agents: not written.
+    for key in ["Backspace", "q", "C-c"] {
+        let out = t.run(&["config", "set", "keys.detach", key]);
+        assert!(!out.status.success(), "{key}");
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
 }
 
 #[test]

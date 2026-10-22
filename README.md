@@ -121,9 +121,10 @@ All files are optional and live in `~/.config/agent-roster/`:
   what it does, and changes them: Enter (on/off, the next choice, a value typed, or
   for a key the next one pressed), `←→`, `a` adds a key, `d` puts the default back,
   `n` adds an agent, `x` takes an agent's settings out, `e` opens the file in
-  `$EDITOR`. A change keeps the rest of the file as it is, comments included, and
-  goes through a symlink (a config kept in dotfiles stays there). Roster also reads
-  the file again when it changes, after an editor or a `git pull`, say. The settings:
+  `$EDITOR`. A change keeps the rest of the file as it is, comments included (taking
+  a setting out takes the comment just above it too), and goes through a symlink (a
+  config kept in dotfiles stays there). Roster also reads the file again when it
+  changes, after an editor or a `git pull`, say. The settings:
   - `default_agent`: the agent new sessions get unless their project names one
     (default `claude`; `"pi"`, or any agent under `[agents]`).
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
@@ -150,7 +151,7 @@ All files are optional and live in `~/.config/agent-roster/`:
 
     ```toml
     [keys]
-    detach = "C-q"            # back to roster while attached (a tmux key name)
+    detach = "C-q"            # back to roster while attached (a tmux key name, with C- or M- unless an F key)
     up = ["k", "Up"]
     down = ["j", "Down"]      # the list wraps around
     collapse = ["h", "Left"]  # fold

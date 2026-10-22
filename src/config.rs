@@ -1,5 +1,5 @@
-//! `config.toml`: hand-edited, read-only for roster. Every setting
-//! is optional.
+//! `config.toml`: every setting is optional. Changed by hand, or by roster's
+//! settings view and `roster config` (`settings`).
 //!
 //! ```toml
 //! shell = "/usr/bin/zsh"          # sources the env files; default: $SHELL if POSIX-like
@@ -294,11 +294,7 @@ impl Config {
 
     pub fn parse(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text)?;
-        let key = &config.keys.detach;
-        // It goes into the generated tmux config, so only allow tmux key-name characters.
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            bail!("keys.detach must be a tmux key name such as \"C-q\", not {key:?}");
-        }
+        check_detach(&config.keys.detach)?;
         crate::keys::Keymap::new(&config.keys)?;
         if let Some(agent) = &config.default_agent
             && !crate::agent::BUILT_IN.contains(&agent.as_str())
@@ -331,6 +327,49 @@ impl Config {
     pub fn agent(&self, name: &str) -> AgentConfig {
         self.agents.get(name).cloned().unwrap_or_default()
     }
+}
+
+/// The names tmux gives keys other than letters, digits and F1 to F12.
+const TMUX_KEYS: &[&str] = &[
+    "Enter", "Escape", "Tab", "BTab", "Space", "BSpace", "Up", "Down", "Left", "Right", "Home",
+    "End", "PageUp", "PgUp", "PPage", "PageDown", "PgDn", "NPage", "Insert", "IC", "Delete", "DC",
+];
+
+/// `keys.detach` is bound in roster's tmux, over whatever the agent would
+/// get: a key tmux has a name for (or roster's tmux has no way back at
+/// all), with Ctrl or Alt unless it's an F key, so the agents keep their
+/// plain keys, and not their interrupt, C-c.
+fn check_detach(key: &str) -> Result<()> {
+    let (mut base, mut modified) = (key, false);
+    while let Some((m, rest)) = ["C-", "M-", "S-"]
+        .iter()
+        .find_map(|m| Some((*m, base.strip_prefix(m).filter(|r| !r.is_empty())?)))
+    {
+        modified |= m != "S-";
+        base = rest;
+    }
+    let f_key = base
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=12).contains(&n));
+    let single = base.len() == 1 && base.chars().all(|c| c.is_ascii_alphanumeric());
+    if !(f_key || single || TMUX_KEYS.contains(&base)) {
+        bail!("keys.detach must be a key tmux knows, such as \"C-q\", not {key:?}");
+    }
+    if !modified && !f_key {
+        bail!("keys.detach needs C- or M- (or an F key), or the agents lose that key: not {key:?}");
+    }
+    if key.eq_ignore_ascii_case("C-c") {
+        bail!("keys.detach can't be C-c: that's how you interrupt an agent");
+    }
+    // What terminals send for Enter, Tab and Backspace.
+    if ["C-m", "C-j", "C-i", "C-h"]
+        .iter()
+        .any(|k| key.eq_ignore_ascii_case(k))
+    {
+        bail!("keys.detach can't be {key}: terminals send it for Enter, Tab or Backspace");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -440,5 +479,24 @@ mod tests {
     fn rejects_unknown_settings_and_unsafe_keys() {
         assert!(Config::parse("colour = 1").is_err());
         assert!(Config::parse("[keys]\ndetach = \"C-q; kill-server\"").is_err());
+        // Keys tmux knows, that leave the agents theirs.
+        let detach = |key: &str| Config::parse(&format!("[keys]\ndetach = \"{key}\""));
+        for good in ["C-q", "M-x", "C-M-Left", "F12", "S-F5", "C-BSpace"] {
+            detach(good).unwrap_or_else(|e| panic!("{good}: {e:#}"));
+        }
+        for bad in [
+            "Backspace",
+            "C-Backspace",
+            "q",
+            "Enter",
+            "S-q",
+            "C-m",
+            "C-H",
+            "C-c",
+            "C-",
+            "",
+        ] {
+            assert!(detach(bad).is_err(), "{bad}");
+        }
     }
 }

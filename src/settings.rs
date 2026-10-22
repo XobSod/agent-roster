@@ -9,10 +9,12 @@
 //! and written through a symlink (a dotfiles link stays a link).
 
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{Array, DocumentMut, Item, Table, Value};
+
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value};
 
 use crate::agent;
 use crate::config::{
@@ -62,22 +64,17 @@ impl crate::engine::Roster {
         let config = Config::parse(&changed).with_context(|| format!("{dotted}: not changed"))?;
         write_file(&file, &changed)?;
         self.use_config(config, changed)
+            .with_context(|| format!("{dotted} is changed, but roster's tmux didn't take it"))
     }
 
     /// Adds an agent that runs `line` (`codex --full-auto`): named after its
-    /// command, the rest its arguments. Returns its name.
+    /// command (`npx @openai/codex` after the package it runs), the rest its
+    /// arguments. Returns its name.
     pub fn add_agent(&mut self, line: &str) -> Result<String> {
         let words = split_words(line)?;
         let (command, args) = words.split_first().context("no command")?;
-        let name = Path::new(command)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(command)
-            .to_string();
-        let valid = name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'));
-        if name.is_empty() || !valid {
+        let name = agent_name(command, args);
+        if !agent_named(&name) {
             bail!("{name:?} can't name an agent: letters, digits, '-' and '_'");
         }
         if agent::available(&self.config).contains(&name) {
@@ -97,23 +94,53 @@ impl crate::engine::Roster {
         }
         let config = Config::parse(&changed).context("not added")?;
         write_file(&file, &changed)?;
-        self.use_config(config, changed)?;
+        self.use_config(config, changed)
+            .context("added, but roster's tmux didn't take the settings")?;
         Ok(name)
     }
 
-    /// Reads config.toml again if it changed (an editor, a `git pull`):
-    /// whether it did. If it's invalid now, the settings in use stay.
-    pub fn reload_config(&mut self) -> Result<bool> {
+    /// Reads config.toml again if it changed (an editor, a `git pull`) and
+    /// puts it in use. If it's invalid now, the settings in use stay (the
+    /// error). A file just written may not be whole yet (an editor can empty
+    /// it first): it's left for a later call.
+    pub fn reload_config(&mut self) -> Result<Reloaded> {
+        let settling = fs::metadata(self.paths.config_file())
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < SETTLE);
+        if settling {
+            return Ok(Reloaded::Same);
+        }
+        self.reload_config_now()
+    }
+
+    /// `reload_config` once the file is whole (the editor has closed).
+    pub fn reload_config_now(&mut self) -> Result<Reloaded> {
         let file = self.paths.config_file();
-        let text = crate::config::read_text(&file)?;
-        if text == self.config_text || self.config_refused.as_ref() == Some(&text) {
-            return Ok(false);
+        let text = match crate::config::read_text(&file) {
+            Ok(text) => text,
+            Err(e) => {
+                let why = format!("{e:#}");
+                if self.config_refused.as_ref() == Some(&why) {
+                    return Ok(Reloaded::Same);
+                }
+                self.config_refused = Some(why);
+                return Err(e);
+            }
+        };
+        if text == self.config_text {
+            // Put back as it was: a text refused before is news again.
+            self.config_refused = None;
+            return Ok(Reloaded::Same);
+        }
+        if self.config_refused.as_ref() == Some(&text) {
+            return Ok(Reloaded::Same);
         }
         match Config::parse(&text) {
             Ok(config) => {
                 self.config_refused = None;
-                self.use_config(config, text)?;
-                Ok(true)
+                Ok(Reloaded::InUse(self.use_config(config, text).err()))
             }
             Err(e) => {
                 self.config_refused = Some(text);
@@ -122,7 +149,8 @@ impl crate::engine::Roster {
         }
     }
 
-    /// Puts `config` in use, also in roster's tmux (its back key, its line).
+    /// Puts `config` in use, then in roster's tmux too (its back key, its
+    /// line): an error is about that, `config` is in use.
     fn use_config(&mut self, config: Config, text: String) -> Result<()> {
         self.config = config;
         self.config_text = text;
@@ -137,6 +165,48 @@ impl crate::engine::Roster {
     }
 }
 
+/// How long config.toml goes unchanged before roster reads what changed.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// What reading config.toml again found.
+pub enum Reloaded {
+    /// The settings in use.
+    Same,
+    /// Changed settings, now in use; with roster's tmux's error if it didn't
+    /// take them.
+    InUse(Option<anyhow::Error>),
+}
+
+/// Whether `name` can name an agent (it's written in config.toml as is).
+fn agent_named(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+/// The name an agent run by `command` gets: the command's, or, for one that
+/// runs a package (`npx @openai/codex@latest`), the package's.
+fn agent_name(command: &str, args: &[String]) -> String {
+    let base = |word: &str| {
+        Path::new(word)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(word)
+            .to_string()
+    };
+    let name = base(command);
+    if matches!(name.as_str(), "npx" | "bunx" | "pnpx" | "uvx" | "pipx")
+        && let Some(package) = args.iter().find(|a| !a.starts_with('-') && *a != "run")
+    {
+        // `@scope/name@version`: the name.
+        let package = package.strip_prefix('@').unwrap_or(package);
+        let package = package.split('@').next().unwrap_or(package);
+        return base(package.rsplit('/').next().unwrap_or(package));
+    }
+    name
+}
+
 /// The kind of the setting at `path`: one in `sections`, or one of an agent
 /// not configured yet (`agents.codex.command`).
 fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
@@ -145,15 +215,23 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
         .flat_map(|s| &s.settings)
         .find(|s| s.path == path)
         .map(|s| s.kind.clone());
+    // An agent shown has its settings shown.
+    let shown = |name: &str| {
+        sections
+            .iter()
+            .any(|s| s.agent.as_ref().is_some_and(|(n, _)| n == name))
+    };
     found.or_else(|| match path {
-        [agents, _, key] if agents == "agents" => match key.as_str() {
-            "command" | "title_model" => Some(Kind::Text),
-            "args" => Some(Kind::Words),
-            "idle_after" => Some(Kind::Seconds),
-            "auto_title" => Some(Kind::Bool),
-            "fit_preview" => Some(Kind::Choice(vec!["auto".into(), "never".into()])),
-            _ => None,
-        },
+        [agents, name, key] if agents == "agents" && agent_named(name) && !shown(name) => {
+            match key.as_str() {
+                "command" | "title_model" => Some(Kind::Text),
+                "args" => Some(Kind::Words),
+                "idle_after" => Some(Kind::Seconds),
+                "auto_title" => Some(Kind::Bool),
+                "fit_preview" => Some(Kind::Choice(vec!["auto".into(), "never".into()])),
+                _ => None,
+            }
+        }
         _ => None,
     })
 }
@@ -658,77 +736,347 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
 }
 
 /// `text` with the setting at `path` set to `item`, or, None, taken out (so
-/// its default holds), tables left empty by that taken out too.
+/// its default holds). Nothing else in it changes: not its other settings,
+/// not its comments, not its layout.
 pub fn edit(text: &str, path: &[String], item: Option<Item>) -> Result<String> {
-    let mut doc: DocumentMut = text.parse().context("config.toml isn't valid TOML")?;
     let (key, tables) = path.split_last().context("no setting")?;
-    match item {
-        Some(item) => {
-            let mut table = doc.as_table_mut();
-            for (i, name) in tables.iter().enumerate() {
-                let entry = table.entry(name).or_insert_with(|| {
-                    let mut t = Table::new();
-                    // `[agents.pi]`, not `[agents]` then `[agents.pi]`.
-                    t.set_implicit(i + 1 < tables.len());
-                    Item::Table(t)
-                });
-                table = entry
-                    .as_table_mut()
-                    .with_context(|| format!("{name} in config.toml isn't a table"))?;
-            }
-            table.insert(key, item);
-        }
-        None => remove(doc.as_table_mut(), path),
-    }
+    let changed = match item {
+        Some(item) => set(text, tables, key, item)?,
+        None => remove(text, path)?,
+    };
     // Taking out the first setting can leave the blank line after it on top.
-    Ok(doc.to_string().trim_start_matches('\n').to_string())
+    Ok(changed.trim_start_matches('\n').to_string())
 }
 
-/// Takes `path` out of `table`, then any table it leaves empty.
-fn remove(table: &mut Table, path: &[String]) {
-    match path {
-        [] => {}
-        [key] => {
-            table.remove(key);
+/// `text` with `key` of the table at `tables` (made if it isn't there) set to
+/// `item`. A value it has already is replaced where it is, the comments
+/// above it and after it kept.
+fn set(text: &str, tables: &[String], key: &str, item: Item) -> Result<String> {
+    let mut doc: DocumentMut = text.parse().context("config.toml isn't valid TOML")?;
+    // A new table goes after the comments that end the file (all of them in
+    // a file made from `template`), not above them.
+    let trailer = doc
+        .trailing()
+        .as_str()
+        .filter(|t| t.contains('#'))
+        .map(String::from);
+    let last = last_position(doc.as_table());
+    let mut moved = false;
+    let mut table: &mut dyn TableLike = doc.as_table_mut();
+    let mut inline = false;
+    for (i, name) in tables.iter().enumerate() {
+        let leaf = i + 1 == tables.len();
+        let entry = table.entry(name).or_insert_with(|| {
+            if inline {
+                return Item::Value(Value::InlineTable(InlineTable::new()));
+            }
+            let mut t = Table::new();
+            // `[agents.pi]`, not `[agents]` then `[agents.pi]`.
+            t.set_implicit(!leaf);
+            if leaf && let Some(trailer) = &trailer {
+                t.set_position(Some(last + 1));
+                t.decor_mut().set_prefix(format!("{trailer}\n"));
+                moved = true;
+            }
+            Item::Table(t)
+        });
+        inline = entry.is_inline_table();
+        table = entry
+            .as_table_like_mut()
+            .with_context(|| format!("{name} in config.toml isn't a table"))?;
+    }
+    match (table.get_mut(key).and_then(Item::as_value_mut), item) {
+        (Some(old), Item::Value(mut new)) => {
+            *new.decor_mut() = old.decor().clone();
+            *old = new;
         }
-        [name, rest @ ..] => {
-            if let Some(inner) = table.get_mut(name).and_then(Item::as_table_mut) {
-                remove(inner, rest);
-                if inner.is_empty() {
-                    table.remove(name);
+        (_, item) => {
+            table.insert(key, item);
+        }
+    }
+    if moved {
+        doc.set_trailing("");
+    }
+    Ok(doc.to_string())
+}
+
+/// The position of the table written last in `table`.
+fn last_position(table: &Table) -> isize {
+    table
+        .iter()
+        .filter_map(|(_, item)| item.as_table())
+        .map(|t| t.position().unwrap_or(0).max(last_position(t)))
+        .max()
+        .unwrap_or(0)
+}
+
+/// `text` with the setting (or table) at `path` taken out: its lines, and
+/// the comment just above them, but no comment further up (one a blank line
+/// parts from it belongs to something else). A table it leaves empty goes
+/// too, unless it's an agent's (which makes the agent) or keeps comments.
+fn remove(text: &str, path: &[String]) -> Result<String> {
+    let doc = toml_edit::Document::parse(text).context("config.toml isn't valid TOML")?;
+    let (key, tables) = path.split_last().context("no setting")?;
+    let mut table = doc.as_table();
+    for name in tables {
+        match table.get(name) {
+            Some(Item::Table(t)) => table = t,
+            // `pi = { args = [...] }`: the value taken out of the inline table.
+            Some(Item::Value(Value::InlineTable(_))) => return remove_inline(text, path),
+            _ => return Ok(text.to_string()),
+        }
+    }
+    let (Some(k), Some(item)) = (table.key(key), table.get(key)) else {
+        return Ok(text.to_string());
+    };
+    let mut cuts = Vec::new();
+    lines_of(text, k, item, &mut cuts);
+    let mut text = cut(text, cuts);
+    // Up from the table it was in, those it leaves empty.
+    for depth in (1..=tables.len()).rev() {
+        let table = &tables[..depth];
+        if table.len() == 2 && table[0] == "agents" {
+            break;
+        }
+        match empty_table(&text, table)? {
+            Some(cuts) => text = cut(&text, cuts),
+            None => break,
+        }
+    }
+    Ok(text)
+}
+
+/// The lines of the table at `path` in `text` if it has nothing in it (no
+/// settings, no tables, no comments; a header of its own).
+fn empty_table(text: &str, path: &[String]) -> Result<Option<Vec<Range<usize>>>> {
+    let doc = toml_edit::Document::parse(text).context("config.toml isn't valid TOML")?;
+    let (key, tables) = path.split_last().context("no table")?;
+    let mut table = doc.as_table();
+    for name in tables {
+        match table.get(name) {
+            Some(Item::Table(t)) => table = t,
+            _ => return Ok(None),
+        }
+    }
+    let (Some(k), Some(item @ Item::Table(t))) = (table.key(key), table.get(key)) else {
+        return Ok(None);
+    };
+    if !t.is_empty() || t.is_implicit() || t.is_dotted() {
+        return Ok(None);
+    }
+    let headers = headers(doc.as_table());
+    let mut cuts = Vec::new();
+    lines_of(text, k, item, &mut cuts);
+    let Some(header) = t.span() else {
+        return Ok(None);
+    };
+    // Its header and the comment above it go; comments under it would be
+    // left under the table before it.
+    let body = line_end(text, header.end)..region_end(text, &headers, header.start);
+    let commented = text
+        .get(body)
+        .is_some_and(|b| b.lines().any(|l| l.trim_start().starts_with('#')));
+    Ok((!commented).then_some(cuts))
+}
+
+/// Where each table header in `table` starts (its line), in order.
+fn headers(table: &Table) -> Vec<usize> {
+    fn visit(table: &Table, out: &mut Vec<usize>) {
+        for (_, item) in table.iter() {
+            if let Item::Table(t) = item {
+                if !t.is_implicit()
+                    && !t.is_dotted()
+                    && let Some(span) = t.span()
+                {
+                    out.push(span.start);
+                }
+                visit(t, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(table, &mut out);
+    out.sort_unstable();
+    out
+}
+
+/// Where what's under the header at `start` ends: at the next header (the
+/// comment above it left for it), else at the end.
+fn region_end(text: &str, headers: &[usize], start: usize) -> usize {
+    headers
+        .iter()
+        .find(|&&h| h > start)
+        .map_or(text.len(), |&h| comment_above(text, line_start(text, h)))
+}
+
+/// The parts of `text` that `key = item` takes: a value's lines; a table's
+/// header and its own lines, up to its last value (comments after that are
+/// left: they may be about anything); for each, the comment just above.
+fn lines_of(text: &str, key: &Key, item: &Item, out: &mut Vec<Range<usize>>) {
+    match item {
+        Item::Value(v) => {
+            if let (Some(k), Some(v)) = (key.span(), v.span()) {
+                out.push(comment_above(text, line_start(text, k.start))..line_end(text, v.end));
+            }
+        }
+        Item::Table(t) => {
+            let header = (!t.is_implicit() && !t.is_dotted())
+                .then(|| t.span())
+                .flatten();
+            if let Some(span) = &header {
+                let end = t
+                    .iter()
+                    .filter_map(|(_, inner)| inner.as_value()?.span())
+                    .map(|v| line_end(text, v.end))
+                    .fold(line_end(text, span.end), usize::max);
+                out.push(comment_above(text, line_start(text, span.start))..end);
+            }
+            for (name, inner) in t.iter() {
+                // Under a header, its values are among its lines; its tables
+                // have headers of their own, and a dotted one's values are
+                // lines anywhere.
+                if header.is_some() && !inner.is_table() {
+                    continue;
+                }
+                if let Some(k) = t.key(name) {
+                    lines_of(text, k, inner, out);
                 }
             }
         }
+        Item::ArrayOfTables(_) | Item::None => {}
     }
+}
+
+/// `text` without the parts `cuts` names, and without a blank line doubled
+/// where they were.
+fn cut(text: &str, mut cuts: Vec<Range<usize>>) -> String {
+    cuts.sort_by_key(|c| c.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for c in cuts {
+        match merged.last_mut() {
+            Some(last) if c.start <= last.end => last.end = last.end.max(c.end),
+            _ => merged.push(c),
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for c in merged {
+        out.push_str(&text[at..c.start]);
+        at = c.end;
+        // A blank line before what was cut and one after it: one is enough.
+        if (out.is_empty() || out.ends_with("\n\n")) && text[at..].starts_with('\n') {
+            at += 1;
+        }
+    }
+    out.push_str(&text[at..]);
+    if out.ends_with("\n\n") {
+        out.truncate(out.trim_end_matches('\n').len() + 1);
+    }
+    out
+}
+
+/// The start of the line `at` is on.
+fn line_start(text: &str, at: usize) -> usize {
+    text[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// The end of the line `at` is on (`at` itself if that's past a newline,
+/// the end of a value at the end of its line), its newline included.
+fn line_end(text: &str, at: usize) -> usize {
+    text[at..].find('\n').map_or(text.len(), |i| at + i + 1)
+}
+
+/// Where the comment just above the line that starts at `start` begins: the
+/// lines above it that are comments, up to one that isn't, or that's a
+/// setting or table commented out (`roster config --defaults` writes them).
+fn comment_above(text: &str, mut start: usize) -> usize {
+    while start > 0 {
+        let above = line_start(text, start - 1);
+        let line = &text[above..start];
+        if !line.trim_start().starts_with('#') || commented_out(line) {
+            break;
+        }
+        start = above;
+    }
+    start
+}
+
+/// Whether a comment is a setting or table commented out: `# up = "k"`,
+/// `# [keys]`.
+fn commented_out(line: &str) -> bool {
+    let rest = line.trim_start().trim_start_matches('#').trim_start();
+    let name = rest
+        .find(|c: char| !(c.is_alphanumeric() || "_-.\"".contains(c)))
+        .unwrap_or(rest.len());
+    rest.starts_with('[') || (name > 0 && rest[name..].trim_start().starts_with('='))
+}
+
+/// `remove` for a setting in an inline table: toml_edit writes the table
+/// again (an inline table holds no comments).
+fn remove_inline(text: &str, path: &[String]) -> Result<String> {
+    let mut doc: DocumentMut = text.parse().context("config.toml isn't valid TOML")?;
+    let (key, tables) = path.split_last().context("no setting")?;
+    let mut table: &mut dyn TableLike = doc.as_table_mut();
+    for name in tables {
+        match table.get_mut(name).and_then(Item::as_table_like_mut) {
+            Some(inner) => table = inner,
+            None => return Ok(text.to_string()),
+        }
+    }
+    table.remove(key);
+    Ok(doc.to_string())
 }
 
 fn lookup<'a>(table: &'a Table, path: &[&str]) -> Option<&'a Item> {
     let (key, tables) = path.split_last()?;
-    let mut table = table;
+    let mut table: &dyn TableLike = table;
     for name in tables {
-        table = table.get(name)?.as_table()?;
+        table = table.get(name)?.as_table_like()?;
     }
     table.get(key)
 }
 
 /// Writes `text` to the config file at `path`: if it's a symlink (to
-/// dotfiles, say), to the file it points to, so the link stays; whole, then
-/// moved into place, so nothing reads half of it.
+/// dotfiles, say), to the file it points to, so the link stays, also when
+/// that file isn't there yet; whole, then moved into place, so nothing reads
+/// half of it.
 pub fn write_file(path: &Path, text: &str) -> Result<()> {
-    let target: PathBuf = match fs::canonicalize(path) {
-        Ok(target) => target,
-        Err(_) => {
-            let dir = path.parent().context("config.toml has no directory")?;
-            fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
-            fs::canonicalize(dir)?.join(path.file_name().context("no file name")?)
-        }
-    };
+    let target = link_target(path);
+    let dir = target.parent().context("config.toml has no directory")?;
+    fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
     let partial = target.with_extension(format!("toml.{}.partial", std::process::id()));
-    fs::write(&partial, text).with_context(|| format!("can't write {}", partial.display()))?;
-    if let Ok(meta) = fs::metadata(&target) {
-        fs::set_permissions(&partial, meta.permissions()).ok();
+    let written = fs::write(&partial, text)
+        .with_context(|| format!("can't write {}", partial.display()))
+        .and_then(|()| {
+            if let Ok(meta) = fs::metadata(&target) {
+                fs::set_permissions(&partial, meta.permissions()).ok();
+            }
+            fs::rename(&partial, &target)
+                .with_context(|| format!("can't write {}", target.display()))
+        });
+    if written.is_err() {
+        fs::remove_file(&partial).ok();
     }
-    fs::rename(&partial, &target).with_context(|| format!("can't write {}", target.display()))
+    written
+}
+
+/// The file a write to `path` should change: the one at the end of its
+/// symlinks, whether it's there or not.
+fn link_target(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    // A cycle of links ends somewhere; it fails at the write.
+    for _ in 0..40 {
+        match fs::read_link(&path) {
+            Ok(to) => {
+                path = match path.parent() {
+                    Some(dir) => dir.join(to),
+                    None => to,
+                };
+            }
+            Err(_) => break,
+        }
+    }
+    path
 }
 
 /// A config.toml with every setting commented out at what holds without it,
@@ -844,10 +1192,10 @@ mod tests {
         );
         assert!(!changed.contains("[agents]\n"), "{changed}");
         Config::parse(&changed).unwrap();
-        // Back to its default: taken out, with the table it leaves empty.
+        // Back to its default: taken out, with its comment.
         let changed = edit(text, &path("agents.pi.args"), None).unwrap();
         assert!(
-            !changed.contains("agents.pi") && changed.contains("fit_preview"),
+            changed.ends_with("the layout stays\n\n[agents.pi]\n"),
             "{changed}"
         );
         let changed = edit(
@@ -857,6 +1205,179 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changed, "[keys.session]\nstop = [\"y\", \"Delete\"]\n");
+    }
+
+    fn at(dotted: &str) -> Vec<String> {
+        dotted.split('.').map(String::from).collect()
+    }
+
+    #[test]
+    fn a_change_keeps_the_comments_on_it() {
+        let text = "# My settings.\n\n# Long lines cut.\nfit_preview = \"never\"  # the layout stays\nstatus_line = true\n";
+        let changed = edit(text, &at("fit_preview"), Some(toml_edit::value("auto"))).unwrap();
+        assert_eq!(
+            changed,
+            "# My settings.\n\n# Long lines cut.\nfit_preview = \"auto\"  # the layout stays\nstatus_line = true\n"
+        );
+        let changed = edit(
+            "[agents.pi]\n# copy mode\nargs = [\"--tui-mode\", \"regular\"] # on the normal screen\n",
+            &at("agents.pi.args"),
+            Some(parse_input(&Kind::Words, "--tui-mode full").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            changed,
+            "[agents.pi]\n# copy mode\nargs = [\"--tui-mode\", \"full\"] # on the normal screen\n"
+        );
+    }
+
+    #[test]
+    fn taken_out_with_its_comment_and_nothing_else() {
+        // The comment just above goes with it; the file's own stays.
+        let text = "# My settings.\n\n# Long lines cut.\nfit_preview = \"never\"\n\n# pi on the normal screen.\n[agents.pi]\nargs = [\"--tui-mode\", \"regular\"]\n";
+        assert_eq!(
+            edit(text, &at("fit_preview"), None).unwrap(),
+            "# My settings.\n\n# pi on the normal screen.\n[agents.pi]\nargs = [\"--tui-mode\", \"regular\"]\n"
+        );
+        // An agent's table stays: it's what makes the agent.
+        assert_eq!(
+            edit(text, &at("agents.pi.args"), None).unwrap(),
+            "# My settings.\n\n# Long lines cut.\nfit_preview = \"never\"\n\n# pi on the normal screen.\n[agents.pi]\n"
+        );
+        let aider = "[agents.aider]\ncommand = \"aider\"\n";
+        assert_eq!(
+            edit(aider, &at("agents.aider.command"), None).unwrap(),
+            "[agents.aider]\n"
+        );
+        // Not set: nothing changes.
+        assert_eq!(
+            edit("[agents.aider]\n", &at("agents.aider.idle_after"), None).unwrap(),
+            "[agents.aider]\n"
+        );
+        // Another table left empty goes, unless something's commented in it.
+        let keys =
+            "status_line = false\n\n[keys.session]\nstop = \"y\"\n\n[order]\nby = \"name\"\n";
+        assert_eq!(
+            edit(keys, &at("keys.session.stop"), None).unwrap(),
+            "status_line = false\n\n[order]\nby = \"name\"\n"
+        );
+        let commented = "[keys]\nup = \"k\"\n# down = \"j\"\n";
+        assert_eq!(
+            edit(commented, &at("keys.up"), None).unwrap(),
+            "[keys]\n# down = \"j\"\n"
+        );
+        // A whole agent, its own lines: what follows it stays.
+        let notes = "[agents.aider]\ncommand = \"aider\"\n\n# unrelated\n\n[agents.pi]\nargs = []\n# the end\n";
+        assert_eq!(
+            edit(notes, &at("agents.aider"), None).unwrap(),
+            "# unrelated\n\n[agents.pi]\nargs = []\n# the end\n"
+        );
+        assert_eq!(
+            edit(notes, &at("agents.pi"), None).unwrap(),
+            "[agents.aider]\ncommand = \"aider\"\n\n# unrelated\n\n# the end\n"
+        );
+        // A setting commented out above isn't its comment.
+        let template =
+            "# General\n# default_agent = \"claude\"    # the agent\nfit_preview = \"never\"\n";
+        assert_eq!(
+            edit(template, &at("fit_preview"), None).unwrap(),
+            "# General\n# default_agent = \"claude\"    # the agent\n"
+        );
+        // A whole agent, up to the comment on the table after it.
+        let two = "[agents.aider]\ncommand = \"aider\"\nargs = [\"--yes\"]\n\n# pi's.\n[agents.pi]\nargs = []\n";
+        assert_eq!(
+            edit(two, &at("agents.aider"), None).unwrap(),
+            "# pi's.\n[agents.pi]\nargs = []\n"
+        );
+        // Written with dotted keys, too.
+        assert_eq!(
+            edit(
+                "agents.pi.args = [\"x\"]\nfit_preview = \"never\"\n",
+                &at("agents.pi.args"),
+                None
+            )
+            .unwrap(),
+            "fit_preview = \"never\"\n"
+        );
+    }
+
+    #[test]
+    fn inline_tables_are_tables_too() {
+        let text = "[agents]\npi = { args = [\"x\"] }\n";
+        let config = Config::parse(text).unwrap();
+        let sections = sections(&config, text, &cx());
+        assert!(find(&sections, "agents.pi.args").set);
+        let changed = edit(
+            text,
+            &at("agents.pi.title_model"),
+            Some(toml_edit::value("small")),
+        )
+        .unwrap();
+        assert_eq!(
+            Config::parse(&changed)
+                .unwrap()
+                .agent("pi")
+                .title_model
+                .as_deref(),
+            Some("small")
+        );
+        let changed = edit(text, &at("agents.pi.args"), None).unwrap();
+        assert!(
+            Config::parse(&changed).unwrap().agent("pi").args.is_empty(),
+            "{changed}"
+        );
+    }
+
+    #[test]
+    fn a_new_table_goes_after_the_comments_that_end_the_file() {
+        let text = "fit_preview = \"never\"\n\n# [order]\n# by = \"state\"\n";
+        let changed = edit(
+            text,
+            &at("agents.aider.command"),
+            Some(toml_edit::value("aider")),
+        )
+        .unwrap();
+        assert_eq!(
+            changed,
+            "fit_preview = \"never\"\n\n# [order]\n# by = \"state\"\n\n[agents.aider]\ncommand = \"aider\"\n"
+        );
+        // Every setting commented out, as `e` starts the file.
+        let template = template(&sections(&Config::default(), "", &cx()));
+        let changed = edit(
+            &template,
+            &at("agents.aider.command"),
+            Some(toml_edit::value("aider")),
+        )
+        .unwrap();
+        assert!(changed.starts_with(&template), "{changed}");
+        Config::parse(&changed).unwrap();
+    }
+
+    #[test]
+    fn new_agents_are_named_after_what_they_run() {
+        let name = |line: &str| {
+            let words = split_words(line).unwrap();
+            agent_name(&words[0], &words[1..])
+        };
+        assert_eq!(name("aider --yes"), "aider");
+        assert_eq!(name("/opt/bin/codex"), "codex");
+        assert_eq!(name("npx -y @openai/codex@latest"), "codex");
+        assert_eq!(name("pipx run gpt-engineer"), "gpt-engineer");
+        assert!(!agent_named("a b") && !agent_named("") && agent_named("my-agent_2"));
+    }
+
+    #[test]
+    fn only_settings_roster_has_are_set() {
+        let config = Config::default();
+        let sections = sections(&config, "", &cx());
+        let kind = |dotted: &str| kind_at(&sections, &at(dotted));
+        assert_eq!(kind("status_line"), Some(Kind::Bool));
+        // An agent not configured yet: its settings.
+        assert_eq!(kind("agents.codex.command"), Some(Kind::Text));
+        // Claude names its own titles; not a name.
+        assert_eq!(kind("agents.claude.auto_title"), None);
+        assert_eq!(kind("agents.a b.command"), None);
+        assert_eq!(kind("agents..command"), None);
     }
 
     #[test]
@@ -940,6 +1461,18 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(fs::read_to_string(&real).unwrap(), "new = 2\n");
+        // A link to a file that isn't there yet: the file is made.
+        let later = dir.path().join("dotfiles/later.toml");
+        let dangling = dir.path().join("dangling.toml");
+        std::os::unix::fs::symlink(&later, &dangling).unwrap();
+        write_file(&dangling, "b = 1\n").unwrap();
+        assert!(
+            fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&later).unwrap(), "b = 1\n");
         // Not there yet: made.
         let fresh = dir.path().join("fresh/config.toml");
         write_file(&fresh, "a = 1\n").unwrap();

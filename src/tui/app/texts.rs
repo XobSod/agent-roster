@@ -63,8 +63,14 @@ impl App {
     fn settings_view_hints(&self) -> Vec<(String, &'static str)> {
         use crate::settings::Kind;
         if let Some(capture) = &self.capturing {
+            if capture.setting == "keys.detach" {
+                return vec![
+                    ("a key with C- or M-, or an F key".to_string(), "sets it"),
+                    ("Esc".into(), "cancel"),
+                ];
+            }
             let mut hints = vec![("a key".to_string(), "sets it")];
-            if capture.setting.starts_with("keys.") && capture.setting != "keys.detach" {
+            if capture.setting.starts_with("keys.") {
                 hints.push(("Backspace".into(), "none"));
             }
             hints.push(("Esc".into(), "cancel"));

@@ -538,6 +538,29 @@ impl Db {
         Ok(())
     }
 
+    /// Claims the making of `id`'s automatic title for its `conversation`:
+    /// true the first time, so one roster makes it, once per conversation.
+    pub fn claim_auto_title(&self, id: &str, conversation: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value
+             WHERE value != excluded.value",
+            [format!("auto_title:{id}"), conversation.to_string()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Sets `id`'s title (the agent's) unless it got one meanwhile, of the
+    /// agent's or of your own.
+    pub fn set_title_if_none(&self, id: &str, title: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET title = ?2
+             WHERE id = ?1 AND title IS NULL AND title_override IS NULL",
+            [id, title],
+        )?;
+        Ok(())
+    }
+
     /// The context window an agent reported for `model`, if one did.
     pub fn learned_window(&self, model: &str) -> Result<Option<u64>> {
         Ok(self

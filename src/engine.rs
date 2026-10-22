@@ -84,6 +84,7 @@ impl Roster {
         // Typed once every session is saved: typing takes a moment, and rows
         // loaded before it could overwrite what another roster saved meanwhile.
         let mut prompts = Vec::new();
+        let mut titles = Vec::new();
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
             let redrawing = self.resized.contains_key(&s.id);
@@ -135,15 +136,40 @@ impl Roster {
                     }
                 }
             }
+            if self.wants_auto_title(&s)
+                && let Some(conversation) = &s.conversation_id
+                && self.db.claim_auto_title(&s.id, conversation)?
+            {
+                titles.push(s.id.clone());
+            }
             if s != before {
                 self.db.save_session(&s)?;
             }
         }
         self.panes = Some(panes);
+        for id in titles {
+            self.auto_title_in_background(&id);
+        }
         for (name, prompt) in prompts {
             self.tmux.type_line(&name, &prompt)?;
         }
         Ok(())
+    }
+
+    /// Makes `id`'s automatic title in a roster process of its own: it takes
+    /// a model call, which nothing should wait for. A failure only means no
+    /// title (`s t` asks again, and says why).
+    fn auto_title_in_background(&self, id: &str) {
+        let child = std::process::Command::new(&self.exe)
+            .args(["retitle", "--auto", id])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        // Waited for on a thread, so it doesn't linger as a zombie.
+        if let Ok(mut child) = child {
+            std::thread::spawn(move || child.wait());
+        }
     }
 
     /// The panes as `refresh` last listed them, else as they are now.

@@ -14,7 +14,43 @@ impl Roster {
     /// recent prompts and keeps it as the session's title (the agent's own
     /// stays the same otherwise).
     pub fn generate_title(&mut self, id: &str) -> Result<String> {
+        let title = self.make_title(id)?;
         let mut s = self.db.session(id)?;
+        s.title_override = Some(title.clone());
+        self.db.save_session(&s)?;
+        Ok(title)
+    }
+
+    /// `generate_title` for an agent that doesn't name its task itself,
+    /// after its first turn: kept as the agent's title, unless it got one
+    /// meanwhile, so a name given in the agent (pi's `/name`) replaces it.
+    pub fn auto_title(&mut self, id: &str) -> Result<String> {
+        let title = self.make_title(id)?;
+        self.db.set_title_if_none(id, &title)?;
+        Ok(title)
+    }
+
+    /// Whether `s` is due an automatic title: its agent doesn't name its
+    /// task but can make a title, it has finished a turn and has no title,
+    /// and `auto_title` isn't off.
+    pub(crate) fn wants_auto_title(&self, s: &crate::model::Session) -> bool {
+        let adapter = agent::adapter(&s.agent);
+        s.state == crate::model::State::Idle
+            && s.turns > 0
+            && s.title().is_none()
+            && s.conversation_id.is_some()
+            && s.transcript_path
+                .as_deref()
+                .is_some_and(|p| Path::new(p).exists())
+            && !adapter.names_its_task()
+            && adapter.oneoff(&self.config).is_some()
+            && adapter.transcript(Path::new("")).is_some()
+            && self.config.agent(&s.agent).auto_title != Some(false)
+    }
+
+    /// The title `id`'s agent makes of its recent prompts.
+    fn make_title(&mut self, id: &str) -> Result<String> {
+        let s = self.db.session(id)?;
         let adapter = agent::adapter(&s.agent);
         // (Asked without a path: whether it has a transcript roster reads at all.)
         if adapter.transcript(Path::new("")).is_none() {
@@ -61,11 +97,8 @@ impl Roster {
                 "{agent} couldn't make a title: {err} (title_model under [agents.{agent}] in config.toml picks its model)"
             );
         }
-        let title = clean_title(&String::from_utf8_lossy(&output.stdout))
-            .with_context(|| format!("{agent} gave no title"))?;
-        s.title_override = Some(title.clone());
-        self.db.save_session(&s)?;
-        Ok(title)
+        clean_title(&String::from_utf8_lossy(&output.stdout))
+            .with_context(|| format!("{agent} gave no title"))
     }
 }
 

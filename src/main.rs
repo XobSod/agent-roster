@@ -171,7 +171,13 @@ enum Cmd {
     /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
     Info { session: String },
     /// Give a Claude or pi session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
-    Retitle { session: String },
+    Retitle {
+        session: String,
+        /// As roster does on its own after a first turn: the agent's title,
+        /// unless it has one
+        #[arg(long, hide = true)]
+        auto: bool,
+    },
     /// Mark a session read
     Read { session: String },
     /// Mark a session unread
@@ -535,9 +541,14 @@ fn run(cli: Cli) -> Result<()> {
             let s = r.resolve_any(&session)?;
             print_info(&r, &s);
         }
-        Cmd::Retitle { session } => {
+        Cmd::Retitle { session, auto } => {
             let s = r.resolve(&session, false)?;
-            println!("{}", r.generate_title(&s.id)?);
+            let title = if auto {
+                r.auto_title(&s.id)?
+            } else {
+                r.generate_title(&s.id)?
+            };
+            println!("{title}");
         }
         Cmd::Read { session } => {
             let s = r.resolve(&session, false)?;

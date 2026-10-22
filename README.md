@@ -182,8 +182,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     for pi on the normal screen, so tmux's copy mode scrolls its history,
     `args = ["--tui-mode", "regular"]`), and `title_model`, the
     model a generated title (`s t`) is made with: Claude's default is `haiku`, pi's its
-    own default model. Any other agent goes in its own table and is then offered for
-    new sessions:
+    own default model. pi names no task itself, so roster has it make a title after a
+    conversation's first turn; `auto_title = false` turns that off. Any other agent
+    goes in its own table and is then offered for new sessions:
 
     ```toml
     [agents.aider]          # runs `aider`; or set command = "..."
@@ -208,11 +209,12 @@ Roster starts [pi](https://github.com/earendil-works/pi) with an extension of it
 settings and extensions stay as they are. The extension reports pi's state to roster:
 working, idle, needs input while a dialog (an extension asking permission, say) holds
 up a turn. A session's model is anything pi's `--model` takes (forms offer the ones
-`pi --list-models` lists), its effort pi's thinking level, and its title the name you
-give pi's session (`/name`). `/new` starts a new conversation in the same session;
-starting it again resumes the last one (`--session-id`). The statistics come from pi's
-session file, cost included, with the context window pi reports for the model.
-Adopting conversations is for Claude's only.
+`pi --list-models` lists), its effort pi's thinking level, and its title one pi makes
+after the first turn (with `title_model`), or the name you give its session (`/name`).
+`/new` starts a new conversation in the same session; starting it again resumes the
+last one (`--session-id`). The statistics come from pi's session file, cost included,
+with the context window pi reports for the model. Adopting conversations is for
+Claude's only.
 
 ## Scrolling back
 

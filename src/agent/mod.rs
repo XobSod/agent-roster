@@ -97,6 +97,13 @@ pub trait Adapter: Sync {
         Report::default()
     }
 
+    /// Whether the agent names the task it's on itself (`title`); if not,
+    /// and it has a one-off mode and a transcript, roster makes it a title
+    /// after its first turn (`[agents.<name>] auto_title`).
+    fn names_its_task(&self) -> bool {
+        false
+    }
+
     /// The task the agent names in its terminal title, if it names one.
     fn title(&self, _pane_title: &str) -> Option<String> {
         None

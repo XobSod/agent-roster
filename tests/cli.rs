@@ -424,7 +424,15 @@ fn pi_reports_through_rosters_extension() {
         "{info}"
     );
 
-    // Naming its session titles it.
+    // pi names no task itself: after its first turn roster has it make a
+    // title (the stand-in answers with its arguments).
+    t.wait_for("the automatic title", |t| {
+        t.session("p", false).unwrap()["title"]
+            .as_str()
+            .is_some_and(|title| title.starts_with("fake pi: -p --no-session"))
+    });
+
+    // Naming its session (/name) titles it instead.
     let target = format!("=r-{}:", s["id"].as_str().unwrap());
     Command::new("tmux")
         .args([

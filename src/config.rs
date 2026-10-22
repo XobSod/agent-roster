@@ -31,6 +31,7 @@
 //! [agents.pi]                     # pi is offered once installed; this only adds to it
 //! args = ["--tui-mode", "regular"]
 //! title_model = "claude-haiku-4-5" # default: pi's default model
+//! auto_title = false              # no title made after its first turn (default true)
 //!
 //! [agents.aider]                  # any other agent: state from its screen
 //! idle_after = 4                  # seconds without screen changes = idle
@@ -264,6 +265,9 @@ pub struct AgentConfig {
     pub fit_preview: Option<FitPreview>,
     /// The model a generated title is made with (by the agent's one-off mode).
     pub title_model: Option<String>,
+    /// For an agent that doesn't name its task itself (pi): a title made
+    /// after its first turn (default true).
+    pub auto_title: Option<bool>,
 }
 
 impl Config {

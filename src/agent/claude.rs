@@ -140,6 +140,10 @@ impl Adapter for Claude {
         }
     }
 
+    fn names_its_task(&self) -> bool {
+        true
+    }
+
     /// "✳ Fix the parser" → "Fix the parser"; None while Claude shows its
     /// default title. Claude's titles start with a glyph; anything else is
     /// tmux's default (the host name).

@@ -8,12 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::agent::Kind;
 use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
 use crate::paths::{self, PROJECT_ENV, Paths};
-use crate::stats::{AgentStats, ClaudeTranscript};
+use crate::stats::AgentStats;
 use crate::tmux::Tmux;
 use crate::util::{self, now_ms};
 use crate::{agent, launch};
@@ -94,31 +93,28 @@ impl Roster {
                     if s.state == State::Stopped {
                         s.set_state(State::Idle, now);
                     }
-                    match self.kind(&s) {
-                        Kind::Claude => {
-                            if let Some(title) = claude_title(&pane.title) {
-                                s.title = Some(title);
-                            }
-                            if s.needs_screen_check(now)
-                                && let Some(hash) = self.screen_hash(&s)
-                            {
-                                if redrawing {
-                                    s.redrawn(&hash);
-                                } else {
-                                    s.observe_screen(&hash, now);
-                                    s.correct_stale_working(now);
-                                }
+                    let adapter = agent::adapter(&s.agent);
+                    if let Some(title) = adapter.title(&pane.title) {
+                        s.title = Some(title);
+                    }
+                    if adapter.reports() {
+                        // Its hooks tell; the screen only corrects a missed end of turn.
+                        if s.needs_screen_check(now)
+                            && let Some(hash) = self.screen_hash(&s)
+                        {
+                            if redrawing {
+                                s.redrawn(&hash);
+                            } else {
+                                s.observe_screen(&hash, now);
+                                s.correct_stale_working(now);
                             }
                         }
-                        Kind::Generic => {
-                            if let Some(hash) = self.screen_hash(&s) {
-                                let idle_after = agent::idle_after_ms(&s.agent, &self.config);
-                                if redrawing {
-                                    s.redrawn(&hash);
-                                } else {
-                                    s.observe_generic(&hash, now, idle_after);
-                                }
-                            }
+                    } else if let Some(hash) = self.screen_hash(&s) {
+                        let idle_after = agent::idle_after_ms(&s.agent, &self.config);
+                        if redrawing {
+                            s.redrawn(&hash);
+                        } else {
+                            s.observe_generic(&hash, now, idle_after);
                         }
                     }
                     if s.pending_prompt.is_some() && self.ready_for_prompt(&s, now) {
@@ -185,9 +181,10 @@ impl Roster {
         loop {
             let now = now_ms();
             let unresolved = self.db.sessions(false)?.iter().any(|s| {
-                let watched = match self.kind(s) {
-                    Kind::Claude => s.needs_screen_check(now),
-                    Kind::Generic => s.state == State::Working,
+                let watched = if agent::adapter(&s.agent).reports() {
+                    s.needs_screen_check(now)
+                } else {
+                    s.state == State::Working
                 };
                 watched && s.screen_changed_at.is_some_and(|t| t <= start)
             });
@@ -239,11 +236,10 @@ impl Roster {
         if !origin.is_dir() {
             bail!("{} is not a directory", origin.display());
         }
-        if let Some(agent) = &defaults.agent {
-            agent::kind(agent, &self.config)?;
-        }
+        let agent = defaults.agent.as_deref().unwrap_or(agent::DEFAULT);
+        agent::known(agent, &self.config)?;
         if let Some(effort) = &defaults.effort {
-            agent::check_effort(effort)?;
+            agent::check_effort(agent, effort)?;
         }
         Ok(Project {
             id,
@@ -374,10 +370,10 @@ impl Roster {
         let agent = req
             .agent
             .or_else(|| project.agent.clone())
-            .unwrap_or_else(|| agent::CLAUDE.to_string());
-        let kind = agent::kind(&agent, &self.config)?;
+            .unwrap_or_else(|| agent::DEFAULT.to_string());
+        let adapter = agent::known(&agent, &self.config)?;
         if let Some(effort) = &req.effort {
-            agent::check_effort(effort)?;
+            agent::check_effort(&agent, effort)?;
         }
         let taken: Vec<String> = self
             .db
@@ -402,8 +398,8 @@ impl Roster {
                 .find(|n| !taken.contains(n))
                 .expect("unbounded"),
         };
-        // Model and effort are Claude flags.
-        let (model, effort) = if kind == Kind::Claude {
+        // Only for agents that take them.
+        let (model, effort) = if adapter.choices().is_some() {
             (req.model, req.effort)
         } else {
             (None, None)
@@ -496,13 +492,12 @@ impl Roster {
         s.exit_status = None;
         s.screen_hash = None;
         s.screen_changed_at = None;
-        match self.kind(&s) {
+        if agent::adapter(&s.agent).reports() {
             // Counts as a hook event, so the screen isn't consulted right away.
-            Kind::Claude => s.last_event_at = Some(now),
-            Kind::Generic => {
-                s.last_event_at = None;
-                s.baseline_at = Some(now + BOOT_GRACE_MS);
-            }
+            s.last_event_at = Some(now);
+        } else {
+            s.last_event_at = None;
+            s.baseline_at = Some(now + BOOT_GRACE_MS);
         }
         self.db.save_session(&s)
     }
@@ -637,11 +632,11 @@ impl Roster {
         effort: Option<String>,
     ) -> Result<Session> {
         validate_name("session", name)?;
-        if let Some(effort) = &effort {
-            agent::check_effort(effort)?;
-        }
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
+        if let Some(effort) = &effort {
+            agent::check_effort(&s.agent, effort)?;
+        }
         let taken = self
             .db
             .sessions(false)?
@@ -657,7 +652,7 @@ impl Roster {
         s.title_override = title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
-        if self.kind(&s) == Kind::Claude {
+        if agent::adapter(&s.agent).choices().is_some() {
             s.model = model;
             s.effort = effort;
         }
@@ -665,13 +660,11 @@ impl Roster {
         Ok(s)
     }
 
-    /// What the session's agent can tell about it (for Claude, from its
-    /// transcript); None if it can't.
+    /// What the session's agent can tell about it, from its transcript; None
+    /// if it can't.
     pub fn agent_stats(&self, s: &Session) -> Option<AgentStats> {
-        if self.kind(s) != Kind::Claude {
-            return None;
-        }
-        let mut transcript = ClaudeTranscript::new(Path::new(s.transcript_path.as_deref()?));
+        let path = Path::new(s.transcript_path.as_deref()?);
+        let mut transcript = agent::adapter(&s.agent).transcript(path)?;
         transcript.update().ok()?;
         Some(transcript.stats(s.running_model.as_deref()))
     }
@@ -680,19 +673,27 @@ impl Roster {
     /// the session's title (the agent's own stays the same otherwise).
     pub fn generate_title(&mut self, id: &str) -> Result<String> {
         let mut s = self.db.session(id)?;
-        if self.kind(&s) != Kind::Claude {
-            bail!("only Claude sessions can get a generated title; set one with edit");
+        let adapter = agent::adapter(&s.agent);
+        // (Asked without a path: whether it has a transcript roster reads at all.)
+        if adapter.transcript(Path::new("")).is_none() {
+            bail!(
+                "{} keeps no transcript roster can read, so it can't get a generated title; set one with edit",
+                s.agent
+            );
         }
         let path = s.transcript_path.clone().filter(|p| Path::new(p).exists());
         let path =
             path.with_context(|| format!("{} has no conversation to title yet", s.label()))?;
-        let mut transcript = ClaudeTranscript::new(Path::new(&path));
+        let mut transcript = adapter
+            .transcript(Path::new(&path))
+            .context("no transcript")?;
         transcript.update()?;
         let prompts = transcript.recent_prompts();
         if prompts.is_empty() {
             bail!("{} has no prompts to title yet", s.label());
         }
-        let mut argv = agent::claude_oneoff(&self.config);
+        // Haiku makes the title, whichever agent the session runs.
+        let mut argv = agent::claude::oneoff(&self.config);
         argv.push(title_request(&prompts, s.display_title()));
         let project = self
             .db
@@ -876,23 +877,19 @@ impl Roster {
     /// Whether starting `s` again resumes its conversation; if not, the CLI and
     /// TUI ask first.
     pub fn can_resume(&self, s: &Session) -> bool {
-        self.kind(s).can_resume()
+        agent::adapter(&s.agent).resumes()
     }
 
-    /// Whether an agent is waiting for its first prompt: for Claude, after it has
-    /// reported its session (a new conversation has no transcript before that);
-    /// for others, idle after starting up.
+    /// Whether an agent is waiting for its first prompt: for one with hooks,
+    /// after it has reported its session, which names its transcript (a new
+    /// conversation has none before that); for others, idle after starting up.
     fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
         s.state == State::Idle
-            && match self.kind(s) {
-                Kind::Claude => s.transcript_path.is_some(),
-                Kind::Generic => s.baseline_at.is_some_and(|b| now > b),
+            && if agent::adapter(&s.agent).reports() {
+                s.transcript_path.is_some()
+            } else {
+                s.baseline_at.is_some_and(|b| now > b)
             }
-    }
-
-    /// Agents removed from the config are still watched, by their screen.
-    fn kind(&self, s: &Session) -> Kind {
-        agent::kind(&s.agent, &self.config).unwrap_or(Kind::Generic)
     }
 
     fn screen_hash(&self, s: &Session) -> Option<String> {
@@ -922,19 +919,6 @@ impl Roster {
     }
 }
 
-/// The task Claude names in its terminal title ("✳ Fix the parser" → "Fix the
-/// parser"), or None while it shows its default title. Claude's titles start with
-/// a glyph; anything else is tmux's default (the host name).
-fn claude_title(pane_title: &str) -> Option<String> {
-    if pane_title.chars().next().is_none_or(char::is_alphanumeric) {
-        return None;
-    }
-    let title = pane_title
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .trim();
-    (!title.is_empty() && title != "Claude Code").then(|| title.to_string())
-}
-
 /// Fills in the models of sessions that predate recording them: from recent hook
 /// events, else from the end of their Claude transcript. Then learns what each
 /// alias turned out to be.
@@ -947,29 +931,13 @@ fn backfill_models(db: &Db) -> Result<()> {
         if let Some(model) = s
             .transcript_path
             .as_deref()
-            .and_then(|p| last_model_in(Path::new(p)))
+            .and_then(|p| agent::claude::last_model_in(Path::new(p)))
         {
             s.running_model = Some(model);
             db.save_session(&s)?;
         }
     }
     db.learn_model_names()
-}
-
-/// The last `"model":"claude-…"` in (the last megabyte of) a transcript.
-fn last_model_in(transcript: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = fs::File::open(transcript).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(1 << 20)))
-        .ok()?;
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail).ok()?;
-    let text = String::from_utf8_lossy(&tail);
-    let key = "\"model\":\"claude-";
-    let start = text.rfind(key)? + key.len() - "claude-".len();
-    let end = start + text[start..].find('"')?;
-    Some(text[start..end].to_string())
 }
 
 /// How long a title may take.
@@ -1098,30 +1066,6 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_claudes_task_title() {
-        assert_eq!(
-            claude_title("✳ tmux pane explanation").as_deref(),
-            Some("tmux pane explanation")
-        );
-        assert_eq!(
-            claude_title("⠐ Fix the parser").as_deref(),
-            Some("Fix the parser")
-        );
-        assert_eq!(claude_title("✳ Claude Code"), None);
-        assert_eq!(claude_title(""), None);
-        assert_eq!(claude_title("computer"), None);
-    }
-
-    #[test]
-    fn finds_the_last_model_in_a_transcript() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("t.jsonl");
-        fs::write(&path, "{\"model\":\"claude-haiku-5-5\"}\n{\"model\":\"<synthetic>\"}\n{\"message\":{\"model\":\"claude-opus-5-5\"}}\n").unwrap();
-        assert_eq!(last_model_in(&path).as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(last_model_in(&dir.path().join("missing")), None);
-    }
 
     #[test]
     fn titles_are_one_clean_line() {

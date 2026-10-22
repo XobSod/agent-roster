@@ -154,7 +154,7 @@ pub struct App {
     /// What the selected session's agent can tell about it.
     pub stats: Option<crate::stats::AgentStats>,
     /// Transcript readers by session, kept so each read only takes what's new.
-    pub transcripts: std::collections::HashMap<String, crate::stats::ClaudeTranscript>,
+    pub transcripts: std::collections::HashMap<String, Box<dyn crate::stats::Transcript>>,
     /// The server view's report, its orphan count, and how far it's scrolled.
     pub report: Vec<crate::doctor::Line>,
     pub orphans: usize,
@@ -712,7 +712,7 @@ impl App {
             return match action {
                 Action::Archive => self.restore(s),
                 Action::Delete => {
-                    let kept = if s.agent == crate::agent::CLAUDE {
+                    let kept = if crate::agent::adapter(&s.agent).adopts() {
                         format!(
                             "; its Claude conversation stays and can be adopted again ({})",
                             self.chord(Menu::Session, Action::Adopt)

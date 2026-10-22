@@ -467,7 +467,7 @@ fn run(cli: Cli) -> Result<()> {
                     Err(_) => return Err(e),
                 },
             };
-            let kept = if s.agent == agent::CLAUDE {
+            let kept = if agent::adapter(&s.agent).adopts() {
                 "; its Claude conversation stays and can be adopted again"
             } else {
                 ""

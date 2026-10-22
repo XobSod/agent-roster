@@ -44,7 +44,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let agents = agent::available(&roster.config)
         .into_iter()
         .map(|name| {
-            let resumes = agent::kind(&name, &roster.config).is_ok_and(|k| k.can_resume());
+            let resumes = agent::adapter(&name).resumes();
             (name, resumes)
         })
         .collect();
@@ -165,21 +165,18 @@ fn update_preview(roster: &Roster, app: &mut App) {
         .and_then(|s| agent_stats(app, &s));
 }
 
-/// What the agent can tell about a session, read incrementally (for Claude,
-/// from its transcript).
+/// What the agent can tell about a session, its transcript read incrementally.
 fn agent_stats(app: &mut App, s: &crate::model::Session) -> Option<crate::stats::AgentStats> {
-    if s.agent != agent::CLAUDE || s.deleted_at.is_some() {
+    if s.deleted_at.is_some() {
         return None;
     }
     let path = std::path::Path::new(s.transcript_path.as_deref()?);
-    let reader = app
-        .transcripts
-        .entry(s.id.clone())
-        .or_insert_with(|| crate::stats::ClaudeTranscript::new(path));
     // After /clear the conversation, and its transcript, change.
-    if reader.path() != path {
-        *reader = crate::stats::ClaudeTranscript::new(path);
+    if app.transcripts.get(&s.id).is_none_or(|t| t.path() != path) {
+        let reader = agent::adapter(&s.agent).transcript(path)?;
+        app.transcripts.insert(s.id.clone(), reader);
     }
+    let reader = app.transcripts.get_mut(&s.id)?;
     reader.update().ok()?;
     Some(reader.stats(s.running_model.as_deref()))
 }

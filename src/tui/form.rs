@@ -7,7 +7,7 @@ use std::path::Path;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::Op;
-use crate::agent::{CLAUDE, CLAUDE_MODELS, CLAUDE_PINNED, EFFORTS};
+use crate::agent::{self, CLAUDE};
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
 use crate::util::expand_tilde;
@@ -127,6 +127,15 @@ fn or_default(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| DEFAULT.to_string())
 }
 
+/// The model field; its choices are the agent's (see `Form::update`).
+fn model_field(value: impl Into<String>) -> Field {
+    Field::new(Id::Model, "Model", Kind::Combo(Vec::new()), value)
+}
+
+fn effort_field(value: impl Into<String>) -> Field {
+    Field::new(Id::Effort, "Effort", Kind::Choice(Vec::new()), value)
+}
+
 impl Form {
     pub fn new_project(directory: &str, agents: &[String]) -> Form {
         let fields = vec![
@@ -148,14 +157,14 @@ impl Form {
                 },
                 "",
             ),
-            Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
-            Field::new(Id::Model, "Model", Kind::Combo(model_options()), DEFAULT),
             Field::new(
-                Id::Effort,
-                "Effort",
-                Kind::Choice(options(DEFAULT, EFFORTS)),
-                DEFAULT,
+                Id::Agent,
+                "Agent",
+                Kind::Choice(agents.to_vec()),
+                agent::DEFAULT,
             ),
+            model_field(DEFAULT),
+            effort_field(DEFAULT),
             Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
         ];
         Form::build(
@@ -206,20 +215,10 @@ impl Form {
                 Id::Agent,
                 "Agent",
                 Kind::Choice(agents.to_vec()),
-                p.agent.as_deref().unwrap_or(CLAUDE),
+                p.agent.as_deref().unwrap_or(agent::DEFAULT),
             ),
-            Field::new(
-                Id::Model,
-                "Model",
-                Kind::Combo(model_options()),
-                or_default(&p.model),
-            ),
-            Field::new(
-                Id::Effort,
-                "Effort",
-                Kind::Choice(options(DEFAULT, EFFORTS)),
-                or_default(&p.effort),
-            ),
+            model_field(or_default(&p.model)),
+            effort_field(or_default(&p.effort)),
             Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
         ];
         fields[0].edited = true;
@@ -251,14 +250,14 @@ impl Form {
                 },
                 "",
             ),
-            Field::new(Id::Agent, "Agent", Kind::Choice(agents.to_vec()), CLAUDE),
-            Field::new(Id::Model, "Model", Kind::Combo(model_options()), DEFAULT),
             Field::new(
-                Id::Effort,
-                "Effort",
-                Kind::Choice(options(DEFAULT, EFFORTS)),
-                DEFAULT,
+                Id::Agent,
+                "Agent",
+                Kind::Choice(agents.to_vec()),
+                agent::DEFAULT,
             ),
+            model_field(DEFAULT),
+            effort_field(DEFAULT),
             Field::new(
                 Id::Prompt,
                 "Prompt",
@@ -307,18 +306,8 @@ impl Form {
                 s.title_override.clone().unwrap_or_default(),
             ),
             Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
-            Field::new(
-                Id::Model,
-                "Model",
-                Kind::Combo(model_options()),
-                or_default(&s.model),
-            ),
-            Field::new(
-                Id::Effort,
-                "Effort",
-                Kind::Choice(options(DEFAULT, EFFORTS)),
-                or_default(&s.effort),
-            ),
+            model_field(or_default(&s.model)),
+            effort_field(or_default(&s.effort)),
         ];
         fields[0].edited = true;
         Form::build(
@@ -387,18 +376,8 @@ impl Form {
                 },
                 "",
             ),
-            Field::new(
-                Id::Model,
-                "Model",
-                Kind::Combo(model_options()),
-                or_default(&defaults.and_then(|p| p.model.clone())),
-            ),
-            Field::new(
-                Id::Effort,
-                "Effort",
-                Kind::Choice(options(DEFAULT, EFFORTS)),
-                or_default(&defaults.and_then(|p| p.effort.clone())),
-            ),
+            model_field(or_default(&defaults.and_then(|p| p.model.clone()))),
+            effort_field(or_default(&defaults.and_then(|p| p.effort.clone()))),
             copy,
         ];
         let mut form = Form::build(
@@ -441,17 +420,22 @@ impl Form {
                 .cloned()
                 .unwrap_or_else(|| "Claude's default".into()),
         );
-        for alias in CLAUDE_MODELS {
-            notes.insert(
-                alias.to_string(),
-                names
-                    .get(*alias)
-                    .cloned()
-                    .unwrap_or_else(|| "latest".into()),
-            );
-        }
-        for id in CLAUDE_PINNED {
-            notes.insert(id.to_string(), crate::util::model_name(id));
+        let choices = agent::BUILT_IN
+            .iter()
+            .filter_map(|a| agent::adapter(a).choices());
+        for c in choices {
+            for alias in c.aliases {
+                notes.insert(
+                    alias.to_string(),
+                    names
+                        .get(*alias)
+                        .cloned()
+                        .unwrap_or_else(|| "latest".into()),
+                );
+            }
+            for id in c.pinned {
+                notes.insert(id.to_string(), crate::util::model_name(id));
+            }
         }
         if let Some(field) = self.field_mut(Id::Model) {
             field.notes = notes;
@@ -481,6 +465,12 @@ impl Form {
         self.field(id).map_or("", |f| f.value.as_str())
     }
 
+    /// The agent the form is about; without an agent field, it adopts a
+    /// conversation, which is Claude's.
+    fn agent(&self) -> &str {
+        self.field(Id::Agent).map_or(CLAUDE, |f| f.value.as_str())
+    }
+
     /// The value, or None for "default" or empty.
     fn setting(&self, id: Id) -> Option<String> {
         let value = self.value(id).trim();
@@ -489,15 +479,18 @@ impl Form {
 
     /// Fills in fields that follow others.
     fn update(&mut self) {
-        // Model and effort are Claude flags; without an agent field, it's Claude.
-        let agent = self
-            .field(Id::Agent)
-            .map_or(CLAUDE, |f| f.value.as_str())
-            .to_string();
-        for id in [Id::Model, Id::Effort] {
-            if let Some(f) = self.field_mut(id) {
-                f.hidden = agent != CLAUDE;
-            }
+        // Model and effort choices are the agent's; one that takes neither hides them.
+        let choices = agent::adapter(self.agent()).choices();
+        if let Some(f) = self.field_mut(Id::Model) {
+            f.hidden = choices.is_none();
+            f.kind = Kind::Combo(options(
+                DEFAULT,
+                &choices.map_or(Vec::new(), |c| c.models()),
+            ));
+        }
+        if let Some(f) = self.field_mut(Id::Effort) {
+            f.hidden = choices.is_none();
+            f.kind = Kind::Choice(options(DEFAULT, choices.map_or(&[][..], |c| c.efforts)));
         }
         // A new project is named after its directory until the user names it.
         let directory = expand_tilde(self.value(Id::Directory));
@@ -522,7 +515,9 @@ impl Form {
                 let defaults = [
                     (
                         Id::Agent,
-                        p.agent.clone().unwrap_or_else(|| CLAUDE.to_string()),
+                        p.agent
+                            .clone()
+                            .unwrap_or_else(|| agent::DEFAULT.to_string()),
                     ),
                     (Id::Model, or_default(&p.model)),
                     (Id::Effort, or_default(&p.effort)),
@@ -645,18 +640,13 @@ impl Form {
                 Ok(value.to_string())
             }
         };
-        // A project's default agent: None for Claude, the default.
-        let agent = || self.setting(Id::Agent).filter(|a| a != CLAUDE);
-        let claude = self.value(Id::Agent) == CLAUDE;
-        let model = || {
-            if claude {
-                self.setting(Id::Model)
-            } else {
-                None
-            }
-        };
+        // A project's default agent: None for the default one.
+        let agent = || self.setting(Id::Agent).filter(|a| a != agent::DEFAULT);
+        // Only for an agent that takes them.
+        let takes = agent::adapter(self.agent()).choices().is_some();
+        let model = || if takes { self.setting(Id::Model) } else { None };
         let effort = || {
-            if claude {
+            if takes {
                 self.setting(Id::Effort)
             } else {
                 None
@@ -699,32 +689,15 @@ impl Form {
                 // Asked first (see App).
                 force: open_in.is_some(),
             },
-            Purpose::EditSession(id) => {
-                let claude = self.value(Id::Agent) == CLAUDE;
-                Op::EditSession {
-                    id: id.clone(),
-                    name: required(Id::Name, "The name")?,
-                    title: self.setting(Id::Title),
-                    model: if claude {
-                        self.setting(Id::Model)
-                    } else {
-                        None
-                    },
-                    effort: if claude {
-                        self.setting(Id::Effort)
-                    } else {
-                        None
-                    },
-                }
-            }
+            Purpose::EditSession(id) => Op::EditSession {
+                id: id.clone(),
+                name: required(Id::Name, "The name")?,
+                title: self.setting(Id::Title),
+                model: model(),
+                effort: effort(),
+            },
         })
     }
-}
-
-/// The model choices: default, the aliases, then pinned versions.
-fn model_options() -> Vec<String> {
-    let rest: Vec<&str> = CLAUDE_MODELS.iter().chain(CLAUDE_PINNED).copied().collect();
-    options(DEFAULT, &rest)
 }
 
 /// The next (or previous) option after `value`; a typed value goes to the first.

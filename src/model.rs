@@ -52,7 +52,7 @@ impl Project {
     /// Its defaults for new sessions, e.g. "claude · opus (Opus 5.5) · high": an
     /// alias with what it last turned out to be (`models`).
     pub fn defaults_label(&self, models: &std::collections::HashMap<String, String>) -> String {
-        let agent = self.agent.as_deref().unwrap_or(crate::agent::CLAUDE);
+        let agent = self.agent.as_deref().unwrap_or(crate::agent::DEFAULT);
         let model = self.model.as_ref().map(|m| match models.get(m) {
             Some(name) if name != m => format!("{m} ({name})"),
             _ => m.clone(),
@@ -105,7 +105,7 @@ pub struct Session {
     /// Screen activity up to this time has been seen by the user (or is the agent
     /// starting up); only later activity can make a session unread.
     pub baseline_at: Option<i64>,
-    /// What the agent says it's working on (Claude's terminal title).
+    /// What the agent says it's working on (for Claude, its terminal title).
     pub title: Option<String>,
     /// Passed to the agent on every start; None means its own default.
     pub model: Option<String>,
@@ -114,7 +114,7 @@ pub struct Session {
     pub state_since: Option<i64>,
     /// A first prompt to type into the agent once it's ready.
     pub pending_prompt: Option<String>,
-    /// The model and effort the agent reports using (Claude's hook payloads).
+    /// The model and effort the agent reports using.
     pub running_model: Option<String>,
     pub running_effort: Option<String>,
     /// A title the user set (or had generated); wins over the agent's.
@@ -240,35 +240,26 @@ impl Session {
         self.title().unwrap_or(&self.name)
     }
 
-    /// Applies a reported event.
-    pub fn apply(&mut self, e: &Event) {
+    /// Applies a reported event, with what its payload says (`report`).
+    pub fn apply(&mut self, e: &Event, report: &crate::agent::Report) {
         if self.deleted_at.is_some() {
             return;
         }
-        // Claude's hook payloads carry the current conversation ID, which changes
-        // after /clear.
-        if let Some(payload) = e
-            .payload
-            .as_deref()
-            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-        {
-            if let Some(id) = payload.get("session_id").and_then(|v| v.as_str()) {
-                self.conversation_id = Some(id.to_string());
-            }
-            if let Some(path) = payload.get("transcript_path").and_then(|v| v.as_str()) {
-                self.transcript_path = Some(path.to_string());
-            }
-            // A cleared conversation is a new task.
-            if payload.get("source").and_then(|v| v.as_str()) == Some("clear") {
-                self.title = None;
-            }
-            // SessionStart names the model, Stop the effort.
-            if let Some(model) = payload.get("model").and_then(|v| v.as_str()) {
-                self.running_model = Some(model.to_string());
-            }
-            if let Some(effort) = payload.pointer("/effort/level").and_then(|v| v.as_str()) {
-                self.running_effort = Some(effort.to_string());
-            }
+        if let Some(id) = &report.conversation_id {
+            self.conversation_id = Some(id.clone());
+        }
+        if let Some(path) = &report.transcript_path {
+            self.transcript_path = Some(path.clone());
+        }
+        // A cleared conversation is a new task.
+        if report.cleared {
+            self.title = None;
+        }
+        if let Some(model) = &report.model {
+            self.running_model = Some(model.clone());
+        }
+        if let Some(effort) = &report.effort {
+            self.running_effort = Some(effort.clone());
         }
         match e.kind.as_str() {
             // A prompt you submitted starts a turn.
@@ -365,6 +356,7 @@ impl Session {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::agent::Report;
 
     #[test]
     fn default_names_are_the_agent_and_a_number() {
@@ -418,26 +410,31 @@ pub mod tests {
         }
     }
 
-    fn event(kind: &str, at: i64, payload: Option<&str>) -> Event {
+    fn event(kind: &str, at: i64) -> Event {
         Event {
             id: 1,
             session_id: "a".into(),
             kind: kind.into(),
             at,
-            payload: payload.map(String::from),
+            payload: None,
         }
+    }
+
+    /// Applies an event that reported nothing more than its kind.
+    fn apply(s: &mut Session, kind: &str, at: i64) {
+        s.apply(&event(kind, at), &Report::default());
     }
 
     #[test]
     fn turn_end_and_questions_mark_unread() {
         let mut s = session("a");
-        s.apply(&event("working", 10, None));
+        apply(&mut s, "working", 10);
         assert_eq!((s.state, s.unread), (State::Working, false));
-        s.apply(&event("needs-input", 20, None));
+        apply(&mut s, "needs-input", 20);
         assert_eq!((s.state, s.unread), (State::NeedsInput, true));
         s.unread = false;
-        s.apply(&event("working", 30, None));
-        s.apply(&event("idle", 40, None));
+        apply(&mut s, "working", 30);
+        apply(&mut s, "idle", 40);
         assert_eq!(
             (s.state, s.unread, s.last_event_at),
             (State::Idle, true, Some(40))
@@ -447,11 +444,12 @@ pub mod tests {
     #[test]
     fn session_start_is_idle_but_not_unread() {
         let mut s = session("a");
-        s.apply(&event(
-            "session",
-            10,
-            Some(r#"{"session_id":"c-1","transcript_path":"/t/c-1.jsonl","source":"startup"}"#),
-        ));
+        let report = Report {
+            conversation_id: Some("c-1".into()),
+            transcript_path: Some("/t/c-1.jsonl".into()),
+            ..Report::default()
+        };
+        s.apply(&event("session", 10), &report);
         assert_eq!((s.state, s.unread), (State::Idle, false));
         assert_eq!(s.conversation_id.as_deref(), Some("c-1"));
         assert_eq!(s.transcript_path.as_deref(), Some("/t/c-1.jsonl"));
@@ -462,26 +460,31 @@ pub mod tests {
         let mut s = session("a");
         s.conversation_id = Some("c-1".into());
         s.title = Some("old task".into());
-        s.apply(&event(
-            "session",
-            10,
-            Some(r#"{"session_id":"c-2","source":"clear"}"#),
-        ));
+        let report = Report {
+            conversation_id: Some("c-2".into()),
+            cleared: true,
+            ..Report::default()
+        };
+        s.apply(&event("session", 10), &report);
         assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
         assert_eq!(s.title, None);
     }
 
     #[test]
-    fn remembers_the_model_and_effort_claude_reports() {
+    fn remembers_the_model_and_effort_reported() {
         let mut s = session("a");
         s.model = Some("opus".into());
         assert_eq!(s.model_label().as_deref(), Some("opus"));
-        s.apply(&event(
-            "session",
-            10,
-            Some(r#"{"model":"claude-opus-5-5[1m]"}"#),
-        ));
-        s.apply(&event("idle", 20, Some(r#"{"effort":{"level":"xhigh"}}"#)));
+        let model = Report {
+            model: Some("claude-opus-5-5[1m]".into()),
+            ..Report::default()
+        };
+        s.apply(&event("session", 10), &model);
+        let effort = Report {
+            effort: Some("xhigh".into()),
+            ..Report::default()
+        };
+        s.apply(&event("idle", 20), &effort);
         assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
         assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
     }
@@ -491,13 +494,13 @@ pub mod tests {
         let mut s = session("a");
         s.state = State::Idle;
         s.state_since = Some(0);
-        s.apply(&event("working", 1_000, None));
-        s.apply(&event("working", 2_000, None));
-        s.apply(&event("needs-input", 4_000, None));
-        s.apply(&event("working", 9_000, None));
-        s.apply(&event("idle", 10_000, None));
+        apply(&mut s, "working", 1_000);
+        apply(&mut s, "working", 2_000);
+        apply(&mut s, "needs-input", 4_000);
+        apply(&mut s, "working", 9_000);
+        apply(&mut s, "idle", 10_000);
         assert_eq!((s.turns, s.worked_ms), (1, 4_000));
-        s.apply(&event("working", 20_000, None));
+        apply(&mut s, "working", 20_000);
         assert_eq!((s.turns, s.worked(25_000)), (2, 9_000));
     }
 
@@ -514,17 +517,17 @@ pub mod tests {
     #[test]
     fn ignores_unknown_kinds_and_deleted_sessions() {
         let mut s = session("a");
-        s.apply(&event("bogus", 10, None));
+        apply(&mut s, "bogus", 10);
         assert_eq!((s.state, s.last_event_at), (State::Working, None));
         s.deleted_at = Some(1);
-        s.apply(&event("idle", 20, None));
+        apply(&mut s, "idle", 20);
         assert_eq!(s.state, State::Working);
     }
 
     #[test]
     fn stale_working_becomes_idle_only_when_screen_is_still() {
         let mut s = session("a");
-        s.apply(&event("working", 0, None));
+        apply(&mut s, "working", 0);
         s.observe_screen("h1", 1000);
         // Hook event too recent.
         assert!(!s.correct_stale_working(3000));
@@ -589,7 +592,7 @@ pub mod tests {
     #[test]
     fn only_working_sessions_get_corrected() {
         let mut s = session("a");
-        s.apply(&event("needs-input", 0, None));
+        apply(&mut s, "needs-input", 0);
         s.observe_screen("h", 0);
         assert!(!s.correct_stale_working(60_000));
         assert_eq!(s.state, State::NeedsInput);

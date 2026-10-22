@@ -350,18 +350,15 @@ impl Db {
                 };
             }
             if let Some(s) = touched.get_mut(&e.session_id) {
-                s.apply(e);
+                let report = crate::agent::read_report(&s.agent, e.payload.as_deref());
+                s.apply(e, &report);
                 // Learn what the model asked for (or the default) turned out to be.
-                let model = e
-                    .payload
-                    .as_deref()
-                    .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
-                if let Some(model) = model.as_ref().and_then(|v| v.get("model")?.as_str()) {
+                if let Some(model) = report.model {
                     let asked = s.model.clone().unwrap_or_else(|| "default".into());
                     tx.execute(
                         "INSERT INTO meta (key, value) VALUES (?1, ?2)
                          ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                        [format!("model:{asked}"), model.to_string()],
+                        [format!("model:{asked}"), model],
                     )?;
                 }
             }

@@ -403,10 +403,10 @@ fn glyph(agent: &str) -> Span<'static> {
 }
 
 /// The card's second line after the name: model and effort (and the agent, if
-/// not Claude).
+/// not the default one).
 fn meta(s: &Session) -> String {
     let mut meta = String::new();
-    if s.agent != crate::agent::CLAUDE {
+    if s.agent != crate::agent::DEFAULT {
         meta.push_str(&format!(" · {}", s.agent));
     }
     match (s.model_label(), s.effort_label()) {

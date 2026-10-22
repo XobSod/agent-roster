@@ -399,7 +399,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Show { session } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
-            print!("{}", r.screen(&s.id, io::stdout().is_terminal())?);
+            print!("{}", r.screen(&s, io::stdout().is_terminal())?);
         }
         Cmd::Attach { session, yes } => {
             r.refresh()?;

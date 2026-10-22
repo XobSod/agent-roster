@@ -58,9 +58,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 /// True while something on screen animates (a working session's spinner).
 pub fn animating(app: &App) -> bool {
-    app.sessions
-        .iter()
-        .any(|s| s.deleted_at.is_none() && s.state == State::Working)
+    // Only the session list has spinners.
+    app.mode == Mode::Live
+        && app
+            .sessions
+            .iter()
+            .any(|s| s.deleted_at.is_none() && s.state == State::Working)
 }
 
 fn sidebar_width(total: u16) -> u16 {
@@ -501,9 +504,13 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     // The bottom of an agent's screen is where its prompt is; long lines are cut
     // (agents drawing full screen get this size, so theirs fit).
     app.preview_size.set(Some((body.width, body.height)));
+    // Drawn line by line from the preview itself: it's redrawn as often as
+    // the spinners move, and copying a colourful screen each time adds up.
     let lines = &app.preview.lines;
     let skip = lines.len().saturating_sub(body.height as usize);
-    f.render_widget(Paragraph::new(Text::from(lines[skip..].to_vec())), body);
+    for (line, row) in lines[skip..].iter().zip(body.rows()) {
+        f.render_widget(line, row);
+    }
 }
 
 /// Project / name / title, as headers show a session: the name only if it

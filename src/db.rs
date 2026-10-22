@@ -206,7 +206,7 @@ impl Db {
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
-        let mut stmt = self.conn.prepare(&format!(
+        let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name"
         ))?;
         let rows = stmt.query_map([], project_from_row)?;
@@ -291,7 +291,7 @@ impl Db {
             "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id {filter}
              ORDER BY p.name, s.created_at, s.id"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -332,6 +332,17 @@ impl Db {
     /// Applies events reported since the last fold, in one transaction, so any
     /// number of roster processes can fold concurrently. Returns how many were applied.
     pub fn fold_events(&mut self, now: i64) -> Result<usize> {
+        // Most of the time nothing is new: find that out without taking the
+        // write lock, which agents' hooks wait for.
+        let pending: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE id > coalesce(
+                (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'applied_event'), 0))",
+            [],
+            |r| r.get(0),
+        )?;
+        if !pending {
+            return Ok(0);
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

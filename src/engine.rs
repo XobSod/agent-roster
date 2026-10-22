@@ -13,7 +13,7 @@ use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
 use crate::paths::{self, PROJECT_ENV, Paths};
 use crate::stats::AgentStats;
-use crate::tmux::Tmux;
+use crate::tmux::{Pane, Tmux};
 use crate::util::{self, now_ms};
 use crate::{agent, launch};
 
@@ -38,6 +38,9 @@ pub struct Roster {
     /// Sessions whose window this process resized, and until when their screen
     /// changes are the agent redrawing.
     resized: HashMap<String, i64>,
+    /// The panes `refresh` last listed, by tmux session, for what follows it
+    /// (fitting screens, showing one) without listing them again.
+    panes: Option<HashMap<String, Pane>>,
 }
 
 impl Roster {
@@ -65,6 +68,7 @@ impl Roster {
             tmux,
             exe,
             resized: HashMap::new(),
+            panes: None,
         })
     }
 
@@ -135,10 +139,19 @@ impl Roster {
                 self.db.save_session(&s)?;
             }
         }
+        self.panes = Some(panes);
         for (name, prompt) in prompts {
             self.tmux.type_line(&name, &prompt)?;
         }
         Ok(())
+    }
+
+    /// The panes as `refresh` last listed them, else as they are now.
+    fn panes(&self) -> Result<std::borrow::Cow<'_, HashMap<String, Pane>>> {
+        Ok(match &self.panes {
+            Some(panes) => std::borrow::Cow::Borrowed(panes),
+            None => std::borrow::Cow::Owned(self.tmux.panes()?),
+        })
     }
 
     /// Sizes the windows of agents drawing full screen to `size` (the TUI's
@@ -150,9 +163,15 @@ impl Roster {
     /// fitted once (`fitted` notes it by window and process; the caller clears
     /// it for a new size or after an attach), so a window someone else sized,
     /// another TUI for instance, isn't fought over.
-    pub fn fit_screens(&mut self, size: (u16, u16), fitted: &mut HashSet<String>) -> Result<()> {
-        let panes = self.tmux.panes()?;
-        for s in self.db.sessions(false)? {
+    /// `sessions` are the live ones, as just loaded.
+    pub fn fit_screens(
+        &mut self,
+        sessions: &[Session],
+        size: (u16, u16),
+        fitted: &mut HashSet<String>,
+    ) -> Result<()> {
+        let panes = self.panes()?.into_owned();
+        for s in sessions.iter().filter(|s| s.deleted_at.is_none()) {
             let name = s.tmux_name();
             let Some(pane) = panes.get(&name) else {
                 continue;
@@ -505,7 +524,7 @@ impl Roster {
             ("ROSTER_EXE", self.exe.to_string_lossy().into_owned()),
         ];
         let name = s.tmux_name();
-        if self.tmux.panes()?.contains_key(&name) {
+        if self.panes()?.contains_key(&name) {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)?;
         } else {
             let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
@@ -950,9 +969,9 @@ impl Roster {
     }
 
     /// The session's current screen, also after its agent exited.
-    pub fn screen(&self, id: &str, ansi: bool) -> Result<String> {
-        let s = self.db.session(id)?;
-        let Some(pane) = self.tmux.panes()?.remove(&s.tmux_name()) else {
+    pub fn screen(&self, s: &Session, ansi: bool) -> Result<String> {
+        let panes = self.panes()?;
+        let Some(pane) = panes.get(&s.tmux_name()) else {
             bail!("{} isn't running, so there's no screen to show", s.label());
         };
         // tmux writes "Pane is dead" on the bottom line, scrolling the agent's

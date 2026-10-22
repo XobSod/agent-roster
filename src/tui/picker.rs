@@ -7,6 +7,9 @@ use crate::engine::Adoptable;
 
 pub struct Picker {
     items: Vec<Adoptable>,
+    /// What typing matches in each item, made once: the list is filtered on
+    /// every frame.
+    haystacks: Vec<String>,
     pub query: String,
     /// Also those outside your projects' directories.
     pub all: bool,
@@ -24,6 +27,7 @@ impl Picker {
     pub fn new(items: Vec<Adoptable>) -> Picker {
         let all = !items.iter().any(|a| a.project.is_some());
         Picker {
+            haystacks: items.iter().map(haystack).collect(),
             items,
             query: String::new(),
             all,
@@ -40,11 +44,11 @@ impl Picker {
             .collect();
         self.items
             .iter()
-            .filter(|a| self.all || a.project.is_some())
-            .filter(|a| {
-                let text = haystack(a);
-                words.iter().all(|w| text.contains(w))
+            .zip(&self.haystacks)
+            .filter(|(a, text)| {
+                (self.all || a.project.is_some()) && words.iter().all(|w| text.contains(w))
             })
+            .map(|(a, _)| a)
             .collect()
     }
 

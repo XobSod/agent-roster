@@ -111,8 +111,11 @@ fn reload(roster: &mut Roster, app: &mut App) {
         app.model_names = names;
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
-    fit(roster, app);
-    update_preview(roster, app);
+    // Only the session list shows the preview.
+    if app.mode == Mode::Live {
+        fit(roster, app);
+        update_preview(roster, app);
+    }
 }
 
 /// Agents drawing full screen sized to the preview, so their screens fit it.
@@ -125,7 +128,7 @@ fn fit(roster: &mut Roster, app: &mut App) {
         app.fitted.clear();
         app.fitted_size = Some(size);
     }
-    if let Err(e) = roster.fit_screens(size, &mut app.fitted) {
+    if let Err(e) = roster.fit_screens(&app.sessions, size, &mut app.fitted) {
         app.fail(format!("{e:#}"));
     }
 }
@@ -146,7 +149,7 @@ fn update_preview(roster: &Roster, app: &mut App) {
             ..
         }) => app.shelf_info(shelf, count),
         Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => app.archived_info(&s),
-        Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s.id, true) {
+        Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s, true) {
             Ok(screen) => screen_text(&screen),
             Err(_) => {
                 let key = app.chord(Menu::Session, Action::Start);

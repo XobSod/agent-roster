@@ -204,10 +204,17 @@ impl App {
         ])
     }
 
-    /// Preview for a session with no screen to show (archived, or stopped and
-    /// gone from tmux): where it got to, what it is, what it was about (its
+    /// Preview for a stopped or archived session: where it got to, what it
+    /// is, how its screen ended if its agent exited with an error
+    /// (`last_screen`, see `screen_tail`), its note, what it was about (its
     /// last `prompts`), and what can be done with it.
-    pub fn session_info(&self, s: &Session, prompts: &[String], now: i64) -> Text<'static> {
+    pub fn session_info(
+        &self,
+        s: &Session,
+        prompts: &[String],
+        last_screen: &[String],
+        now: i64,
+    ) -> Text<'static> {
         use ratatui::style::{Modifier, Style};
         use ratatui::text::Span;
         let muted = Style::new().fg(theme::MUTED);
@@ -263,6 +270,15 @@ impl App {
                     Span::styled(format!("({whose})"), muted),
                 ],
             ));
+        }
+        // Before what's longer, so an error isn't the part that doesn't fit.
+        if !last_screen.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Its last screen",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            lines.extend(last_screen.iter().map(|l| Line::from(format!("  {l}"))));
         }
         // Unless it's open in the editor above.
         if let Some(note) = s.note.as_ref().filter(|_| {
@@ -351,4 +367,39 @@ impl App {
             Mode::Projects | Mode::Server | Mode::Settings => Text::default(),
         }
     }
+}
+
+/// How a dead pane's screen ended, worth showing after its agent's error:
+/// `raw` (captured without colours) without its last row, tmux's "Pane is
+/// dead" whatever `remain-on-exit-format` makes it, its rows wrapped to
+/// `width` (the pane is often wider than the preview), and of those the last
+/// `rows`, from the first that isn't blank.
+pub fn screen_tail(raw: &str, rows: usize, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut lines: Vec<&str> = raw.lines().collect();
+    lines.pop();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let width = width.max(1);
+    let mut wrapped: Vec<String> = Vec::new();
+    for line in lines {
+        let (mut row, mut used) = (String::new(), 0);
+        for c in line.trim_end().replace('\t', "    ").chars() {
+            let w = c.width().unwrap_or(0);
+            if used + w > width && used > 0 {
+                wrapped.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push(c);
+            used += w;
+        }
+        wrapped.push(row);
+    }
+    let start = wrapped.len().saturating_sub(rows);
+    wrapped
+        .into_iter()
+        .skip(start)
+        .skip_while(|l| l.trim().is_empty())
+        .collect()
 }

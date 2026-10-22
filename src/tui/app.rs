@@ -15,6 +15,7 @@ mod texts;
 
 use dialog::Purpose;
 pub use dialog::{Dialog, completions};
+pub use texts::screen_tail;
 
 use super::form::{self, Form, Outcome};
 use super::input;

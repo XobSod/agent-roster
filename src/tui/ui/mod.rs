@@ -151,7 +151,11 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     // Drawn line by line from the preview itself: it's redrawn as often as
     // the spinners move, and copying a colourful screen each time adds up.
     let lines = &app.preview.text.lines;
-    let skip = lines.len().saturating_sub(screen.height as usize);
+    // A screen's bottom is where its prompt is; a panel reads from its top.
+    let skip = match app.preview.screen {
+        true => lines.len().saturating_sub(screen.height as usize),
+        false => 0,
+    };
     for (line, row) in lines[skip..].iter().zip(screen.rows()) {
         f.render_widget(line, row);
     }

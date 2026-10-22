@@ -32,6 +32,8 @@ pub(crate) const LEAKY_ENV: &[&str] = &[
 pub struct Pane {
     pub dead: bool,
     pub dead_status: Option<i32>,
+    /// The signal that ended it (tmux gives no status then).
+    pub dead_signal: Option<i32>,
     pub pid: Option<i32>,
     /// The window's size.
     pub size: (u16, u16),
@@ -144,9 +146,9 @@ impl Tmux {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t\
-             #{window_width}\t#{window_height}\t#{session_attached}\t#{alternate_on}\t\
-             #{pane_title}",
+            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t\
+             #{pane_pid}\t#{window_width}\t#{window_height}\t#{session_attached}\t\
+             #{alternate_on}\t#{pane_title}",
         ])?
         else {
             return Ok(HashMap::new());
@@ -154,11 +156,12 @@ impl Tmux {
         let mut panes = HashMap::new();
         for line in out.lines() {
             // The title comes last and may itself contain tabs.
-            let fields: Vec<&str> = line.splitn(9, '\t').collect();
+            let fields: Vec<&str> = line.splitn(10, '\t').collect();
             if let [
                 name,
                 dead,
                 status,
+                signal,
                 pid,
                 width,
                 height,
@@ -170,6 +173,7 @@ impl Tmux {
                 panes.entry(name.to_string()).or_insert(Pane {
                     dead: dead == "1",
                     dead_status: status.parse().ok(),
+                    dead_signal: signal.parse().ok(),
                     pid: pid.parse().ok(),
                     size: (width.parse().unwrap_or(0), height.parse().unwrap_or(0)),
                     clients: clients.parse().unwrap_or(0),

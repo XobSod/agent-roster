@@ -77,6 +77,13 @@ fn tui_walkthrough() {
     term.keys(&["s", "x"]);
     term.wait_for("the stop", "Stopped demo/one");
     term.wait_for("the Stopped shelf", "Stopped (1)");
+    // Its preview says what it was, as for an archived one, not its last screen.
+    term.wait_for("the stopped session's details", "s s starts it");
+    assert!(
+        !term.screen().contains("Its last screen"),
+        "{}",
+        term.screen()
+    );
     term.keys(&["s", "d"]);
     term.wait_for("the confirmation", "Archive demo/one?");
     term.keys(&["y"]);
@@ -368,4 +375,22 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     );
     assert!(!term.screen().contains("╭ Note "));
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+}
+
+#[test]
+fn a_stopped_agents_error_shows_in_its_preview() {
+    let Some(t) = TestEnv::new("stoperr") else {
+        return;
+    };
+    std::fs::write(t.path("proj/.agent-roster.env"), "TOKEN=\"$(false)\"\n").unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "bad"]);
+    t.wait_for("stopped", |t| {
+        t.session("bad", false).unwrap()["state"] == "stopped"
+    });
+    let term = Terminal::start(&t, &format!("{}; sleep 600", t.shell_command()), (120, 30));
+    term.wait_for("what it was", "Stopped just now: its agent exited with 1.");
+    term.wait_for("how its screen ended", "Its last screen");
+    term.wait_for("the error", "roster: preparing the environment failed");
+    assert!(!term.screen().contains("Pane is dead"), "{}", term.screen());
 }

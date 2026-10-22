@@ -156,7 +156,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let (selected, mode) = (app.selected_key(), app.mode);
+            let (selected, mode, editing) = (app.selected_key(), app.mode, app.note.is_some());
             match app.on_key(key) {
                 Some(Op::Quit) => return Ok(()),
                 Some(op) => {
@@ -165,7 +165,10 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                     last_reload = Instant::now();
                 }
                 None if app.mode != mode => reload(roster, app),
-                None if app.selected_key() != selected => update_preview(roster, app),
+                // A stopped session's panel shows its note unless it's open.
+                None if app.selected_key() != selected || app.note.is_some() != editing => {
+                    update_preview(roster, app)
+                }
                 None => {}
             }
         }
@@ -265,14 +268,27 @@ fn update_preview(roster: &Roster, app: &mut App) {
             ..
         }) => app.shelf_info(shelf, count),
         Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => {
-            app.session_info(&s, &prompts, now)
+            app.session_info(&s, &prompts, &[], now)
+        }
+        // Stopped: what it was, as when archived; after an error, also how
+        // its screen ended (kept in tmux), where the error is.
+        Some(Entry::Card(s) | Entry::Row(s)) if s.state == crate::model::State::Stopped => {
+            let width = app.preview.size.get().map_or(80, |(w, _)| w as usize);
+            let tail = match s.exit_status {
+                Some(code) if code != 0 => roster
+                    .screen(&s, false)
+                    .map(|raw| app::screen_tail(&raw, LAST_SCREEN_LINES, width.saturating_sub(2)))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            app.session_info(&s, &prompts, &tail, now)
         }
         Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s, true) {
             Ok(screen) => {
                 app.preview.screen = true;
                 screen_text(&screen)
             }
-            Err(_) => app.session_info(&s, &prompts, now),
+            Err(_) => app.session_info(&s, &prompts, &[], now),
         },
     };
 }
@@ -300,6 +316,9 @@ fn transcript_info(
     let stats = roster.with_window(reader.stats(s.running_model.as_deref()), s);
     Some((stats, reader.recent_prompts()))
 }
+
+/// How many of a stopped agent's last lines its preview shows after an error.
+const LAST_SCREEN_LINES: usize = 8;
 
 /// A captured screen as styled text, without the empty lines below the content.
 fn screen_text(screen: &str) -> Text<'static> {

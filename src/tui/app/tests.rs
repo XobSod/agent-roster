@@ -896,3 +896,26 @@ fn notes_open_in_editor_if_set_and_archived_sessions_have_them_too() {
         "{question}"
     );
 }
+
+#[test]
+fn a_dead_panes_tail_is_its_last_rows_wrapped() {
+    // tmux's last row goes, whatever it says; blank rows around are trimmed.
+    let raw = "\nstarting\nerror: boom\n\n\nPane is dead (status 1, Thu Oct 22 10:00:00 2026)\n";
+    assert_eq!(screen_tail(raw, 8, 40), ["starting", "error: boom"]);
+    assert_eq!(screen_tail("error\ncustom format\n", 8, 40), ["error"]);
+    // Wrapped to the preview's width; the last rows of what that makes.
+    let long = format!("{}\n\n", "x".repeat(25));
+    assert_eq!(
+        screen_tail(&long, 8, 10),
+        ["xxxxxxxxxx", "xxxxxxxxxx", "xxxxx"]
+    );
+    let many: String = (1..=12).map(|i| format!("line {i}\n")).collect::<String>() + "dead\n";
+    let tail = screen_tail(&many, 8, 40);
+    assert_eq!(
+        (tail.len(), tail[0].as_str(), tail[7].as_str()),
+        (8, "line 5", "line 12")
+    );
+    // Nothing but blanks: nothing.
+    assert!(screen_tail("\n\n\nPane is dead\n", 8, 40).is_empty());
+    assert!(screen_tail("", 8, 40).is_empty());
+}

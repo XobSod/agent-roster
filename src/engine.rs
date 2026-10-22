@@ -100,10 +100,13 @@ impl Roster {
                 None => s.set_state(State::Stopped, now),
                 Some(pane) if pane.dead => {
                     // Record the exit code when it stops, not on every pass, so
-                    // `stop` can clear it.
+                    // `stop` can clear it; killed by a signal, 128 + it, as a
+                    // shell says.
                     if s.state != State::Stopped {
                         s.set_state(State::Stopped, now);
-                        s.exit_status = pane.dead_status;
+                        s.exit_status = pane
+                            .dead_status
+                            .or(pane.dead_signal.map(|signal| 128 + signal));
                     }
                 }
                 Some(pane) => {

@@ -1287,3 +1287,22 @@ fn notes_are_kept_with_their_session() {
     );
     assert_eq!(t.session("one", false).unwrap()["note"], Value::Null);
 }
+
+#[test]
+fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
+    let Some(t) = TestEnv::new("signal") else {
+        return;
+    };
+    fs::write(
+        t.config_dir().join("config.toml"),
+        "[agents.doomed]\ncommand = \"sh\"\nargs = [\"-c\", \"echo dying; kill -9 $$\"]\n",
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "gone", "--agent", "doomed"]);
+    t.wait_for("stopped", |t| {
+        t.session("gone", false).unwrap()["state"] == "stopped"
+    });
+    assert_eq!(t.session("gone", false).unwrap()["exit_status"], 137);
+    assert!(t.ok(&["show", "gone"]).contains("dying"));
+}

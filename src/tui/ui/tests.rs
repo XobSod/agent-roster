@@ -493,7 +493,7 @@ fn sessions_without_a_screen_say_what_they_were() {
         "fix the tests".to_string(),
         "and the\nchangelog".to_string(),
     ];
-    let shown = text(app.session_info(&s, &prompts, now));
+    let shown = text(app.session_info(&s, &prompts, &[], now));
     for part in [
         "Archived 2d ago.",
         "Project    RO roster  /r",
@@ -511,9 +511,25 @@ fn sessions_without_a_screen_say_what_they_were() {
     s.workdir = "/r".into();
     s.exit_status = Some(1);
     s.state_since = Some(now - 3 * 3_600_000);
-    let shown = text(app.session_info(&s, &[], now));
+    let screen = ["roster: preparing the environment failed".to_string()];
+    let shown = text(app.session_info(&s, &[], &screen, now));
     assert!(
         shown.starts_with("Stopped 3h ago: its agent exited with 1."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Its last screen\n  roster: preparing the environment failed\n"),
+        "{shown}"
+    );
+    // Before the note, which can be long.
+    s.note = Some(crate::note::Note {
+        text: "a note".into(),
+        pin: None,
+        at: 0,
+    });
+    let shown = text(app.session_info(&s, &[], &screen, now));
+    assert!(
+        shown.find("Its last screen") < shown.find("Note\n"),
         "{shown}"
     );
     assert!(

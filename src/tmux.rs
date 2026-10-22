@@ -516,6 +516,9 @@ bind -n {detach_key} detach-client
 set -g mouse off
 set -s escape-time 10
 set -s extended-keys on
+# Modified keys (Shift+Enter, say) in the format pi asks for, which Claude reads
+# too; tmux before 3.5 doesn't know the option, and -q lets it pass.
+set -sq extended-keys-format csi-u
 set -s set-clipboard on
 set -g history-limit 50000
 set -g remain-on-exit on
@@ -539,6 +542,7 @@ mod tests {
         assert!(text.contains("bind -n C-q detach-client"));
         assert!(text.contains("set -g status off"));
         assert!(text.contains("unbind -aq -T root"));
+        assert!(text.contains("set -sq extended-keys-format csi-u"));
         assert!(text.contains("source-file -q \"/home/u/.config/agent-roster/tmux.conf\""));
     }
 

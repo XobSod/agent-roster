@@ -319,7 +319,7 @@ impl App {
                     name: None,
                 },
             ),
-            None => self.open_form(Form::adopt(&a)),
+            None => self.open_form(Form::adopt(&a, self.default_agent())),
         }
     }
 

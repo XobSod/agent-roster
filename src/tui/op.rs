@@ -37,8 +37,9 @@ pub enum Op {
         name: String,
         /// None follows the agent's title.
         title: Option<String>,
-        model: Option<String>,
-        effort: Option<String>,
+        /// None: as it was; Some(None): the default.
+        model: Option<Option<String>>,
+        effort: Option<Option<String>>,
     },
     RetitleSession(String),
     /// Make sure the chats project exists, then open the new-chat form.
@@ -49,8 +50,10 @@ pub enum Op {
         conversation: String,
         project: String,
         name: Option<String>,
-        model: Option<String>,
-        effort: Option<String>,
+        run_on: crate::adopt::RunOn,
+        /// Picked here (Some(None): the defaults).
+        model: Option<Option<String>>,
+        effort: Option<Option<String>>,
         fork: bool,
         /// Even though it's open in its agent.
         force: bool,

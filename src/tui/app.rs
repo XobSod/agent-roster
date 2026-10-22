@@ -13,8 +13,8 @@ mod dialog;
 mod settings;
 mod texts;
 
-pub use dialog::Dialog;
 use dialog::Purpose;
+pub use dialog::{Dialog, completions};
 
 use super::form::{self, Form, Outcome};
 use super::input;
@@ -191,7 +191,7 @@ impl App {
 
     /// A form in a dialog, with what model choices turned out to be.
     pub(super) fn open_form(&mut self, form: Form) {
-        self.dialog = Some(Dialog::Form(form.with_models(&self.models)));
+        self.dialog = Some(Dialog::Form(Box::new(form.with_models(&self.models))));
     }
 
     /// Replaces the data, keeping the selection on the same entry.

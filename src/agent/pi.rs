@@ -118,11 +118,11 @@ impl Adapter for Pi {
 
     /// `pi -p`, with none of the user's extensions, tools or context files and
     /// no session kept. roster can't tell which of pi's models is a cheap one:
-    /// pi's own default unless `title_model` says otherwise.
+    /// the model `title_model` (or `model`) picks, else pi's own default.
     fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
         let agent = config.agent(PI);
         let mut argv = vec![
-            agent.command.unwrap_or_else(|| PI.to_string()),
+            agent.command.clone().unwrap_or_else(|| PI.to_string()),
             "-p".into(),
             "--no-session".into(),
             "--no-tools".into(),
@@ -130,7 +130,7 @@ impl Adapter for Pi {
             "--no-context-files".into(),
             "--offline".into(),
         ];
-        if let Some(model) = agent.title_model {
+        if let Some(model) = agent.titles_by() {
             argv.extend(["--model".into(), model]);
         }
         Some(argv)

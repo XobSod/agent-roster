@@ -14,8 +14,12 @@ pub enum Dialog {
         prompt: String,
         value: String,
         purpose: Purpose,
+        /// Values Tab completes to (those holding what was typed), in order.
+        choices: Vec<String>,
+        /// What was typed before Tab went through the choices.
+        typed: Option<String>,
     },
-    Form(Form),
+    Form(Box<Form>),
     /// Choosing a conversation to adopt.
     Picker(Picker),
 }
@@ -84,6 +88,8 @@ impl App {
                 prompt,
                 mut value,
                 purpose,
+                choices,
+                mut typed,
             } => {
                 if input::cancels(e) {
                     return None;
@@ -91,11 +97,36 @@ impl App {
                 if e.code == KeyCode::Enter {
                     return self.submit(value, purpose);
                 }
-                input::edit_line(&mut value, e);
+                if matches!(e.code, KeyCode::Tab | KeyCode::BackTab) {
+                    // The next (or previous) of those holding what was typed.
+                    let first = typed.is_none();
+                    let stem = typed.get_or_insert_with(|| value.clone()).clone();
+                    let matching = completions(&choices, &stem);
+                    if !matching.is_empty() {
+                        let at = if first {
+                            None
+                        } else {
+                            matching.iter().position(|c| **c == value)
+                        };
+                        let n = matching.len();
+                        let to = match (at, e.code == KeyCode::Tab) {
+                            (None, true) => 0,
+                            (None, false) => n - 1,
+                            (Some(i), true) => (i + 1) % n,
+                            (Some(i), false) => (i + n - 1) % n,
+                        };
+                        value = matching[to].clone();
+                    }
+                } else {
+                    input::edit_line(&mut value, e);
+                    typed = None;
+                }
                 self.dialog = Some(Dialog::Input {
                     prompt,
                     value,
                     purpose,
+                    choices,
+                    typed,
                 });
                 None
             }
@@ -121,14 +152,36 @@ impl App {
     }
 
     pub(super) fn input(&mut self, prompt: &str, value: String, purpose: Purpose) {
+        self.input_with(prompt, value, purpose, Vec::new());
+    }
+
+    /// `input`, Tab completing to one of `choices`.
+    pub(super) fn input_with(
+        &mut self,
+        prompt: &str,
+        value: String,
+        purpose: Purpose,
+        choices: Vec<String>,
+    ) {
         self.dialog = Some(Dialog::Input {
             prompt: prompt.to_string(),
             value,
             purpose,
+            choices,
+            typed: None,
         });
     }
 
     pub(super) fn confirm(&mut self, question: String, op: Op) {
         self.dialog = Some(Dialog::Confirm { question, op });
     }
+}
+
+/// Those of `choices` holding `typed` (in any case), in order.
+pub fn completions<'a>(choices: &'a [String], typed: &str) -> Vec<&'a String> {
+    let typed = typed.trim().to_lowercase();
+    choices
+        .iter()
+        .filter(|c| c.to_lowercase().contains(&typed))
+        .collect()
 }

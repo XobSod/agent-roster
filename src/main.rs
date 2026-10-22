@@ -28,7 +28,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use adopt::Adopt;
+use adopt::{Adopt, RunOn};
 use engine::{Defaults, NewSession, Roster};
 use model::{Session, State};
 use print::{doctor_line, events, list_adoptable, list_projects, list_sessions, print_info};
@@ -78,10 +78,14 @@ enum Cmd {
         /// The agent's name in the project (default: its agent's and a number, claude-1, pi-2, …)
         #[arg(long)]
         name: Option<String>,
-        /// Claude model (default: the project's; "default" for Claude's own)
+        /// Go on with the defaults, not what it last ran on: the project's model and effort if it
+        /// runs the same agent, else the agent's in config.toml, else its own
+        #[arg(long)]
+        defaults: bool,
+        /// Model (default: what it last ran on, or with --defaults the defaults; "default" for those)
         #[arg(long)]
         model: Option<String>,
-        /// Claude effort (default: the project's; "default" for Claude's own)
+        /// Effort (default: what it last ran on, or with --defaults the defaults; "default" for those)
         #[arg(long)]
         effort: Option<String>,
         /// Adopt a copy and leave the original alone
@@ -103,10 +107,10 @@ enum Cmd {
         /// A title of your own ("" follows the agent's title again)
         #[arg(long)]
         title: Option<String>,
-        /// Model for Claude or pi ("default" for the agent's own)
+        /// Model for Claude or pi ("default" for the agent's in config.toml, else its own)
         #[arg(long)]
         model: Option<String>,
-        /// Effort for Claude, thinking level for pi ("default" for the agent's own)
+        /// Effort for Claude, thinking level for pi ("default" for the agent's in config.toml, else its own)
         #[arg(long)]
         effort: Option<String>,
     },
@@ -247,10 +251,10 @@ struct SessionArgs {
     /// claude, pi, or an agent from [agents] in config.toml (default: the project's, else default_agent)
     #[arg(long)]
     agent: Option<String>,
-    /// Model for Claude or pi (default: the project's; "default" for the agent's own)
+    /// Model for Claude or pi (default: the project's, else the agent's in config.toml, else its own)
     #[arg(long)]
     model: Option<String>,
-    /// Effort for Claude, thinking level for pi (default: the project's; "default" for the agent's own)
+    /// Effort for Claude, thinking level for pi (default: the project's, else the agent's in config.toml, else its own)
     #[arg(long)]
     effort: Option<String>,
     /// A first prompt, typed into the agent once it's ready
@@ -262,14 +266,23 @@ struct SessionArgs {
 }
 
 impl SessionArgs {
-    /// The request for a session in `p`, whose defaults fill in what's not given.
-    fn request(self, p: model::Project) -> (NewSession, bool) {
+    /// The request for a session in `p`, whose defaults fill in what's not
+    /// given (its model and effort for its own agent: `default_agent` if it
+    /// picks none).
+    fn request(self, p: model::Project, default_agent: &str) -> (NewSession, bool) {
+        let project_agent = p.agent.as_deref().unwrap_or(default_agent);
+        let same = self.agent.as_deref().is_none_or(|a| a == project_agent);
+        let (model, effort) = if same {
+            (p.model, p.effort)
+        } else {
+            (None, None)
+        };
         let request = NewSession {
             project: p.name,
             name: self.name,
             agent: self.agent,
-            model: setting(self.model).unwrap_or(p.model),
-            effort: setting(self.effort).unwrap_or(p.effort),
+            model: setting(self.model).unwrap_or(model),
+            effort: setting(self.effort).unwrap_or(effort),
             prompt: self.prompt,
         };
         (request, self.attach)
@@ -380,11 +393,12 @@ fn run(cli: Cli) -> Result<()> {
             let p = r.db.project(&project)?.with_context(|| {
                 format!("no project {project:?} (add it with `roster project add`)")
             })?;
-            let (request, attach) = session.request(p);
+            let (request, attach) = session.request(p, r.config.default_agent());
             start_session(&mut r, request, attach)?;
         }
         Cmd::Chat { session } => {
-            let (request, attach) = session.request(r.chat_project()?);
+            let chats = r.chat_project()?;
+            let (request, attach) = session.request(chats, r.config.default_agent());
             start_session(&mut r, request, attach)?;
         }
         Cmd::Ls {
@@ -510,8 +524,8 @@ fn run(cli: Cli) -> Result<()> {
                 &s.id,
                 name.as_deref().unwrap_or(&s.name),
                 title.or(s.title_override.clone()),
-                setting(model).unwrap_or(s.model.clone()),
-                setting(effort).unwrap_or(s.effort.clone()),
+                setting(model),
+                setting(effort),
             )?;
             println!("Updated {}", s.label());
             if s.state != State::Stopped {
@@ -535,6 +549,7 @@ fn run(cli: Cli) -> Result<()> {
             conversation: Some(conversation),
             project,
             name,
+            defaults,
             model,
             effort,
             fork,
@@ -546,6 +561,11 @@ fn run(cli: Cli) -> Result<()> {
                 conversation,
                 project,
                 name,
+                run_on: if defaults {
+                    RunOn::Defaults
+                } else {
+                    RunOn::Conversation
+                },
                 model: setting(model),
                 effort: setting(effort),
                 fork,

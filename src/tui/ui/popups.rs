@@ -174,10 +174,21 @@ pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
             let inner = popup(f, rect, "confirm", "");
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
         }
-        Dialog::Input { prompt, value, .. } => {
+        Dialog::Input {
+            prompt,
+            value,
+            choices,
+            typed,
+            ..
+        } => {
             let rect = centered(area, width, 5);
-            let inner = popup(f, rect, "input", "Enter ok · Esc cancel");
-            let [prompt_area, _, value_area] = Layout::vertical([
+            let hint = if choices.is_empty() {
+                "Enter ok · Esc cancel"
+            } else {
+                "Tab complete · Enter ok · Esc cancel"
+            };
+            let inner = popup(f, rect, "input", hint);
+            let [prompt_area, choices_area, value_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -187,6 +198,33 @@ pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
             let room = inner.width.saturating_sub(3) as usize;
             let shown = tail(value, room);
             f.render_widget(Paragraph::new(prompt.clone()), prompt_area);
+            // What Tab goes through: those holding what was typed.
+            if !choices.is_empty() {
+                let stem = typed.as_deref().unwrap_or(value);
+                let matching = crate::tui::app::completions(choices, stem);
+                let line = match matching.len() {
+                    0 => "none of the agent's".to_string(),
+                    n => {
+                        let mut line = String::new();
+                        for (i, c) in matching.iter().enumerate() {
+                            let more = format!(" … {} more", n - i);
+                            if line.width() + c.width() + 3 + more.width() > room {
+                                line.push_str(&more);
+                                break;
+                            }
+                            if !line.is_empty() {
+                                line.push_str(" · ");
+                            }
+                            line.push_str(c);
+                        }
+                        line
+                    }
+                };
+                f.render_widget(
+                    Paragraph::new(line).style(Style::new().fg(MUTED)),
+                    choices_area,
+                );
+            }
             f.render_widget(Paragraph::new(format!("> {shown}")), value_area);
             f.set_cursor_position((value_area.x + 2 + shown.width() as u16, value_area.y));
         }

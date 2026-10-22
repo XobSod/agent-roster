@@ -472,9 +472,10 @@ impl Roster {
                 .find(|n| !taken.contains(n))
                 .expect("unbounded"),
         };
-        // Only for agents that take them.
+        // Only for agents that take them; else the agent's in config.toml.
         let (model, effort) = if adapter.choices().is_some() {
-            (req.model, req.effort)
+            let chosen = self.config.agent(&agent);
+            (req.model.or(chosen.model), req.effort.or(chosen.effort))
         } else {
             (None, None)
         };
@@ -725,21 +726,22 @@ impl Roster {
         self.db.prompted_since(id, since)
     }
 
-    /// Renames a session or changes its model and effort; the agent picks those up
-    /// on its next start.
+    /// Renames a session or changes its model and effort (None: as they
+    /// are; Some(None): the default, the agent's in config.toml as for a new
+    /// session, else its own); the agent picks those up on its next start.
     /// `title`: None follows the agent's title.
     pub fn update_session(
         &mut self,
         id: &str,
         name: &str,
         title: Option<String>,
-        model: Option<String>,
-        effort: Option<String>,
+        model: Option<Option<String>>,
+        effort: Option<Option<String>>,
     ) -> Result<Session> {
         validate_name("session", name)?;
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
-        if let Some(effort) = &effort {
+        if let Some(Some(effort)) = &effort {
             agent::check_effort(&s.agent, effort)?;
         }
         if self.db.name_taken(s.project_id, name, Some(&s.id))? {
@@ -753,8 +755,13 @@ impl Roster {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
         if agent::adapter(&s.agent).choices().is_some() {
-            s.model = model;
-            s.effort = effort;
+            let chosen = self.config.agent(&s.agent);
+            if let Some(model) = model {
+                s.model = model.or(chosen.model);
+            }
+            if let Some(effort) = effort {
+                s.effort = effort.or(chosen.effort);
+            }
         }
         self.db.save_session(&s)?;
         Ok(s)

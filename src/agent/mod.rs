@@ -162,8 +162,9 @@ pub struct Conversation {
     pub title: Option<String>,
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
-    /// The model it last used.
+    /// The model it last used, and the effort, if the agent records them.
     pub model: Option<String>,
+    pub effort: Option<String>,
     /// When the file last changed, in ms.
     pub modified: i64,
     /// A process of the agent's that has it open right now, if the agent

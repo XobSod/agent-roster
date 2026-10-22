@@ -92,6 +92,7 @@ fn read(path: &Path) -> Option<Conversation> {
         first_prompt: None,
         last_prompt: None,
         model: None,
+        effort: None,
         modified,
         open_in: None,
     };
@@ -104,6 +105,18 @@ fn read(path: &Path) -> Option<Conversation> {
                     c.id = id.to_string();
                 }
                 cwd = e["cwd"].as_str().map(PathBuf::from);
+            }
+            // What it ran on, as last changed: its model (also on each
+            // answer) and thinking level.
+            Some("model_change") => {
+                if let Some(model) = e["modelId"].as_str() {
+                    c.model = Some(model.to_string());
+                }
+            }
+            Some("thinking_level_change") => {
+                if let Some(level) = e["thinkingLevel"].as_str() {
+                    c.effort = Some(level.to_string());
+                }
             }
             // Its name, the last one given: pi's title for it, as pi
             // reports it while it runs (`/name` changes it).
@@ -194,6 +207,7 @@ mod tests {
             r#"{"type":"message","id":"b","message":{"role":"user","content":[{"type":"text","text":"fix the parser"}]}}"#,
             r#"{"type":"message","id":"c","message":{"role":"assistant","model":"claude-opus-4-8","content":[]}}"#,
             r#"{"type":"message","id":"d","message":{"role":"toolResult","content":[{"type":"text","text":"output"}]}}"#,
+            r#"{"type":"thinking_level_change","id":"t","thinkingLevel":"high"}"#,
             r#"{"type":"message","id":"e","message":{"role":"user","content":"and the tests"}}"#,
             r#"{"type":"session_info","id":"f","name":"Parser fixes"}"#,
         ];
@@ -217,7 +231,10 @@ mod tests {
             (c.first_prompt.as_deref(), c.last_prompt.as_deref()),
             (Some("fix the parser"), Some("and the tests"))
         );
-        assert_eq!(c.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(
+            (c.model.as_deref(), c.effort.as_deref()),
+            (Some("claude-opus-4-8"), Some("high"))
+        );
         assert_eq!(c.label(), "Parser fixes");
         assert!(conversations(dir.path(), |id| id == "other").is_empty());
         assert_eq!(

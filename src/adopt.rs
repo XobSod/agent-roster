@@ -108,12 +108,39 @@ impl Roster {
             (None, Some(p)) => p.clone(),
             (None, None) => self.add_project(&found.new_project, &c.cwd, Defaults::default())?,
         };
+        // The defaults: the project's model and effort, which are for its
+        // agent (the agent's in config.toml, else its own, after those).
+        let agent = project
+            .agent
+            .as_deref()
+            .unwrap_or(self.config.default_agent());
+        let defaults = if agent == c.agent {
+            (project.model.clone(), project.effort.clone())
+        } else {
+            (None, None)
+        };
+        // Or what it ran on, where its agent recorded it.
+        let ran_on = match req.run_on {
+            RunOn::Conversation => (
+                c.model.clone().or(defaults.0.clone()),
+                c.effort
+                    .clone()
+                    .filter(|e| agent::check_effort(&c.agent, e).is_ok())
+                    .or(defaults.1.clone()),
+            ),
+            RunOn::Defaults => defaults.clone(),
+        };
+        let pick = |given: Option<Option<String>>, ran_on: Option<String>, default| match given {
+            Some(Some(value)) => Some(value),
+            Some(None) => default,
+            None => ran_on,
+        };
         let request = NewSession {
             project: project.name.clone(),
             name: req.name,
             agent: Some(c.agent.clone()),
-            model: req.model.unwrap_or(project.model.clone()),
-            effort: req.effort.unwrap_or(project.effort.clone()),
+            model: pick(req.model, ran_on.0, defaults.0),
+            effort: pick(req.effort, ran_on.1, defaults.1),
             prompt: None,
         };
         let fork_from = req.fork.then(|| c.id.clone());
@@ -151,6 +178,18 @@ pub struct Adoptable {
     pub archived: Option<Session>,
 }
 
+/// The model and effort an adopted conversation goes on with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunOn {
+    /// What it last ran on, as far as its agent recorded it; the defaults for
+    /// the rest.
+    #[default]
+    Conversation,
+    /// A new session's in its project: the project's, if it runs the same
+    /// agent, else the agent's in config.toml, else its own.
+    Defaults,
+}
+
 /// What to adopt, and how.
 #[derive(Clone, Debug, Default)]
 pub struct Adopt {
@@ -160,7 +199,9 @@ pub struct Adopt {
     /// default: the project holding its directory, else a new one named after it.
     pub project: Option<String>,
     pub name: Option<String>,
-    /// None: the project's default; Some(None): Claude's own.
+    /// What it runs on, unless `model` and `effort` say.
+    pub run_on: RunOn,
+    /// Given here: a model, or (None) the defaults, as `RunOn::Defaults`.
     pub model: Option<Option<String>>,
     pub effort: Option<Option<String>>,
     /// Adopt a copy (the agent forks it) and leave the original alone.

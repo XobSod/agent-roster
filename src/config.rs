@@ -26,11 +26,13 @@
 //!
 //! [agents.claude]
 //! command = "claude"              # default: the agent's name, found on PATH
-//! args = ["--model", "haiku"]     # added to every launch
-//! title_model = "sonnet"          # makes generated titles; Claude's default haiku
+//! args = ["--verbose"]            # added to every launch
+//! model = "sonnet"                # new sessions', unless they or their project pick
+//! effort = "high"                 # one; default: the agent's own
+//! title_model = "haiku"           # makes generated titles; default: model above
 //! [agents.pi]                     # pi is offered once installed; this only adds to it
 //! args = ["--tui-mode", "regular"]
-//! title_model = "claude-haiku-4-5" # default: pi's default model
+//! title_model = "claude-haiku-4-5"
 //! auto_title = false              # no title made after its first turn (default true)
 //!
 //! [agents.aider]                  # any other agent: state from its screen
@@ -266,11 +268,24 @@ pub struct AgentConfig {
     /// Seconds without screen changes after which an agent without hooks is idle.
     pub idle_after: Option<u64>,
     pub fit_preview: Option<FitPreview>,
-    /// The model a generated title is made with (by the agent's one-off mode).
+    /// The model and effort new sessions get unless they or their project
+    /// pick one (else the agent's own defaults), for agents that take them.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// The model a generated title is made with (by the agent's one-off
+    /// mode); else `model`, else the agent's own default.
     pub title_model: Option<String>,
     /// For an agent that doesn't name its task itself (pi): a title made
     /// after its first turn (default true).
     pub auto_title: Option<bool>,
+}
+
+impl AgentConfig {
+    /// The model generated titles are made with, if one is picked:
+    /// `title_model`, else `model` (else the agent's own default).
+    pub fn titles_by(&self) -> Option<String> {
+        self.title_model.clone().or_else(|| self.model.clone())
+    }
 }
 
 /// The config file's text; "" if there's none.
@@ -308,6 +323,23 @@ impl Config {
         for (name, agent) in &config.agents {
             if agent.idle_after == Some(0) {
                 bail!("agents.{name}.idle_after must be at least 1 (seconds)");
+            }
+            if crate::agent::adapter(name).choices().is_none()
+                && (agent.model.is_some() || agent.effort.is_some())
+            {
+                bail!("agents.{name}: {name} is started without a model or effort to pick");
+            }
+            for (key, model) in [("model", &agent.model), ("title_model", &agent.title_model)] {
+                if model
+                    .as_deref()
+                    .is_some_and(|m| m.trim().is_empty() || m == "default")
+                {
+                    bail!("agents.{name}.{key}: leave it out for {name}'s own default");
+                }
+            }
+            if let Some(effort) = &agent.effort {
+                crate::agent::check_effort(name, effort)
+                    .with_context(|| format!("agents.{name}.effort"))?;
             }
         }
         Ok(config)
@@ -462,6 +494,17 @@ mod tests {
             format!("{:?}", config.keys),
             format!("{:?}", Keys::default())
         );
+    }
+
+    #[test]
+    fn an_agents_model_and_effort_are_its_own() {
+        let config =
+            Config::parse("[agents.pi]\nmodel = \"sonnet\"\neffort = \"minimal\"").unwrap();
+        assert_eq!(config.agent("pi").model.as_deref(), Some("sonnet"));
+        assert!(Config::parse("[agents.claude]\neffort = \"minimal\"").is_err());
+        assert!(Config::parse("[agents.aider]\nmodel = \"x\"").is_err());
+        assert!(Config::parse("[agents.pi]\nmodel = \"default\"").is_err());
+        assert!(Config::parse("[agents.pi]\ntitle_model = \"\"").is_err());
     }
 
     #[test]

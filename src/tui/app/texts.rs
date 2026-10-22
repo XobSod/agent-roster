@@ -92,6 +92,11 @@ impl App {
                 hints
             }
             Kind::TmuxKey => self.labelled([(Action::Confirm, "press its key")]),
+            Kind::Model => {
+                let mut hints = self.labelled([(Action::Confirm, "type")]);
+                hints.push(("←→".into(), "choose"));
+                hints
+            }
             _ => self.labelled([(Action::Confirm, "change")]),
         };
         if s.set {

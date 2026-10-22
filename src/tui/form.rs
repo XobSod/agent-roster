@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input;
 use super::op::Op;
+use crate::adopt::RunOn;
 use crate::agent;
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
@@ -28,6 +29,8 @@ pub enum Id {
     Title,
     EnvFile,
     Conversation,
+    /// What an adopted conversation goes on with.
+    RunOn,
     Copy,
 }
 
@@ -96,6 +99,10 @@ pub enum Purpose {
     Adopt {
         conversation: String,
         open_in: Option<i32>,
+        /// The model and effort it last ran on, as far as its agent recorded
+        /// them, and its project's for its agent.
+        ran_on: (Option<String>, Option<String>),
+        defaults: (Option<String>, Option<String>),
     },
 }
 
@@ -114,8 +121,9 @@ pub struct Form {
     /// A note under the form, e.g. what a directory could complete to.
     pub note: Option<String>,
     projects: Vec<Project>,
-    /// The project the session fields were last filled in from.
-    filled_from: Option<String>,
+    /// The project, and the agent, the session fields were last filled in
+    /// for.
+    filled_from: Option<(String, String)>,
     models: Models,
 }
 
@@ -126,6 +134,9 @@ pub struct Models {
     pub offered: std::collections::HashMap<String, Vec<agent::Model>>,
     /// What models asked for turned out to be (`Db::model_names`).
     pub names: std::collections::HashMap<String, String>,
+    /// The model and effort config.toml gives each agent's new sessions,
+    /// by agent: what "default" is.
+    pub chosen: std::collections::HashMap<String, (Option<String>, Option<String>)>,
 }
 
 impl Models {
@@ -140,7 +151,19 @@ impl Models {
                 .map(|a| (a.to_string(), agent::adapter(a).models(&config, unasked)))
                 .collect(),
             names: Default::default(),
+            chosen: Default::default(),
         }
+    }
+
+    /// What config.toml gives the agents' new sessions.
+    pub fn chosen_in(
+        config: &crate::config::Config,
+    ) -> std::collections::HashMap<String, (Option<String>, Option<String>)> {
+        config
+            .agents
+            .iter()
+            .map(|(name, a)| (name.clone(), (a.model.clone(), a.effort.clone())))
+            .collect()
     }
 }
 
@@ -155,6 +178,11 @@ fn options(first: &str, rest: &[&str]) -> Vec<String> {
 fn first(agents: &[String]) -> &str {
     agents.first().map_or("", String::as_str)
 }
+
+/// What an adopted conversation can go on with (`Id::RunOn`).
+const CONVERSATION: &str = "conversation";
+const DEFAULTS: &str = "defaults";
+const OVERRIDES: &str = "overrides";
 
 fn or_default(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| DEFAULT.to_string())
@@ -317,7 +345,10 @@ impl Form {
     }
 
     /// Adopting `a`: into the project holding its directory, or a new one.
-    pub fn adopt(a: &crate::adopt::Adoptable) -> Form {
+    /// It goes on with what it last ran on, the defaults (the project's
+    /// model and effort, if it runs the same agent, `default_agent` if it
+    /// doesn't pick one), or a model and effort picked here.
+    pub fn adopt(a: &crate::adopt::Adoptable, default_agent: &str) -> Form {
         let c = &a.conversation;
         let what = c.label();
         let branch = c
@@ -332,7 +363,21 @@ impl Form {
                 Field::new(Id::Project, "Project", text(""), &a.new_project)
             }
         };
-        let defaults = a.project.as_ref();
+        let defaults = a
+            .project
+            .as_ref()
+            .filter(|p| p.agent.as_deref().unwrap_or(default_agent) == c.agent);
+        let effort = c
+            .effort
+            .clone()
+            .filter(|e| agent::check_effort(&c.agent, e).is_ok());
+        let ran_on = (c.model.clone(), effort);
+        let run_on = Field::new(
+            Id::RunOn,
+            "Settings",
+            Kind::Choice(options(CONVERSATION, &[DEFAULTS, OVERRIDES])),
+            CONVERSATION,
+        );
         let moved = match c.open_in {
             Some(pid) => {
                 format!(
@@ -362,6 +407,7 @@ impl Form {
             project,
             Field::new(Id::Agent, "Agent", Kind::Info, &c.agent),
             Field::new(Id::Name, "Agent name", text("automatic"), ""),
+            run_on,
             model_field(or_default(&defaults.and_then(|p| p.model.clone()))),
             effort_field(or_default(&defaults.and_then(|p| p.effort.clone()))),
             copy,
@@ -370,6 +416,11 @@ impl Form {
             Purpose::Adopt {
                 conversation: c.id.clone(),
                 open_in: c.open_in,
+                ran_on,
+                defaults: (
+                    defaults.and_then(|p| p.model.clone()),
+                    defaults.and_then(|p| p.effort.clone()),
+                ),
             },
             "Adopt a conversation".into(),
             fields,
@@ -459,10 +510,11 @@ impl Form {
         };
         let mut notes = std::collections::HashMap::new();
         let name = crate::util::capitalize(agent);
-        notes.insert(
-            DEFAULT.to_string(),
-            learned(DEFAULT).unwrap_or_else(|| format!("{name}'s default")),
-        );
+        let default = match self.chosen().0 {
+            Some(model) => format!("{} (config.toml)", learned(&model).unwrap_or(model)),
+            None => learned(DEFAULT).unwrap_or_else(|| format!("{name}'s default")),
+        };
+        notes.insert(DEFAULT.to_string(), default);
         for m in self.offered() {
             let note = match &m.note {
                 Some(note) => note.clone(),
@@ -471,6 +523,53 @@ impl Form {
             notes.insert(m.id.clone(), note);
         }
         notes
+    }
+
+    /// The model and effort config.toml gives the form's agent's new
+    /// sessions.
+    fn chosen(&self) -> (Option<String>, Option<String>) {
+        self.models
+            .chosen
+            .get(self.agent())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// What adopting with the conversation's settings and with the defaults
+    /// comes to: `ran_on` and `defaults` (the project's), with what isn't
+    /// known there from config.toml, else the agent's own.
+    fn run_on_notes(
+        &self,
+        ran_on: (Option<String>, Option<String>),
+        defaults: (Option<String>, Option<String>),
+    ) -> std::collections::HashMap<String, String> {
+        let (model, effort) = self.chosen();
+        let name = crate::util::capitalize(self.agent());
+        let default_model = defaults
+            .0
+            .or(model)
+            .unwrap_or_else(|| format!("{name}'s default model"));
+        let default_effort = defaults
+            .1
+            .or(effort)
+            .unwrap_or_else(|| "its default effort".into());
+        let conversation = format!(
+            "{} · {}, as it last ran",
+            ran_on.0.unwrap_or_else(|| default_model.clone()),
+            ran_on.1.unwrap_or_else(|| default_effort.clone())
+        );
+        [
+            (CONVERSATION.to_string(), conversation),
+            (
+                DEFAULTS.to_string(),
+                format!("{default_model} · {default_effort}"),
+            ),
+            (
+                OVERRIDES.to_string(),
+                "the model and effort below".to_string(),
+            ),
+        ]
+        .into()
     }
 
     /// The value, or None for "default" or empty.
@@ -491,9 +590,33 @@ impl Form {
             f.kind = Kind::Combo(options(DEFAULT, &offered));
             f.notes = notes;
         }
+        let chosen_effort = self.chosen().1;
         if let Some(f) = self.field_mut(Id::Effort) {
             f.hidden = choices.is_none();
             f.kind = Kind::Choice(options(DEFAULT, choices.map_or(&[][..], |c| c.efforts)));
+            f.notes = chosen_effort
+                .map(|e| (DEFAULT.to_string(), format!("{e} (config.toml)")))
+                .into_iter()
+                .collect();
+        }
+        // Adopting: a model and effort to pick only for overrides; what the
+        // others are, noted.
+        if let Purpose::Adopt {
+            ran_on, defaults, ..
+        } = &self.purpose
+        {
+            let (ran_on, defaults) = (ran_on.clone(), defaults.clone());
+            let overrides = self.value(Id::RunOn) == OVERRIDES;
+            for id in [Id::Model, Id::Effort] {
+                if let Some(f) = self.field_mut(id) {
+                    f.hidden |= !overrides;
+                }
+            }
+            let notes = self.run_on_notes(ran_on, defaults);
+            if let Some(f) = self.field_mut(Id::RunOn) {
+                f.hidden = choices.is_none();
+                f.notes = notes;
+            }
         }
         // A new project is named after its directory until the user names it.
         let directory = expand_tilde(self.value(Id::Directory));
@@ -511,28 +634,38 @@ impl Form {
         if let Some(f) = self.field_mut(Id::EnvFile) {
             f.value = format!("{PROJECT_ENV} ({state})");
         }
-        // A new session takes its project's defaults, unless changed here.
-        let project = self.value(Id::Project).to_string();
-        if self.purpose == Purpose::NewSession && self.filled_from.as_deref() != Some(&project) {
-            if let Some(p) = self.projects.iter().find(|p| p.name == project).cloned() {
-                let defaults = [
-                    (
-                        Id::Agent,
-                        p.agent.clone().unwrap_or_else(|| self.default_agent()),
-                    ),
-                    (Id::Model, or_default(&p.model)),
-                    (Id::Effort, or_default(&p.effort)),
-                ];
-                for (id, value) in defaults {
-                    if let Some(f) = self.field_mut(id).filter(|f| !f.edited) {
-                        f.value = value;
-                    }
-                }
-            }
-            self.filled_from = Some(project);
-            // The agent may have changed.
-            self.update();
+        // A new session takes its project's defaults, unless changed here:
+        // its agent, and for that agent its model and effort.
+        if self.purpose != Purpose::NewSession {
+            return;
         }
+        let project = self.value(Id::Project).to_string();
+        let Some(p) = self.projects.iter().find(|p| p.name == project).cloned() else {
+            return;
+        };
+        let project_agent = p.agent.clone().unwrap_or_else(|| self.default_agent());
+        if self.filled_from.as_ref().map(|(p, _)| p) != Some(&project)
+            && let Some(f) = self.field_mut(Id::Agent).filter(|f| !f.edited)
+        {
+            f.value = project_agent.clone();
+        }
+        let filled = (project, self.agent().to_string());
+        if self.filled_from.as_ref() == Some(&filled) {
+            return;
+        }
+        let (model, effort) = if filled.1 == project_agent {
+            (or_default(&p.model), or_default(&p.effort))
+        } else {
+            (DEFAULT.to_string(), DEFAULT.to_string())
+        };
+        for (id, value) in [(Id::Model, model), (Id::Effort, effort)] {
+            if let Some(f) = self.field_mut(id).filter(|f| !f.edited) {
+                f.value = value;
+            }
+        }
+        self.filled_from = Some(filled);
+        // The agent may have changed.
+        self.update();
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Outcome {
@@ -683,23 +816,36 @@ impl Form {
             Purpose::Adopt {
                 conversation,
                 open_in,
-            } => Op::Adopt {
-                conversation: conversation.clone(),
-                project: required(Id::Project, "The project")?,
-                name: self.setting(Id::Name),
-                model: self.setting(Id::Model),
-                effort: self.setting(Id::Effort),
-                fork: self.value(Id::Copy) == "yes",
-                // Asked first (see App).
-                force: open_in.is_some(),
-            },
-            Purpose::EditSession(id) => Op::EditSession {
-                id: id.clone(),
-                name: required(Id::Name, "The agent name")?,
-                title: self.setting(Id::Title),
-                model: model(),
-                effort: effort(),
-            },
+                ..
+            } => {
+                let overrides = self.value(Id::RunOn) == OVERRIDES;
+                Op::Adopt {
+                    conversation: conversation.clone(),
+                    project: required(Id::Project, "The project")?,
+                    name: self.setting(Id::Name),
+                    run_on: if self.value(Id::RunOn) == DEFAULTS {
+                        RunOn::Defaults
+                    } else {
+                        RunOn::Conversation
+                    },
+                    model: overrides.then(|| self.setting(Id::Model)),
+                    effort: overrides.then(|| self.setting(Id::Effort)),
+                    fork: self.value(Id::Copy) == "yes",
+                    // Asked first (see App).
+                    force: open_in.is_some(),
+                }
+            }
+            Purpose::EditSession(id) => {
+                // Only what was changed here changes.
+                let changed = |id: Id| self.field(id).is_some_and(|f| f.edited);
+                Op::EditSession {
+                    id: id.clone(),
+                    name: required(Id::Name, "The agent name")?,
+                    title: self.setting(Id::Title),
+                    model: changed(Id::Model).then(model),
+                    effort: changed(Id::Effort).then(effort),
+                }
+            }
         })
     }
 }
@@ -901,6 +1047,20 @@ mod tests {
         form.on_key(key(KeyCode::Left));
         form.on_key(key(KeyCode::Right));
         assert_eq!(form.value(Id::Model), "opus");
+        // What "default" is when config.toml picks one for the agent.
+        models
+            .chosen
+            .insert("claude".into(), (Some("sonnet".into()), Some("low".into())));
+        models.names.insert("sonnet".into(), "Sonnet 5.5".into());
+        let form = Form::new_session(&projects, Some(&projects[0]), &agents).with_models(&models);
+        assert_eq!(
+            form.field(Id::Model).unwrap().notes["default"],
+            "Sonnet 5.5 (config.toml)"
+        );
+        assert_eq!(
+            form.field(Id::Effort).unwrap().notes["default"],
+            "low (config.toml)"
+        );
     }
 
     #[test]
@@ -914,6 +1074,13 @@ mod tests {
             (form.value(Id::Model), form.value(Id::Effort)),
             ("opus", "high")
         );
+        // Another agent: not the project's model and effort, which are its agent's.
+        form.focus = 1;
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Agent), "aider");
+        form.on_key(key(KeyCode::Left));
+        assert_eq!(form.value(Id::Agent), "claude");
+        assert_eq!(form.value(Id::Model), "opus");
         // Choosing another project refills what wasn't changed here.
         form.focus = 0;
         form.on_key(key(KeyCode::Right));
@@ -975,12 +1142,21 @@ mod tests {
         use crate::tui::picker::tests::adoptable;
         let mut a = adoptable("c1", "Fix the parser", Some("alpha"));
         a.project.as_mut().unwrap().model = Some("opus".into());
-        let mut form = Form::adopt(&a);
+        a.conversation.model = Some("claude-sonnet-4-6".into());
+        a.conversation.effort = Some("xhigh".into());
+        let mut form = Form::adopt(&a, "claude");
         // The project is known: the first thing to fill in is the name.
         assert_eq!(form.fields[form.focus].id, Id::Name);
         assert!(matches!(form.field(Id::Project).unwrap().kind, Kind::Info));
-        assert_eq!(form.value(Id::Model), "opus");
-        assert!(!form.field(Id::Model).unwrap().hidden);
+        // It goes on with what it ran on, or the defaults, or what's picked.
+        let run_on = form.field(Id::RunOn).unwrap();
+        assert_eq!(run_on.value, "conversation");
+        assert_eq!(
+            run_on.notes["conversation"],
+            "claude-sonnet-4-6 · xhigh, as it last ran"
+        );
+        assert_eq!(run_on.notes["defaults"], "opus · its default effort");
+        assert!(form.field(Id::Model).unwrap().hidden);
         type_text(&mut form, "parser");
         form.focus = form.fields.iter().position(|f| f.id == Id::Copy).unwrap();
         form.on_key(key(KeyCode::Right));
@@ -990,14 +1166,42 @@ mod tests {
                 conversation: "c1".into(),
                 project: "alpha".into(),
                 name: Some("parser".into()),
-                model: Some("opus".into()),
+                run_on: RunOn::Conversation,
+                model: None,
                 effort: None,
                 fork: true,
                 force: false,
             }
         );
+        let select = |form: &mut Form, value: &str| {
+            form.focus = form.fields.iter().position(|f| f.id == Id::RunOn).unwrap();
+            while form.value(Id::RunOn) != value {
+                form.on_key(key(KeyCode::Right));
+            }
+        };
+        select(&mut form, "defaults");
+        assert!(matches!(
+            submit(&mut form),
+            Op::Adopt {
+                run_on: RunOn::Defaults,
+                model: None,
+                ..
+            }
+        ));
+        // Overrides: the model and effort to pick, the project's to start with.
+        select(&mut form, "overrides");
+        assert!(!form.field(Id::Model).unwrap().hidden);
+        assert_eq!(form.value(Id::Model), "opus");
+        assert!(matches!(
+            submit(&mut form),
+            Op::Adopt {
+                model: Some(Some(_)),
+                effort: Some(None),
+                ..
+            }
+        ));
         // Outside a project: the new project's name comes first, and can't be empty.
-        let mut form = Form::adopt(&adoptable("c2", "Elsewhere", None));
+        let mut form = Form::adopt(&adoptable("c2", "Elsewhere", None), "claude");
         assert_eq!(form.fields[form.focus].id, Id::Project);
         assert_eq!(form.value(Id::Project), "elsewhere");
         form.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -1006,6 +1210,13 @@ mod tests {
             Outcome::Continue
         ));
         assert!(form.error.is_some());
+        // A project of another agent: its model isn't this one's.
+        let form = Form::adopt(&a, "pi");
+        assert_eq!(form.value(Id::Model), "default");
+        assert_eq!(
+            form.field(Id::RunOn).unwrap().notes["defaults"],
+            "Claude's default model · its default effort"
+        );
     }
 
     #[test]
@@ -1022,9 +1233,21 @@ mod tests {
                 id: "s1".into(),
                 name: "ap2".into(),
                 title: None,
-                model: Some("opus".into()),
+                model: None,
                 effort: None
             }
         );
+        // Changed to the default: so it says.
+        form.focus = form.fields.iter().position(|f| f.id == Id::Model).unwrap();
+        form.on_key(key(KeyCode::Left));
+        assert_eq!(form.value(Id::Model), "default");
+        assert!(matches!(
+            submit(&mut form),
+            Op::EditSession {
+                model: Some(None),
+                effort: None,
+                ..
+            }
+        ));
     }
 }

@@ -125,6 +125,7 @@ pub mod tests {
                 first_prompt: None,
                 last_prompt: None,
                 model: None,
+                effort: None,
                 modified: 0,
                 open_in: None,
             },

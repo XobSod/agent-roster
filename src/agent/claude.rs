@@ -166,24 +166,25 @@ impl Adapter for Claude {
         Some(Box::new(ClaudeTranscript::new(path)))
     }
 
-    /// `claude -p`: no tools, no settings (so no hooks), nothing saved; Haiku
-    /// unless `title_model` says otherwise.
+    /// `claude -p`: no tools, no settings (so no hooks), nothing saved; on
+    /// the model `title_model` (or `model`) picks, else Claude's own default.
     fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
         let agent = config.agent(CLAUDE);
-        let command = agent.command.unwrap_or_else(|| CLAUDE.to_string());
-        let model = agent.title_model.unwrap_or_else(|| "haiku".to_string());
-        let argv = [
-            command.as_str(),
+        let mut argv: Vec<String> = [
+            &agent.command.clone().unwrap_or_else(|| CLAUDE.to_string()),
             "-p",
             "--no-session-persistence",
             "--setting-sources",
             "",
             "--tools",
             "",
-            "--model",
-            &model,
-        ];
-        Some(argv.map(String::from).to_vec())
+        ]
+        .map(String::from)
+        .to_vec();
+        if let Some(model) = agent.titles_by() {
+            argv.extend(["--model".into(), model]);
+        }
+        Some(argv)
     }
 }
 
@@ -365,16 +366,24 @@ mod tests {
     }
 
     #[test]
-    fn titles_are_made_by_haiku_unless_told() {
+    fn titles_are_made_by_the_model_picked_for_them() {
         let argv = Claude.oneoff(&Config::default()).unwrap();
         assert_eq!(argv[..2], ["claude", "-p"]);
-        assert_eq!(arg_after(&argv, "--model"), Some("haiku"));
+        assert_eq!(arg_after(&argv, "--model"), None);
         let agent = AgentConfig {
-            title_model: Some("sonnet".into()),
+            model: Some("opus".into()),
             ..AgentConfig::default()
         };
+        let argv = Claude
+            .oneoff(&config_with("claude", agent.clone()))
+            .unwrap();
+        assert_eq!(arg_after(&argv, "--model"), Some("opus"));
+        let agent = AgentConfig {
+            title_model: Some("haiku".into()),
+            ..agent
+        };
         let argv = Claude.oneoff(&config_with("claude", agent)).unwrap();
-        assert_eq!(arg_after(&argv, "--model"), Some("sonnet"));
+        assert_eq!(arg_after(&argv, "--model"), Some("haiku"));
     }
 
     #[test]

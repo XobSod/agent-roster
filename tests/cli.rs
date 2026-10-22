@@ -627,6 +627,55 @@ fn settings_change_config_toml_in_place() {
 }
 
 #[test]
+fn an_agents_model_and_effort_are_its_new_sessions() {
+    let Some(t) = TestEnv::new("agent-model") else {
+        return;
+    };
+    fs::create_dir_all(t.path("big")).unwrap();
+    t.ok(&["config", "set", "agents.claude.model", "sonnet"]);
+    t.ok(&["config", "set", "agents.claude.effort", "low"]);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&[
+        "project",
+        "add",
+        "big",
+        t.path("big").to_str().unwrap(),
+        "--model",
+        "opus",
+    ]);
+    let model = |name: &str| {
+        let s = t.session(name, false).unwrap();
+        (
+            s["model"].as_str().map(String::from),
+            s["effort"].as_str().map(String::from),
+        )
+    };
+    let sonnet_low = (Some("sonnet".to_string()), Some("low".to_string()));
+    t.ok(&["new", "demo", "--name", "a"]);
+    assert_eq!(model("a"), sonnet_low);
+    // The project's, or the session's own, come first.
+    t.ok(&["new", "big", "--name", "b"]);
+    assert_eq!(model("b"), (Some("opus".into()), Some("low".into())));
+    t.ok(&[
+        "new", "demo", "--name", "c", "--model", "haiku", "--effort", "default",
+    ]);
+    assert_eq!(model("c"), (Some("haiku".into()), Some("low".into())));
+    // Renamed, it keeps its model; changed to the default, it gets this one.
+    t.ok(&["edit", "b", "--name", "b2"]);
+    assert_eq!(model("b2").0.as_deref(), Some("opus"));
+    t.ok(&["edit", "b2", "--model", "default"]);
+    assert_eq!(model("b2"), sonnet_low);
+    // An effort the agent doesn't have isn't written.
+    assert!(
+        !t.run(&["config", "set", "agents.claude.effort", "minimal"])
+            .status
+            .success()
+    );
+    t.ok(&["config", "set", "agents.claude.effort", "default"]);
+    assert!(!t.ok(&["config"]).contains("effort         low"));
+}
+
+#[test]
 fn config_changes_reach_a_running_server() {
     let Some(t) = TestEnv::new("reload") else {
         return;
@@ -999,9 +1048,11 @@ fn conversations_started_elsewhere_can_be_adopted() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("open in Claude"));
     let out = t.ok(&["adopt", "3333", "--fork", "--name", "copy"]);
     assert!(out.starts_with("Adopted demo/copy as a copy"), "{out}");
+    // On what it last ran on.
     t.wait_for("the forked agent", |t| {
-        t.ok(&["show", "copy"])
-            .contains("fake agent: --resume 33333333-cccc --fork-session --session-id")
+        t.ok(&["show", "copy"]).contains(
+            "fake agent: --model claude-sonnet-5-5 --resume 33333333-cccc --fork-session --session-id",
+        )
     });
     let copy = t.session("copy", false).unwrap();
     assert_ne!(copy["conversation_id"], "33333333-cccc");
@@ -1009,7 +1060,8 @@ fn conversations_started_elsewhere_can_be_adopted() {
     claude.wait().unwrap();
 
     // Moved: resumed where it ran, in the project holding it, with its title and model.
-    t.ok(&["adopt", "11111111-aaaa", "--name", "one"]);
+    // With the defaults instead: the project has none, nor config.toml.
+    t.ok(&["adopt", "11111111-aaaa", "--name", "one", "--defaults"]);
     t.wait_for("the resumed agent", |t| {
         t.ok(&["show", "one"])
             .contains("fake agent: --resume 11111111-aaaa")

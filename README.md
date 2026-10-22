@@ -69,15 +69,20 @@ stays where it was, on the next one waiting; after only reading, it stays on tha
 agent.
 
 New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits). Projects
-carry a default agent, model and effort for their sessions; a new session can also
-get a first prompt, typed into the agent once it's ready. `s c` starts a chat, a
+carry a default agent, model and effort for their sessions, and each agent its own
+(`model` and `effort` in its settings), used when neither the session nor its project
+picks one; "default" leaves it to that. A new session can also get a first prompt,
+typed into the agent once it's ready. `s c` starts a chat, a
 session that needs no project: chats share one directory in a built-in project.
 
 A Claude or pi conversation started outside roster (plain `claude` or `pi`, another
 session manager) can be adopted with `s a`: pick it (typing filters, `Tab` shows those
 outside your projects), and it continues as a session here, in its project or a new one
-for its directory. Close it where it's open first, or adopt a copy and leave the
-original alone. Roster can tell when one is open in Claude, but not in pi.
+for its directory. It goes on with the model and effort it last ran on (as far as its
+agent recorded them), the defaults (the project's, if the project runs the same agent,
+else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--effort` on
+the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
+Roster can tell when one is open in Claude, but not in pi.
 
 Everything is also available from the CLI:
 
@@ -119,7 +124,8 @@ All files are optional and live in `~/.config/agent-roster/`:
 
 - `config.toml`: the settings view (`v s`) shows every setting with its value and
   what it does, and changes them: Enter (on/off, the next choice, a value typed, or
-  for a key the next one pressed), `←→`, `a` adds a key, `d` puts the default back,
+  for a key the next one pressed), `←→` (for a model, through the agent's; Tab
+  completes one being typed), `a` adds a key, `d` puts the default back,
   `n` adds an agent, `x` takes an agent's settings out, `e` opens the file in
   `$EDITOR`. A change keeps the rest of the file as it is, comments included (taking
   a setting out takes the comment just above it too), and goes through a symlink (a
@@ -194,9 +200,11 @@ All files are optional and live in `~/.config/agent-roster/`:
 
   - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
     for pi on the normal screen, so tmux's copy mode scrolls its history,
-    `args = ["--tui-mode", "regular"]`), and `title_model`, the
-    model a generated title (`s t`) is made with: Claude's default is `haiku`, pi's its
-    own default model. pi names no task itself, so roster has it make a title after a
+    `args = ["--tui-mode", "regular"]`), `model` and `effort`, what new sessions get
+    unless they or their project pick one (default: the agent's own, from its own
+    settings, which roster doesn't change), and `title_model`, the model a generated
+    title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
+    quicker). pi names no task itself, so roster has it make a title after a
     conversation's first turn; `auto_title = false` turns that off. Any other agent
     goes in its own table and is then offered for new sessions:
 

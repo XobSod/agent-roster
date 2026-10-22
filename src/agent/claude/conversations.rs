@@ -56,6 +56,7 @@ fn read(path: &Path) -> Option<Conversation> {
         first_prompt: None,
         last_prompt: None,
         model: None,
+        effort: None,
         modified,
         open_in: None,
     };
@@ -94,6 +95,7 @@ fn read(path: &Path) -> Option<Conversation> {
                     .filter(|m| m.starts_with("claude-"))
                 {
                     c.model = Some(model.to_string());
+                    c.effort = e["effort"].as_str().map(String::from).or(c.effort.take());
                 }
             }
             _ => {}
@@ -187,7 +189,7 @@ mod tests {
             "c-1",
             &[
                 r#"{"type":"user","cwd":"/work/app","gitBranch":"main","message":{"content":"fix it"}}"#,
-                r#"{"type":"assistant","message":{"model":"claude-opus-5-5"}}"#,
+                r#"{"type":"assistant","effort":"xhigh","message":{"model":"claude-opus-5-5"}}"#,
                 r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
                 r#"{"type":"ai-title","aiTitle":"Fix the parser"}"#,
                 r#"{"type":"last-prompt","lastPrompt":"and the tests"}"#,
@@ -231,6 +233,7 @@ mod tests {
             (c.last_prompt.as_deref(), c.model.as_deref()),
             (Some("and the tests"), Some("claude-opus-5-5"))
         );
+        assert_eq!(c.effort.as_deref(), Some("xhigh"));
         assert_eq!(c.open_in, None);
     }
 

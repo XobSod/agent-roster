@@ -505,6 +505,7 @@ fn adopting_picks_a_conversation_then_fills_in_a_form() {
             conversation: "c1".into(),
             project: "elsewhere".into(),
             name: None,
+            run_on: crate::adopt::RunOn::Conversation,
             model: None,
             effort: None,
             fork: false,
@@ -779,11 +780,34 @@ fn the_settings_view_changes_settings() {
         app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT)),
         Some(change("keys.detach", Some("M-PPage")))
     );
-    // Text is typed.
+    // A model: one of the agent's with ←→, typed, Tab completing it.
     select(&mut app, "agents.claude.title_model");
+    assert_eq!(
+        app.on_key(key(KeyCode::Right)),
+        Some(change("agents.claude.title_model", Some("opus")))
+    );
+    assert_eq!(
+        app.on_key(key(KeyCode::Left)),
+        Some(change(
+            "agents.claude.title_model",
+            Some("claude-fable-5-1")
+        ))
+    );
     app.on_key(key(KeyCode::Enter));
     assert!(matches!(&app.dialog, Some(Dialog::Input { .. })));
-    keys(&mut app, "sonnet");
+    keys(&mut app, "son");
+    let value = |app: &App| match &app.dialog {
+        Some(Dialog::Input { value, .. }) => value.clone(),
+        _ => panic!("no input"),
+    };
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(value(&app), "sonnet");
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(value(&app), "claude-sonnet-5-5");
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(value(&app), "sonnet");
+    keys(&mut app, "x");
+    app.on_key(key(KeyCode::Backspace));
     assert_eq!(
         app.on_key(key(KeyCode::Enter)),
         Some(change("agents.claude.title_model", Some("sonnet")))

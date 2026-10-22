@@ -51,6 +51,17 @@ impl crate::engine::Roster {
                     .with_context(|| format!("there's no setting {dotted:?}"))?;
                 match kind {
                     Kind::Text if input.trim().is_empty() => None,
+                    // A model "default" is the agent's own: none written.
+                    Kind::Model if input.trim().is_empty() || input.trim() == DEFAULT_CHOICE => {
+                        None
+                    }
+                    // The agent's own: not a value config.toml holds.
+                    Kind::Choice(options)
+                        if input.trim() == DEFAULT_CHOICE
+                            && options.first().is_some_and(|o| o == DEFAULT_CHOICE) =>
+                    {
+                        None
+                    }
                     kind => Some(parse_input(&kind, input).with_context(|| dotted.to_string())?),
                 }
             }
@@ -165,6 +176,9 @@ impl crate::engine::Roster {
     }
 }
 
+/// The choice that leaves a setting to the agent's own default.
+const DEFAULT_CHOICE: &str = "default";
+
 /// How long config.toml goes unchanged before roster reads what changed.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -223,8 +237,16 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
     };
     found.or_else(|| match path {
         [agents, name, key] if agents == "agents" && agent_named(name) && !shown(name) => {
+            let choices = agent::adapter(name).choices();
             match key.as_str() {
-                "command" | "title_model" => Some(Kind::Text),
+                "command" => Some(Kind::Text),
+                "title_model" => Some(Kind::Model),
+                "model" if choices.is_some() => Some(Kind::Model),
+                "effort" => choices.map(|c| {
+                    let mut options = vec![DEFAULT_CHOICE.to_string()];
+                    options.extend(c.efforts.iter().map(|e| e.to_string()));
+                    Kind::Choice(options)
+                }),
                 "args" => Some(Kind::Words),
                 "idle_after" => Some(Kind::Seconds),
                 "auto_title" => Some(Kind::Bool),
@@ -248,6 +270,9 @@ pub enum Kind {
     Choice(Vec<String>),
     /// Any text.
     Text,
+    /// A model of the agent's: any it takes (the ones it offers, to choose
+    /// from), or none for its own default.
+    Model,
     /// Words (an agent's arguments), written on one line like a shell's.
     Words,
     /// A whole number of seconds, at least 1.
@@ -447,9 +472,12 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             args,
             idle_after,
             fit_preview: agent_fit,
+            model,
+            effort,
             title_model,
             auto_title,
         } = &agent;
+        let own = format!("{name}'s own default");
         let p = |key: &'static str| -> Vec<&str> { vec!["agents", name, key] };
         let mut settings = vec![
             text_setting(
@@ -476,21 +504,40 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 "as fit_preview above, for this agent",
             ),
         ];
+        if let Some(choices) = adapter.choices() {
+            let mut s = text_setting(
+                &p("model"),
+                model.as_deref(),
+                &own,
+                "the model new sessions get, unless they or their project pick one",
+            );
+            s.kind = Kind::Model;
+            s.placeholder = Some("\"<model>\"".into());
+            settings.push(s);
+            let mut options = vec![DEFAULT_CHOICE.to_string()];
+            options.extend(choices.efforts.iter().map(|e| e.to_string()));
+            let mut s = make(
+                &p("effort"),
+                Kind::Choice(options),
+                effort.clone().unwrap_or_else(|| own.clone()),
+                effort.clone().unwrap_or_else(|| DEFAULT_CHOICE.into()),
+                "the effort new sessions get, unless they or their project pick one",
+            );
+            s.placeholder = Some("\"<effort>\"".into());
+            settings.push(s);
+        }
         if adapter.oneoff(&Config::default()).is_some() {
-            let (default, placeholder) = match name {
-                agent::CLAUDE => ("haiku".to_string(), None),
-                _ => (
-                    format!("{name}'s own default"),
-                    Some("\"<model>\"".to_string()),
-                ),
-            };
+            // Its default: the model above, else the agent's own.
             let mut s = text_setting(
                 &p("title_model"),
                 title_model.as_deref(),
-                &default,
-                "the model a generated title is made with",
+                model.as_deref().unwrap_or(&own),
+                "the model a generated title is made with (default: model)",
             );
-            s.placeholder = placeholder;
+            s.kind = Kind::Model;
+            if model.is_none() {
+                s.placeholder = Some("\"<model>\"".into());
+            }
             settings.push(s);
         }
         if !adapter.names_its_task() && adapter.oneoff(&Config::default()).is_some() {
@@ -720,7 +767,7 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
             }
             toml_edit::value(input)
         }
-        Kind::Text | Kind::TmuxKey => toml_edit::value(input),
+        Kind::Text | Kind::Model | Kind::TmuxKey => toml_edit::value(input),
         Kind::Seconds => {
             let secs: i64 = input
                 .trim_end_matches('s')
@@ -1101,10 +1148,15 @@ pub fn template(sections: &[Section]) -> String {
         for s in &section.settings {
             let value = match parse_input(&s.kind, &s.input) {
                 // Unset text: its default, if that's a value.
-                Ok(_) if s.input.is_empty() && matches!(s.kind, Kind::Text) => s
+                Ok(_) if s.input.is_empty() && matches!(s.kind, Kind::Text | Kind::Model) => s
                     .placeholder
                     .clone()
                     .unwrap_or_else(|| toml_string(&s.value)),
+                // The agent's own, which isn't a value.
+                Ok(_) if s.input == DEFAULT_CHOICE => s
+                    .placeholder
+                    .clone()
+                    .unwrap_or_else(|| toml_string(&s.input)),
                 Ok(item) => item.to_string().trim().to_string(),
                 Err(_) => toml_string(&s.input),
             };
@@ -1155,7 +1207,30 @@ mod tests {
             ("--tui-mode regular", true)
         );
         // Each agent has the settings that apply to it.
-        assert_eq!(find(&sections, "agents.claude.title_model").value, "haiku");
+        // Titles on the agent's model unless picked, which is its own unless picked.
+        assert_eq!(
+            find(&sections, "agents.claude.title_model").value,
+            "claude's own default"
+        );
+        let effort = find(&sections, "agents.pi.effort");
+        assert_eq!(
+            (effort.value.as_str(), effort.input.as_str()),
+            ("pi's own default", "default")
+        );
+        let with_model = "[agents.pi]\nmodel = \"sonnet\"\neffort = \"low\"\n";
+        let config = Config::parse(with_model).unwrap();
+        let sections_with = super::sections(&config, with_model, &cx());
+        assert_eq!(
+            find(&sections_with, "agents.pi.title_model").value,
+            "sonnet"
+        );
+        assert_eq!(find(&sections_with, "agents.pi.effort").value, "low");
+        assert!(
+            sections
+                .iter()
+                .flat_map(|s| &s.settings)
+                .all(|s| s.dotted() != "agents.aider.model")
+        );
         assert_eq!(find(&sections, "agents.pi.auto_title").value, "on");
         assert_eq!(find(&sections, "agents.aider.idle_after").value, "2s");
         assert!(
@@ -1379,6 +1454,18 @@ mod tests {
         assert_eq!(kind("status_line"), Some(Kind::Bool));
         // An agent not configured yet: its settings.
         assert_eq!(kind("agents.codex.command"), Some(Kind::Text));
+        assert_eq!(kind("agents.codex.model"), None);
+        let sections = super::sections(
+            &config,
+            "",
+            &Env {
+                agents: &[],
+                ..cx()
+            },
+        );
+        let kind = |dotted: &str| kind_at(&sections, &at(dotted));
+        assert_eq!(kind("agents.pi.model"), Some(Kind::Model));
+        assert!(matches!(kind("agents.pi.effort"), Some(Kind::Choice(_))));
         // Claude names its own titles; not a name.
         assert_eq!(kind("agents.claude.auto_title"), None);
         assert_eq!(kind("agents.a b.command"), None);
@@ -1420,7 +1507,8 @@ mod tests {
         let uncommented: String = template
             .lines()
             .filter_map(|l| l.strip_prefix("# "))
-            .filter(|l| l.contains(" = ") || l.starts_with('['))
+            // Not those whose default is the agent's own, no value.
+            .filter(|l| (l.contains(" = ") && !l.contains(" = \"<")) || l.starts_with('['))
             .map(|l| l.split("    # ").next().unwrap().to_string() + "\n")
             .collect();
         let parsed = Config::parse(&uncommented).unwrap_or_else(|e| panic!("{e:#}\n{uncommented}"));
@@ -1430,9 +1518,7 @@ mod tests {
         );
         assert_eq!(parsed.order, Order::default());
         assert!(
-            template.contains(
-                "# title_model = \"haiku\"    # the model a generated title is made with"
-            ),
+            template.contains("# effort = \"<effort>\"    # the effort new sessions get"),
             "{template}"
         );
     }

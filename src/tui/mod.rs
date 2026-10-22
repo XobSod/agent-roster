@@ -51,6 +51,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.config_file = roster.paths.config_file();
+    app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, roster, &mut app);
@@ -120,6 +121,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.set_agents(agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.preview.fitted.clear();
+    app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
 }
 
@@ -488,6 +490,7 @@ fn perform(
             conversation,
             project,
             name,
+            run_on,
             model,
             effort,
             fork,
@@ -498,8 +501,9 @@ fn perform(
                 conversation,
                 project: Some(project),
                 name,
-                model: Some(model),
-                effort: Some(effort),
+                run_on,
+                model,
+                effort,
                 fork,
                 force,
             };

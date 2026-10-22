@@ -166,6 +166,20 @@ impl App {
         })
     }
 
+    /// The models a model setting offers: the agent's own default, then
+    /// those the agent has (as the session forms offer them).
+    pub fn model_choices(&self, s: &Setting) -> Vec<String> {
+        let agent = match s.path.as_slice() {
+            [agents, name, _] if agents == "agents" => name.as_str(),
+            _ => "",
+        };
+        let mut choices = vec!["default".to_string()];
+        if let Some(models) = self.models.offered.get(agent) {
+            choices.extend(models.iter().map(|m| m.id.clone()));
+        }
+        choices
+    }
+
     /// The selected setting's next (or previous) choice; with `typing`, a
     /// line to type its value in, or for a key, a key to press.
     fn change_selected(&mut self, next: bool, typing: bool) -> Option<Op> {
@@ -173,6 +187,28 @@ impl App {
         let choices: Vec<String> = match &s.kind {
             Kind::Bool => vec!["on".into(), "off".into()],
             Kind::Choice(options) => options.clone(),
+            Kind::Model if typing => {
+                let prompt = format!("{} ({}):", s.dotted(), typing_hint(&s.kind));
+                let mut models = self.model_choices(&s);
+                models.remove(0);
+                self.input_with(
+                    &prompt,
+                    s.input.clone(),
+                    dialog::Purpose::Setting {
+                        setting: s.dotted(),
+                    },
+                    models,
+                );
+                return None;
+            }
+            Kind::Model => {
+                let mut choices = self.model_choices(&s);
+                // One typed that the agent doesn't list: where it is.
+                if !s.input.is_empty() && !choices.contains(&s.input) {
+                    choices.insert(1, s.input.clone());
+                }
+                choices
+            }
             Kind::Keys | Kind::TmuxKey if typing => {
                 self.capturing = Some(Capture {
                     setting: s.dotted(),
@@ -193,7 +229,12 @@ impl App {
             }
             _ => return None,
         };
-        let i = choices.iter().position(|c| *c == s.input).unwrap_or(0);
+        let current = if s.input.is_empty() {
+            "default"
+        } else {
+            &s.input
+        };
+        let i = choices.iter().position(|c| c == current).unwrap_or(0);
         let n = choices.len();
         let to = if next { (i + 1) % n } else { (i + n - 1) % n };
         Some(Op::ChangeSetting {
@@ -207,6 +248,7 @@ impl App {
 fn typing_hint(kind: &Kind) -> &'static str {
     match kind {
         Kind::Text => "empty for the default",
+        Kind::Model => "Tab completes from the agent's; empty for its default",
         Kind::Words => "words as in a shell; empty for none",
         Kind::Seconds => "seconds",
         Kind::Keys => "key names, e.g. k Up or C-x; empty for none",

@@ -655,6 +655,13 @@ impl Roster {
     /// Returns whether you submitted a prompt while attached (for agents that
     /// report prompts: Claude, pi).
     pub fn attach(&mut self, id: &str) -> Result<bool> {
+        let since = self.attach_terminal(id)?;
+        self.detached(id, since)
+    }
+
+    /// `attach` up to the user detaching; returns when it attached, for
+    /// `detached`. Apart so the TUI can draw itself again in between.
+    pub fn attach_terminal(&mut self, id: &str) -> Result<i64> {
         self.refresh()?;
         let s = self.live_session(id)?;
         if s.state == State::Stopped {
@@ -671,7 +678,12 @@ impl Roster {
         if !status.success() {
             bail!("couldn't attach to {}", s.label());
         }
-        // Whatever happened while attached counts as seen.
+        Ok(since)
+    }
+
+    /// After detaching from `id`, attached `since`: whatever happened while
+    /// attached counts as seen. Whether a prompt was submitted meanwhile.
+    pub fn detached(&mut self, id: &str, since: i64) -> Result<bool> {
         self.refresh()?;
         self.set_unread(id, false)?;
         self.db.prompted_since(id, since)

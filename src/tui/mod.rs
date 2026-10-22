@@ -23,9 +23,7 @@ use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use ratatui::crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::text::Text;
 
 use crate::adopt::Adopt;
@@ -272,7 +270,7 @@ fn perform(
     let outcome: Result<String> = match op {
         Op::Attach(id) => {
             app.attaching(&id);
-            let result = attach(terminal, roster, &id)?.map(|prompted| {
+            let result = attach(terminal, roster, app, &id)?.map(|prompted| {
                 app.detached(prompted);
                 String::new()
             });
@@ -474,13 +472,24 @@ fn busy(terminal: &mut DefaultTerminal, app: &mut App, message: String) -> Resul
 
 /// Hands the terminal to `tmux attach` until the user detaches. The outer result
 /// is the terminal's, the inner one the attach's: whether a prompt was submitted.
-fn attach(terminal: &mut DefaultTerminal, roster: &mut Roster, id: &str) -> Result<Result<bool>> {
+///
+/// tmux switches to the terminal's other screen and back by itself, so roster
+/// stays on its own until then (leaving it first flashed the normal screen),
+/// and draws itself again as it was the moment tmux is done, before catching
+/// up on what happened meanwhile (which takes a moment: catching up first
+/// showed the normal screen, then a blank one, found in real use).
+fn attach(
+    terminal: &mut DefaultTerminal,
+    roster: &mut Roster,
+    app: &App,
+    id: &str,
+) -> Result<Result<bool>> {
     disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
-    let result = roster.attach(id);
+    let attached = roster.attach_terminal(id);
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     terminal.clear()?;
     terminal.hide_cursor()?;
-    Ok(result)
+    terminal.draw(|f| ui::draw(f, app))?;
+    Ok(attached.and_then(|since| roster.detached(id, since)))
 }

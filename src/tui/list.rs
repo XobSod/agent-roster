@@ -132,7 +132,7 @@ fn entry(s: &Session) -> Entry {
 
 /// The sessions on shelves, or grouped by project with the archived ones on
 /// their shelf after the projects.
-pub fn live(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<Entry> {
+pub fn entries(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<Entry> {
     let shown: Vec<&Session> = sessions
         .iter()
         .filter(|s| opts.filter.is_none_or(|p| s.project_id == p))
@@ -276,7 +276,7 @@ mod tests {
             hits: None,
             order: &crate::config::Order::default(),
         };
-        let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
+        let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
             keys(&entries),
             [
@@ -317,7 +317,7 @@ mod tests {
             with("idle-2", 1, State::Idle, false, 20),
         ];
         assert_eq!(
-            keys(&live(&[project(1, "a")], &sessions, &opts)),
+            keys(&entries(&[project(1, "a")], &sessions, &opts)),
             [
                 "[Idle 2]",
                 "idle-1",
@@ -339,7 +339,7 @@ mod tests {
             hits: None,
             order: &crate::config::Order::default(),
         };
-        let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
+        let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         let shown = keys(&entries);
         assert!(shown.contains(&"[Working 2 folded]".to_string()));
         assert!(!shown.contains(&"working-new".to_string()));
@@ -359,7 +359,7 @@ mod tests {
             hits: None,
             order: &crate::config::Order::default(),
         };
-        let entries = live(
+        let entries = entries(
             &[project(1, "a"), project(2, "b"), project(3, "empty")],
             &sessions(),
             &opts,
@@ -392,7 +392,7 @@ mod tests {
             hits: None,
             order: &crate::config::Order::default(),
         };
-        let entries = live(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
+        let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
             keys(&entries),
             [
@@ -420,7 +420,7 @@ mod tests {
         };
         let projects = [project(1, "a"), project(2, "b"), project(3, "empty")];
         assert_eq!(
-            keys(&live(&projects, &sessions(), &opts)),
+            keys(&entries(&projects, &sessions(), &opts)),
             [
                 "[Needs input 1]",
                 "unread",
@@ -433,7 +433,7 @@ mod tests {
         // Grouped: projects without a match are left out.
         opts.grouped = true;
         assert_eq!(
-            keys(&live(&projects, &sessions(), &opts)),
+            keys(&entries(&projects, &sessions(), &opts)),
             [
                 "[b 2]",
                 "unread",
@@ -456,7 +456,7 @@ mod tests {
         };
         let sessions = [archived("a", 1, 1), archived("b", 1, 2)];
         assert_eq!(
-            keys(&live(&[project(1, "a")], &sessions, &opts)),
+            keys(&entries(&[project(1, "a")], &sessions, &opts)),
             ["[Archived 2]", "row:b", "row:a"]
         );
     }

@@ -276,23 +276,28 @@ pub fn events(r: &Roster, follow: bool, session: Option<&str>) -> Result<()> {
         Some(addr) => Some(r.resolve_any(addr)?.id),
         None => None,
     };
-    let mut labels: HashMap<String, String> = HashMap::new();
+    // Each session's label and agent, by id.
+    let mut known: HashMap<String, (String, String)> = HashMap::new();
     let mut last = r.db.event_id_before_last(20, filter.as_deref())?;
     loop {
         for e in r.db.events_after(last, filter.as_deref(), 1000)? {
-            if !labels.contains_key(&e.session_id) {
-                labels = r
+            if !known.contains_key(&e.session_id) {
+                known = r
                     .sessions(true)?
                     .into_iter()
-                    .map(|s| (s.id.clone(), s.label()))
+                    .map(|s| (s.id.clone(), (s.label(), s.agent)))
                     .collect();
+                // Gone (deleted, say): its id, without looking again.
+                known
+                    .entry(e.session_id.clone())
+                    .or_insert_with(|| (e.session_id.clone(), String::new()));
             }
-            let label = labels.get(&e.session_id).unwrap_or(&e.session_id);
+            let (label, agent) = &known[&e.session_id];
             println!(
                 "{}  {label}  {}  {}",
                 util::local_time(e.at),
                 e.kind,
-                summarize(e.payload.as_deref())
+                summarize(agent, e.payload.as_deref())
             );
             last = e.id;
         }
@@ -304,8 +309,9 @@ pub fn events(r: &Roster, follow: bool, session: Option<&str>) -> Result<()> {
     }
 }
 
-/// The interesting parts of a hook payload.
-pub fn summarize(payload: Option<&str>) -> String {
+/// The interesting parts of a report's payload: what `agent`'s adapter reads
+/// of it, and the hook and tool Claude names.
+pub fn summarize(agent: &str, payload: Option<&str>) -> String {
     let Some(payload) = payload else {
         return String::new();
     };
@@ -321,8 +327,43 @@ pub fn summarize(payload: Option<&str>) -> String {
             parts.push(format!("{key}={value}"));
         }
     }
-    if let Some(id) = v["session_id"].as_str() {
+    let report = crate::agent::adapter(agent).report(&v);
+    if let Some(id) = &report.conversation_id {
         parts.push(format!("conversation={}", id.get(..8).unwrap_or(id)));
     }
+    if report.cleared {
+        parts.push("cleared".into());
+    }
+    for (key, value) in [("model", &report.model), ("effort", &report.effort)] {
+        if let Some(value) = value {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    match &report.title {
+        Some(Some(title)) => parts.push(format!("title={title:?}")),
+        Some(None) => parts.push("untitled".into()),
+        None => {}
+    }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_are_summarized_in_their_agents_terms() {
+        let claude = r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"c0ffee123456","model":"claude-opus-5-5"}"#;
+        assert_eq!(
+            summarize("claude", Some(claude)),
+            "SessionStart source=clear conversation=c0ffee12 cleared model=claude-opus-5-5"
+        );
+        let pi = r#"{"conversation_id":"01a16240-5d71","title":"Fix the parser","effort":"high"}"#;
+        assert_eq!(
+            summarize("pi", Some(pi)),
+            r#"conversation=01a16240 effort=high title="Fix the parser""#
+        );
+        assert_eq!(summarize("pi", Some(r#"{"title":null}"#)), "untitled");
+        assert_eq!(summarize("aider", Some("not json")), "not json");
+    }
 }

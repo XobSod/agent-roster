@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::Keys;
 use crate::model::tests::session;
+use ratatui::crossterm::event::KeyModifiers;
 
 fn project(id: i64, name: &str) -> Project {
     Project {
@@ -25,7 +26,7 @@ fn with(id: &str, project: (i64, &str), state: State, unread: bool, since: i64) 
 
 /// alpha: an idle session; beta: an unread one and a working one; one deleted.
 fn app() -> App {
-    let agents = vec![("claude".to_string(), true)];
+    let agents = vec!["claude".to_string()];
     let mut app = App::new(
         Keymap::new(&Keys::default()).unwrap(),
         "/work".into(),
@@ -328,12 +329,12 @@ fn the_projects_view_lists_and_manages_projects() {
     // Enter goes back to the sessions, only that project's.
     keys(&mut app, "j");
     assert_eq!(app.on_key(key(KeyCode::Enter)), None);
-    assert_eq!((app.mode, app.filter), (Mode::Live, Some(2)));
+    assert_eq!((app.mode, app.filter), (Mode::Sessions, Some(2)));
     // v p opens it too, and closes it again.
     keys(&mut app, "vp");
     assert_eq!(app.mode, Mode::Projects);
     keys(&mut app, "vp");
-    assert_eq!(app.mode, Mode::Live);
+    assert_eq!(app.mode, Mode::Sessions);
     // A new (or renamed) project is selected once it shows up.
     keys(&mut app, "pl");
     app.select_project("gamma");
@@ -342,7 +343,7 @@ fn the_projects_view_lists_and_manages_projects() {
     app.set_data(projects, app.sessions.clone());
     assert_eq!(app.project_row, 2);
     app.on_key(key(KeyCode::Esc));
-    assert_eq!(app.mode, Mode::Live);
+    assert_eq!(app.mode, Mode::Sessions);
     // On the session list, the same keys don't act on projects.
     assert_eq!(keys(&mut app, "e"), None);
     assert!(app.dialog.is_none());
@@ -406,7 +407,7 @@ fn project_filter_and_removal() {
 #[test]
 fn agents_that_cant_resume_ask_before_a_new_conversation() {
     let mut app = app();
-    app.agents.push(("aider".into(), false));
+    app.agents.push("aider".into());
     let mut generic = with("g1", (1, "alpha"), State::Stopped, false, 1);
     generic.agent = "aider".into();
     let mut sessions = app.sessions.clone();
@@ -453,7 +454,7 @@ fn server_view_scrolls_kills_orphans_and_goes_back() {
     keys(&mut app, "sx");
     assert!(app.message().unwrap().error);
     app.on_key(key(KeyCode::Esc));
-    assert_eq!(app.mode, Mode::Live);
+    assert_eq!(app.mode, Mode::Sessions);
     // The selection is where it was.
     assert_eq!(app.selected_session().unwrap().id, "s1");
 }
@@ -557,10 +558,10 @@ fn quit_only_quits_from_the_session_list() {
     let mut app = app();
     for view in ["pl", "vt"] {
         keys(&mut app, view);
-        assert_ne!(app.mode, Mode::Live);
+        assert_ne!(app.mode, Mode::Sessions);
         assert!(!app.hints().iter().any(|(_, what)| *what == "quit"));
         assert_eq!(keys(&mut app, "q"), None, "{view}");
-        assert_eq!(app.mode, Mode::Live, "{view}");
+        assert_eq!(app.mode, Mode::Sessions, "{view}");
     }
     assert!(app.hints().contains(&("q".to_string(), "quit")));
     assert_eq!(keys(&mut app, "q"), Some(Op::Quit));

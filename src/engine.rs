@@ -419,13 +419,7 @@ impl Roster {
         if let Some(effort) = &req.effort {
             agent::check_effort(&agent, effort)?;
         }
-        let taken: Vec<String> = self
-            .db
-            .sessions(false)?
-            .into_iter()
-            .filter(|s| s.project_id == project.id)
-            .map(|s| s.name)
-            .collect();
+        let taken = self.db.live_names(project.id)?;
         let name = match req.name.as_deref() {
             Some(name) => {
                 validate_name("session", name)?;
@@ -452,36 +446,11 @@ impl Roster {
             .prompt
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty());
-        let mut s = Session {
-            id: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
-            project_id: project.id,
-            project: project.name.clone(),
-            name,
-            agent: agent.clone(),
-            workdir: project.origin.clone(),
-            conversation_id: None,
-            transcript_path: None,
-            state: State::Stopped,
-            unread: false,
-            exit_status: None,
-            last_event_at: None,
-            screen_hash: None,
-            screen_changed_at: None,
-            created_at: now_ms(),
-            deleted_at: None,
-            baseline_at: None,
-            title: None,
-            model,
-            effort,
-            state_since: Some(now_ms()),
-            pending_prompt: prompt,
-            running_model: None,
-            running_effort: None,
-            title_override: None,
-            turns: 0,
-            worked_ms: 0,
-            fork_from: None,
-        };
+        let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let mut s = Session::new(&id, &project, &name, &agent, now_ms());
+        s.model = model;
+        s.effort = effort;
+        s.pending_prompt = prompt;
         customize(&mut s);
         self.db.insert_session(&s)?;
         self.start(&s.id)?;
@@ -492,10 +461,7 @@ impl Roster {
     /// resuming the conversation if it has one.
     pub fn start(&mut self, id: &str) -> Result<()> {
         self.refresh()?;
-        let mut s = self.db.session(id)?;
-        if s.deleted_at.is_some() {
-            bail!("{} is archived; restore it first", s.label());
-        }
+        let mut s = self.live_session(id)?;
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
         }
@@ -556,6 +522,15 @@ impl Roster {
             &project_env,
             argv,
         ))
+    }
+
+    /// Session `id`, unless it's archived.
+    fn live_session(&self, id: &str) -> Result<Session> {
+        let s = self.db.session(id)?;
+        if s.deleted_at.is_some() {
+            bail!("{} is archived; restore it first", s.label());
+        }
+        Ok(s)
     }
 
     /// Stops a session's agent (SIGTERM, then SIGKILL), keeping its entry and last
@@ -627,12 +602,7 @@ impl Roster {
             validate_name("session", name)?;
             s.name = name.to_string();
         }
-        let taken = self
-            .db
-            .sessions(false)?
-            .iter()
-            .any(|o| o.project_id == s.project_id && o.name == s.name);
-        if taken {
+        if self.db.name_taken(s.project_id, &s.name, None)? {
             bail!(
                 "project {:?} already has a session named {:?}; restore with --name",
                 s.project,
@@ -652,10 +622,7 @@ impl Roster {
     /// report prompts: Claude, pi).
     pub fn attach(&mut self, id: &str) -> Result<bool> {
         self.refresh()?;
-        let s = self.db.session(id)?;
-        if s.deleted_at.is_some() {
-            bail!("{} is archived; restore it first", s.label());
-        }
+        let s = self.live_session(id)?;
         if s.state == State::Stopped {
             self.start(id)?;
         }
@@ -693,12 +660,7 @@ impl Roster {
         if let Some(effort) = &effort {
             agent::check_effort(&s.agent, effort)?;
         }
-        let taken = self
-            .db
-            .sessions(false)?
-            .iter()
-            .any(|o| o.id != s.id && o.project_id == s.project_id && o.name == name);
-        if taken {
+        if self.db.name_taken(s.project_id, name, Some(&s.id))? {
             bail!(
                 "project {:?} already has a session named {name:?}",
                 s.project

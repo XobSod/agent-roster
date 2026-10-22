@@ -72,7 +72,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// True while something on screen animates (a working session's spinner).
 pub fn animating(app: &App) -> bool {
     // Only the session list has spinners.
-    app.mode == Mode::Live
+    app.mode == Mode::Sessions
         && app
             .sessions
             .iter()
@@ -104,7 +104,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     );
     // The session's statistics: what roster counts and what the agent can tell.
     if let Some(s) = app.selected_session().filter(|s| s.deleted_at.is_none()) {
-        let parts = crate::stats::summary(s, app.stats.as_ref(), now);
+        let parts = crate::stats::summary(s, app.preview.stats.as_ref(), now);
         let line = truncate(&parts.join(" · "), stats.width as usize);
         f.render_widget(
             Paragraph::new(Line::styled(line, Style::new().fg(MUTED))),
@@ -113,10 +113,10 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     }
     // The bottom of an agent's screen is where its prompt is; long lines are cut
     // (agents drawing full screen get this size, so theirs fit).
-    app.preview_size.set(Some((body.width, body.height)));
+    app.preview.size.set(Some((body.width, body.height)));
     // Drawn line by line from the preview itself: it's redrawn as often as
     // the spinners move, and copying a colourful screen each time adds up.
-    let lines = &app.preview.lines;
+    let lines = &app.preview.text.lines;
     let skip = lines.len().saturating_sub(body.height as usize);
     for (line, row) in lines[skip..].iter().zip(body.rows()) {
         f.render_widget(line, row);

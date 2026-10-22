@@ -4,6 +4,7 @@
 
 mod app;
 mod form;
+mod input;
 mod list;
 mod op;
 mod picker;
@@ -44,14 +45,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let cwd = std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_default();
-    let agents = agent::available(&roster.config)
-        .into_iter()
-        .map(|name| {
-            let resumes = agent::adapter(&name).resumes();
-            (name, resumes)
-        })
-        .collect();
-    let mut app = App::new(keymap, cwd, agents);
+    let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, roster, &mut app);
@@ -115,7 +109,7 @@ fn reload(roster: &mut Roster, app: &mut App) {
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
     // Only the session list shows the preview.
-    if app.mode == Mode::Live {
+    if app.mode == Mode::Sessions {
         fit(roster, app);
         update_preview(roster, app);
     }
@@ -123,21 +117,21 @@ fn reload(roster: &mut Roster, app: &mut App) {
 
 /// Agents drawing full screen sized to the preview, so their screens fit it.
 fn fit(roster: &mut Roster, app: &mut App) {
-    let Some((w, h)) = app.preview_size.get() else {
+    let Some((w, h)) = app.preview.size.get() else {
         return;
     };
     let size = (w.max(MIN_FIT.0), h.max(MIN_FIT.1));
-    if app.fitted_size != Some(size) {
-        app.fitted.clear();
-        app.fitted_size = Some(size);
+    if app.preview.fitted_size != Some(size) {
+        app.preview.fitted.clear();
+        app.preview.fitted_size = Some(size);
     }
-    if let Err(e) = roster.fit_screens(&app.sessions, size, &mut app.fitted) {
+    if let Err(e) = roster.fit_screens(&app.sessions, size, &mut app.preview.fitted) {
         app.fail(format!("{e:#}"));
     }
 }
 
 fn update_preview(roster: &Roster, app: &mut App) {
-    app.preview = match app.selected_entry().cloned() {
+    app.preview.text = match app.selected_entry().cloned() {
         None => app.empty_info(),
         Some(Entry::Heading {
             group: Group::Project(id),
@@ -165,7 +159,7 @@ fn update_preview(roster: &Roster, app: &mut App) {
             }
         },
     };
-    app.stats = app
+    app.preview.stats = app
         .selected_session()
         .cloned()
         .and_then(|s| agent_stats(roster, app, &s));
@@ -182,11 +176,16 @@ fn agent_stats(
     }
     let path = std::path::Path::new(s.transcript_path.as_deref()?);
     // After /clear the conversation, and its transcript, change.
-    if app.transcripts.get(&s.id).is_none_or(|t| t.path() != path) {
+    if app
+        .preview
+        .transcripts
+        .get(&s.id)
+        .is_none_or(|t| t.path() != path)
+    {
         let reader = agent::adapter(&s.agent).transcript(path)?;
-        app.transcripts.insert(s.id.clone(), reader);
+        app.preview.transcripts.insert(s.id.clone(), reader);
     }
-    let reader = app.transcripts.get_mut(&s.id)?;
+    let reader = app.preview.transcripts.get_mut(&s.id)?;
     reader.update().ok()?;
     Some(roster.with_window(reader.stats(s.running_model.as_deref()), s))
 }
@@ -221,7 +220,7 @@ fn perform(
                 String::new()
             });
             // Attaching sized it to the terminal: fit it to the preview again.
-            app.fitted.clear();
+            app.preview.fitted.clear();
             result
         }
         Op::Start(id) => {

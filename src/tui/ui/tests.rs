@@ -22,7 +22,7 @@ fn render(app: &App, width: u16, height: u16) -> String {
 }
 
 fn app() -> App {
-    let agents = vec![("claude".to_string(), true)];
+    let agents = vec!["claude".to_string()];
     let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/".into(), agents);
     let now = now_ms();
     let mut a = session("a1");
@@ -53,7 +53,7 @@ fn app() -> App {
         vec![a, b],
     );
     app.selected = 1;
-    app.preview = Text::from("agent screen line");
+    app.preview.text = Text::from("agent screen line");
     app
 }
 
@@ -404,7 +404,7 @@ fn cards_and_forms_show_the_model_claude_reports() {
     sessions[0].running_model = Some("claude-opus-5-5[1m]".into());
     app.set_data(app.projects.clone(), sessions);
     app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
-    app.stats = Some(crate::stats::AgentStats {
+    app.preview.stats = Some(crate::stats::AgentStats {
         prompts: Some(5),
         output_tokens: Some(92_000),
         ..Default::default()

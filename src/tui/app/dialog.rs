@@ -28,7 +28,6 @@ pub enum Purpose {
 impl App {
     pub(super) fn on_dialog_key(&mut self, e: KeyEvent) -> Option<Op> {
         let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = e.modifiers.contains(KeyModifiers::ALT);
         match self.dialog.take()? {
             Dialog::Form(mut form) => match form.on_key(e) {
                 Outcome::Continue => {
@@ -77,17 +76,13 @@ impl App {
                 mut value,
                 purpose,
             } => {
-                match e.code {
-                    KeyCode::Esc => return None,
-                    KeyCode::Char('c') if ctrl => return None,
-                    KeyCode::Enter => return self.submit(value, purpose),
-                    KeyCode::Backspace => {
-                        value.pop();
-                    }
-                    KeyCode::Char('u') if ctrl => value.clear(),
-                    KeyCode::Char(c) if !ctrl && !alt => value.push(c),
-                    _ => {}
+                if input::cancels(e) {
+                    return None;
                 }
+                if e.code == KeyCode::Enter {
+                    return self.submit(value, purpose);
+                }
+                input::edit_line(&mut value, e);
                 self.dialog = Some(Dialog::Input {
                     prompt,
                     value,

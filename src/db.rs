@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_params, params};
 
 use crate::model::{Event, Project, Session, State};
 
@@ -63,7 +63,7 @@ CREATE TABLE events (
 ";
 
 const SESSION_COLUMNS: &str =
-    "s.id, s.project_id, p.name, s.name, s.agent, s.workdir, s.conversation_id,
+    "s.id, s.project_id, p.name AS project, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
@@ -166,14 +166,7 @@ impl Db {
                     project.effort
                 ],
             )
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(f, _)
-                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    anyhow::anyhow!("project {name:?} already exists")
-                }
-                e => e.into(),
-            })?;
+            .map_err(|e| constraint(e, || format!("project {name:?} already exists")))?;
         Ok(Project {
             id: self.conn.last_insert_rowid(),
             ..project.clone()
@@ -194,14 +187,7 @@ impl Db {
                     p.effort
                 ],
             )
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(f, _)
-                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    anyhow::anyhow!("project {:?} already exists", p.name)
-                }
-                e => e.into(),
-            })?;
+            .map_err(|e| constraint(e, || format!("project {:?} already exists", p.name)))?;
         Ok(())
     }
 
@@ -239,6 +225,11 @@ impl Db {
             );
         }
         let tx = self.conn.transaction()?;
+        // Their events go too, as when a session is deleted.
+        tx.execute(
+            "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
+            [project.id],
+        )?;
         tx.execute("DELETE FROM sessions WHERE project_id = ?1", [project.id])?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [project.id])?;
         tx.commit()?;
@@ -247,20 +238,48 @@ impl Db {
 
     // Sessions
 
+    /// The names of a project's live sessions.
+    pub fn live_names(&self, project_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM sessions WHERE project_id = ?1 AND deleted_at IS NULL")?;
+        let rows = stmt.query_map([project_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether a live session of the project other than `except` is named `name`.
+    pub fn name_taken(&self, project_id: i64, name: &str, except: Option<&str>) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE project_id = ?1 AND name = ?2
+                AND deleted_at IS NULL AND id IS NOT ?3)",
+            params![project_id, name, except],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn insert_session(&self, s: &Session) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO sessions (id, project_id, name, agent, workdir, state, created_at)
+        self.conn
+            .execute(
+                "INSERT INTO sessions (id, project_id, name, agent, workdir, state, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                s.id,
-                s.project_id,
-                s.name,
-                s.agent,
-                path_str(&s.workdir)?,
-                s.state.as_str(),
-                s.created_at
-            ],
-        )?;
+                params![
+                    s.id,
+                    s.project_id,
+                    s.name,
+                    s.agent,
+                    path_str(&s.workdir)?,
+                    s.state.as_str(),
+                    s.created_at
+                ],
+            )
+            .map_err(|e| {
+                constraint(e, || {
+                    format!(
+                        "project {:?} already has a session named {:?}",
+                        s.project, s.name
+                    )
+                })
+            })?;
         save_session(&self.conn, s)
     }
 
@@ -346,15 +365,7 @@ impl Db {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let applied: i64 = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'applied_event'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let applied = applied_event(&tx)?;
         let events = events_after(&tx, applied, None, i64::MAX)?;
         let Some(last) = events.last().map(|e| e.id) else {
             return Ok(0);
@@ -383,22 +394,14 @@ impl Db {
                     learned.push((format!("window:{model}"), window.to_string()));
                 }
                 for (key, value) in learned {
-                    tx.execute(
-                        "INSERT INTO meta (key, value) VALUES (?1, ?2)
-                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                        [key, value],
-                    )?;
+                    set_meta(&tx, &key, &value)?;
                 }
             }
         }
         for s in touched.values() {
             save_session(&tx, s)?;
         }
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('applied_event', ?1)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            [last.to_string()],
-        )?;
+        set_meta(&tx, "applied_event", &last.to_string())?;
         tx.execute(
             "DELETE FROM events WHERE id <= ?1 AND at < ?2",
             params![last, now - EVENT_RETENTION_MS],
@@ -419,16 +422,7 @@ impl Db {
 
     /// Reported events not applied yet, and all events kept.
     pub fn event_counts(&self) -> Result<(i64, i64)> {
-        let applied: i64 = self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'applied_event'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let applied = applied_event(&self.conn)?;
         let waiting = self.conn.query_row(
             "SELECT count(*) FROM events WHERE id > ?1",
             [applied],
@@ -461,12 +455,7 @@ impl Db {
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            [key, value],
-        )?;
-        Ok(())
+        set_meta(&self.conn, key, value)
     }
 
     /// What each model alias (and "default") last turned out to be, as Claude
@@ -525,13 +514,7 @@ impl Db {
     /// The context window an agent reported for `model`, if one did.
     pub fn learned_window(&self, model: &str) -> Result<Option<u64>> {
         Ok(self
-            .conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                [format!("window:{model}")],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?
+            .meta(&format!("window:{model}"))?
             .and_then(|v| v.parse().ok()))
     }
 
@@ -612,43 +595,63 @@ fn load_session(conn: &Connection, id: &str) -> Result<Option<Session>> {
 
 fn save_session(conn: &Connection, s: &Session) -> Result<()> {
     conn.execute(
-        "UPDATE sessions SET name = ?2, conversation_id = ?3, transcript_path = ?4, state = ?5, unread = ?6,
-             exit_status = ?7, last_event_at = ?8, screen_hash = ?9, screen_changed_at = ?10, deleted_at = ?11,
-             baseline_at = ?12, title = ?13, model = ?14, effort = ?15, state_since = ?16,
-             pending_prompt = ?17, running_model = ?18, running_effort = ?19, title_override = ?20,
-             turns = ?21, worked_ms = ?22, fork_from = ?23
-         WHERE id = ?1",
-        params![
-            s.id,
-            s.name,
-            s.conversation_id,
-            s.transcript_path,
-            s.state.as_str(),
-            s.unread,
-            s.exit_status,
-            s.last_event_at,
-            s.screen_hash,
-            s.screen_changed_at,
-            s.deleted_at,
-            s.baseline_at,
-            s.title,
-            s.model,
-            s.effort,
-            s.state_since,
-            s.pending_prompt,
-            s.running_model,
-            s.running_effort,
-            s.title_override,
-            s.turns,
-            s.worked_ms,
-            s.fork_from,
-        ],
+        "UPDATE sessions SET
+             name = :name,
+             conversation_id = :conversation_id,
+             transcript_path = :transcript_path,
+             state = :state,
+             unread = :unread,
+             exit_status = :exit_status,
+             last_event_at = :last_event_at,
+             screen_hash = :screen_hash,
+             screen_changed_at = :screen_changed_at,
+             deleted_at = :deleted_at,
+             baseline_at = :baseline_at,
+             title = :title,
+             model = :model,
+             effort = :effort,
+             state_since = :state_since,
+             pending_prompt = :pending_prompt,
+             running_model = :running_model,
+             running_effort = :running_effort,
+             title_override = :title_override,
+             turns = :turns,
+             worked_ms = :worked_ms,
+             fork_from = :fork_from
+         WHERE id = :id",
+        named_params! {
+            ":id": s.id,
+            ":name": s.name,
+            ":conversation_id": s.conversation_id,
+            ":transcript_path": s.transcript_path,
+            ":state": s.state.as_str(),
+            ":unread": s.unread,
+            ":exit_status": s.exit_status,
+            ":last_event_at": s.last_event_at,
+            ":screen_hash": s.screen_hash,
+            ":screen_changed_at": s.screen_changed_at,
+            ":deleted_at": s.deleted_at,
+            ":baseline_at": s.baseline_at,
+            ":title": s.title,
+            ":model": s.model,
+            ":effort": s.effort,
+            ":state_since": s.state_since,
+            ":pending_prompt": s.pending_prompt,
+            ":running_model": s.running_model,
+            ":running_effort": s.running_effort,
+            ":title_override": s.title_override,
+            ":turns": s.turns,
+            ":worked_ms": s.worked_ms,
+            ":fork_from": s.fork_from,
+        },
     )
-    .map_err(|e| match e {
-        rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {
-            anyhow::anyhow!("project {:?} already has a session named {:?}", s.project, s.name)
-        }
-        e => e.into(),
+    .map_err(|e| {
+        constraint(e, || {
+            format!(
+                "project {:?} already has a session named {:?}",
+                s.project, s.name
+            )
+        })
     })?;
     Ok(())
 }
@@ -664,37 +667,72 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
     })
 }
 
+/// A row of `SESSION_COLUMNS`, read by column name.
 fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
     Ok(Session {
-        id: r.get(0)?,
-        project_id: r.get(1)?,
-        project: r.get(2)?,
-        name: r.get(3)?,
-        agent: r.get(4)?,
-        workdir: r.get::<_, String>(5)?.into(),
-        conversation_id: r.get(6)?,
-        transcript_path: r.get(7)?,
-        state: State::parse(&r.get::<_, String>(8)?),
-        unread: r.get(9)?,
-        exit_status: r.get(10)?,
-        last_event_at: r.get(11)?,
-        screen_hash: r.get(12)?,
-        screen_changed_at: r.get(13)?,
-        created_at: r.get(14)?,
-        deleted_at: r.get(15)?,
-        baseline_at: r.get(16)?,
-        title: r.get(17)?,
-        model: r.get(18)?,
-        effort: r.get(19)?,
-        state_since: r.get(20)?,
-        pending_prompt: r.get(21)?,
-        running_model: r.get(22)?,
-        running_effort: r.get(23)?,
-        title_override: r.get(24)?,
-        turns: r.get(25)?,
-        worked_ms: r.get(26)?,
-        fork_from: r.get(27)?,
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        project: r.get("project")?,
+        name: r.get("name")?,
+        agent: r.get("agent")?,
+        workdir: r.get::<_, String>("workdir")?.into(),
+        conversation_id: r.get("conversation_id")?,
+        transcript_path: r.get("transcript_path")?,
+        state: State::parse(&r.get::<_, String>("state")?),
+        unread: r.get("unread")?,
+        exit_status: r.get("exit_status")?,
+        last_event_at: r.get("last_event_at")?,
+        screen_hash: r.get("screen_hash")?,
+        screen_changed_at: r.get("screen_changed_at")?,
+        created_at: r.get("created_at")?,
+        deleted_at: r.get("deleted_at")?,
+        baseline_at: r.get("baseline_at")?,
+        title: r.get("title")?,
+        model: r.get("model")?,
+        effort: r.get("effort")?,
+        state_since: r.get("state_since")?,
+        pending_prompt: r.get("pending_prompt")?,
+        running_model: r.get("running_model")?,
+        running_effort: r.get("running_effort")?,
+        title_override: r.get("title_override")?,
+        turns: r.get("turns")?,
+        worked_ms: r.get("worked_ms")?,
+        fork_from: r.get("fork_from")?,
     })
+}
+
+fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+/// The id of the last event folded into the sessions (0 for none yet).
+fn applied_event(conn: &Connection) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'applied_event'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
+}
+
+/// A constraint violation (a name taken) as `message`; other errors as they are.
+fn constraint(e: rusqlite::Error, message: impl FnOnce() -> String) -> anyhow::Error {
+    match e {
+        rusqlite::Error::SqliteFailure(f, _)
+            if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            anyhow::anyhow!(message())
+        }
+        e => e.into(),
+    }
 }
 
 fn path_str(p: &Path) -> Result<&str> {

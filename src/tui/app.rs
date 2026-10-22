@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::text::Text;
 
 mod act;
@@ -16,6 +16,7 @@ pub use dialog::Dialog;
 use dialog::Purpose;
 
 use super::form::{self, Form, Outcome};
+use super::input;
 use super::list::{self, Entry, EntryKey, Group, Shelf};
 use super::op::Op;
 use super::picker::{Picked, Picker};
@@ -28,7 +29,8 @@ const MESSAGE_TTL: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    Live,
+    /// The session list, by shelf or by project.
+    Sessions,
     /// Every project, to add, edit, remove, or pick one.
     Projects,
     /// The tmux server and database report.
@@ -39,6 +41,23 @@ pub struct Message {
     pub text: String,
     pub error: bool,
     at: Instant,
+}
+
+/// The preview: the selected session's screen and statistics (or what's
+/// shown for other selections), and how agents are sized to it.
+#[derive(Default)]
+pub struct Preview {
+    /// The screen, or information about the selection.
+    pub text: Text<'static>,
+    /// What the selected session's agent can tell about it.
+    pub stats: Option<crate::stats::AgentStats>,
+    /// Transcript readers by session, kept so each read only takes what's new.
+    pub transcripts: HashMap<String, Box<dyn crate::stats::Transcript>>,
+    /// Its size when last drawn; agents drawing full screen get it.
+    pub size: Cell<Option<(u16, u16)>>,
+    /// Agents fitted to `fitted_size` (see `Roster::fit_screens`).
+    pub fitted: HashSet<String>,
+    pub fitted_size: Option<(u16, u16)>,
 }
 
 pub struct App {
@@ -62,21 +81,12 @@ pub struct App {
     pub selected: usize,
     /// First visible list row; the drawing code keeps the selection in view.
     pub scroll: Cell<usize>,
-    /// The preview's size when last drawn; agents drawing full screen get it.
-    pub preview_size: Cell<Option<(u16, u16)>>,
-    /// Agents fitted to `fitted_size` (see `Roster::fit_screens`).
-    pub fitted: HashSet<String>,
-    pub fitted_size: Option<(u16, u16)>,
     /// The menu whose popup is open.
     pub menu: Option<Menu>,
     pub help: bool,
     pub dialog: Option<Dialog>,
-    /// The selected session's screen, or information about the selection.
-    pub preview: Text<'static>,
-    /// What the selected session's agent can tell about it.
-    pub stats: Option<crate::stats::AgentStats>,
-    /// Transcript readers by session, kept so each read only takes what's new.
-    pub transcripts: std::collections::HashMap<String, Box<dyn crate::stats::Transcript>>,
+    /// What the right of the list shows of the selection.
+    pub preview: Preview,
     /// The server view's report, its orphan count, and how far it's scrolled.
     pub report: Vec<crate::doctor::Line>,
     pub orphans: usize,
@@ -99,8 +109,8 @@ pub struct App {
     keep_row: Option<usize>,
     /// Suggested origin for a new project.
     default_path: String,
-    /// Agents that can be started, and whether each resumes its conversations.
-    agents: Vec<(String, bool)>,
+    /// Agents that can be started, for the forms.
+    agents: Vec<String>,
     /// What each model alias last turned out to be, for the forms.
     pub model_names: std::collections::HashMap<String, String>,
     /// Oldest or newest first, per shelf (config.toml).
@@ -108,10 +118,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(keymap: Keymap, default_path: String, agents: Vec<(String, bool)>) -> App {
+    pub fn new(keymap: Keymap, default_path: String, agents: Vec<String>) -> App {
         App {
             keymap,
-            mode: Mode::Live,
+            mode: Mode::Sessions,
             grouped: false,
             filter: None,
             search: String::new(),
@@ -122,15 +132,10 @@ impl App {
             entries: Vec::new(),
             selected: 0,
             scroll: Cell::new(0),
-            preview_size: Cell::new(None),
-            fitted: HashSet::new(),
-            fitted_size: None,
             menu: None,
             help: false,
             dialog: None,
-            preview: Text::default(),
-            stats: None,
-            transcripts: Default::default(),
+            preview: Preview::default(),
             report: Vec::new(),
             orphans: 0,
             problems: 0,
@@ -153,9 +158,12 @@ impl App {
 
     /// Whether starting a session of `agent` again resumes its conversation.
     pub fn resumes(&self, agent: &str) -> bool {
-        self.agents
-            .iter()
-            .any(|(name, resumes)| name == agent && *resumes)
+        crate::agent::adapter(agent).resumes()
+    }
+
+    /// A form in a dialog, with what model choices turned out to be.
+    pub(super) fn open_form(&mut self, form: Form) {
+        self.dialog = Some(Dialog::Form(form.with_model_names(&self.model_names)));
     }
 
     /// Replaces the data, keeping the selection on the same entry.
@@ -193,7 +201,7 @@ impl App {
             hits: self.hits.as_ref(),
             order: &self.order,
         };
-        self.entries = list::live(&self.projects, &self.sessions, &opts);
+        self.entries = list::entries(&self.projects, &self.sessions, &opts);
         let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
         // A selected session that moved into a folded group: select that group.
         let found = keep.as_ref().and_then(|k| {
@@ -219,7 +227,7 @@ impl App {
         // on whatever took the session's place, the next one waiting. Otherwise
         // (only looked, or read its turn) it follows the session, as always.
         if let Some(row) = self.keep_row.take()
-            && self.mode == Mode::Live
+            && self.mode == Mode::Sessions
             && !self.entries.is_empty()
         {
             let n = self.entries.len();
@@ -349,8 +357,8 @@ impl App {
             // Anything that isn't one of the menu's keys just closes it.
             return self.keymap.menu(menu, &e).and_then(|a| self.act(a));
         }
-        if self.mode != Mode::Live && e.code == KeyCode::Esc {
-            self.set_mode(Mode::Live);
+        if self.mode != Mode::Sessions && e.code == KeyCode::Esc {
+            self.set_mode(Mode::Sessions);
             return None;
         }
         if e.code == KeyCode::Esc && !self.search.is_empty() {
@@ -378,39 +386,21 @@ impl App {
 
     /// Typing the text filter: Enter keeps it, Esc puts back what it was.
     fn on_search_key(&mut self, e: KeyEvent) {
-        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = e.modifiers.contains(KeyModifiers::ALT);
-        let down = match e.code {
-            KeyCode::Up => Some(false),
-            KeyCode::Char('p' | 'k') if ctrl => Some(false),
-            KeyCode::Down => Some(true),
-            KeyCode::Char('n' | 'j') if ctrl => Some(true),
-            _ => None,
-        };
-        if let Some(down) = down {
+        if let Some(down) = input::vertical(e) {
             self.selected = wrap(self.selected, self.entries.len(), down);
             return;
         }
+        if input::cancels(e) {
+            return self.cancel_search();
+        }
         let mut text = self.search.clone();
-        match e.code {
-            KeyCode::Enter => {
-                self.typing = None;
-                if text.trim().is_empty() {
-                    text.clear();
-                }
+        if e.code == KeyCode::Enter {
+            self.typing = None;
+            if text.trim().is_empty() {
+                text.clear();
             }
-            KeyCode::Esc => return self.cancel_search(),
-            KeyCode::Char('c') if ctrl => return self.cancel_search(),
-            KeyCode::Backspace => {
-                text.pop();
-            }
-            KeyCode::Char('u') if ctrl => text.clear(),
-            KeyCode::Char('w') if ctrl => {
-                let kept = text.trim_end().rfind(' ').map_or(0, |i| i + 1);
-                text.truncate(kept);
-            }
-            KeyCode::Char(c) if !ctrl && !alt => text.push(c),
-            _ => {}
+        } else {
+            input::edit_line(&mut text, e);
         }
         if text != self.search {
             self.set_search(text);

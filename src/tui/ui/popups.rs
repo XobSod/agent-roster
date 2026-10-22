@@ -2,14 +2,25 @@
 
 use super::*;
 
-pub(super) fn popup_block(title: &str) -> Block<'static> {
-    Block::bordered()
+/// Draws a popup's box over `rect`, titled, with `hint` at its bottom right
+/// (none if empty); returns the area inside it.
+fn popup(f: &mut Frame, rect: Rect, title: &str, hint: &str) -> Rect {
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(MUTED))
         .title(Span::styled(
             format!(" {title} "),
             Style::new().add_modifier(Modifier::BOLD),
-        ))
+        ));
+    if !hint.is_empty() {
+        block = block.title_bottom(
+            Line::styled(format!(" {hint} "), Style::new().fg(MUTED)).right_aligned(),
+        );
+    }
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    inner
 }
 
 /// The open menu's keys, in a box at the bottom left.
@@ -53,10 +64,8 @@ pub(super) fn draw_menu(f: &mut Frame, app: &App, menu: Menu, area: Rect) {
         width: width.min(area.width.saturating_sub(1)),
         height: height.min(area.height),
     };
-    let block = popup_block(menu.name())
-        .title_bottom(Line::styled(" Esc ", Style::new().fg(MUTED)).right_aligned());
-    f.render_widget(Clear, rect);
-    f.render_widget(Paragraph::new(lines).block(block), rect);
+    let inner = popup(f, rect, menu.name(), "Esc");
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Every key, by where it works.
@@ -106,6 +115,10 @@ pub(super) fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("back to roster (marks it read)"),
         ]),
     ]);
+    // Sections one after the other, a blank line between them.
+    let height = |sections: &[Vec<Line<'static>>]| {
+        sections.iter().map(Vec::len).sum::<usize>() + sections.len().saturating_sub(1)
+    };
     let joined = |sections: &[Vec<Line<'static>>]| -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         for (i, s) in sections.iter().enumerate() {
@@ -116,31 +129,26 @@ pub(super) fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         }
         lines
     };
-    const COLUMN: u16 = 46;
-    let one = joined(&sections);
+    // A column's width, and the space between two.
+    const COLUMN: u16 = 45;
+    const GAP: u16 = 2;
     // Too tall for the terminal: two columns, split where they're most even.
-    let columns = if one.len() as u16 + 2 > area.height && area.width > COLUMN * 2 {
+    let two = (COLUMN + 1) * 2 + GAP;
+    let columns = if height(&sections) as u16 + 2 > area.height && area.width >= two {
         let split = (1..sections.len())
-            .min_by_key(|&i| {
-                joined(&sections[..i])
-                    .len()
-                    .abs_diff(joined(&sections[i..]).len())
-            })
+            .min_by_key(|&i| height(&sections[..i]).abs_diff(height(&sections[i..])))
             .unwrap_or(1);
         vec![joined(&sections[..split]), joined(&sections[split..])]
     } else {
-        vec![one]
+        vec![joined(&sections)]
     };
     let tallest = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
-    let width = COLUMN * columns.len() as u16 + (columns.len() as u16 - 1);
+    let n = columns.len() as u16;
+    let width = COLUMN * n + GAP * (n - 1) + 2;
     let rect = centered(area, width, (tallest + 2).min(area.height));
-    let block = popup_block("keys")
-        .title_bottom(Line::styled(" any key closes ", Style::new().fg(MUTED)).right_aligned());
-    let inner = block.inner(rect);
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
-    let areas = Layout::horizontal(vec![Constraint::Length(COLUMN - 1); columns.len()])
-        .spacing(2)
+    let inner = popup(f, rect, "keys", "any key closes");
+    let areas = Layout::horizontal(vec![Constraint::Length(COLUMN); columns.len()])
+        .spacing(GAP)
         .split(inner);
     for (column, area) in columns.into_iter().zip(areas.iter()) {
         f.render_widget(Paragraph::new(column), *area);
@@ -163,22 +171,12 @@ pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
                 Line::default(),
                 Line::from(vec![key("y"), " yes    ".into(), key("n"), " no".into()]),
             ]);
-            f.render_widget(Clear, rect);
-            f.render_widget(
-                Paragraph::new(text)
-                    .wrap(Wrap { trim: true })
-                    .block(popup_block("confirm")),
-                rect,
-            );
+            let inner = popup(f, rect, "confirm", "");
+            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
         }
         Dialog::Input { prompt, value, .. } => {
             let rect = centered(area, width, 5);
-            let block = popup_block("input").title_bottom(
-                Line::styled(" Enter ok · Esc cancel ", Style::new().fg(MUTED)).right_aligned(),
-            );
-            let inner = block.inner(rect);
-            f.render_widget(Clear, rect);
-            f.render_widget(block, rect);
+            let inner = popup(f, rect, "input", "Enter ok · Esc cancel");
             let [prompt_area, _, value_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -215,12 +213,8 @@ pub(super) fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
     .collect();
     let height = (visible.len() + notes.len() + 4) as u16;
     let rect = centered(area, area.width.saturating_sub(4).min(84), height);
-    let hint = format!(" Enter {} · Esc cancel ", form.verb());
-    let block = popup_block(&form.title)
-        .title_bottom(Line::styled(hint, Style::new().fg(MUTED)).right_aligned());
-    let inner = block.inner(rect);
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
+    let hint = format!("Enter {} · Esc cancel", form.verb());
+    let inner = popup(f, rect, &form.title, &hint);
 
     let width = inner.width as usize;
     let mut lines = vec![Line::default()];
@@ -311,12 +305,8 @@ pub(super) fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
     } else {
         "Tab: all"
     };
-    let hint = format!(" Enter adopt · {toggle} · Esc cancel ");
-    let block = popup_block("Adopt a conversation")
-        .title_bottom(Line::styled(hint, Style::new().fg(MUTED)).right_aligned());
-    let inner = block.inner(rect);
-    f.render_widget(Clear, rect);
-    f.render_widget(block, rect);
+    let hint = format!("Enter adopt · {toggle} · Esc cancel");
+    let inner = popup(f, rect, "Adopt a conversation", &hint);
     let width = inner.width as usize;
 
     let scope = match (picker.all, picker.outside()) {

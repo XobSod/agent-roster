@@ -7,6 +7,23 @@
 //! say, which models and efforts it takes, and where its transcript is.
 //! Adding one is a module here, implementing what it supports, a line in
 //! `adapter` and its name in `BUILT_IN`.
+//!
+//! An agent that reports does so with `roster report <kind>`, a JSON payload
+//! on its stdin (`ROSTER_SESSION`, `ROSTER_DB` and `ROSTER_EXE` are in its
+//! environment). The kinds:
+//!
+//! - `session`: it (re)started or cleared its conversation, and waits for a
+//!   prompt. Its payload names the transcript: until then, a first prompt
+//!   isn't typed in (the agent may still be asking something else, such as
+//!   whether to trust the directory).
+//! - `prompt`: you gave it a task; it's working.
+//! - `working`: it's still at it (after a tool, or a question answered).
+//! - `needs-input`: it's waiting for you in the middle of a turn.
+//! - `idle`: the turn is over.
+//! - anything else (pi's extension says `info`): only its payload counts.
+//!
+//! An agent that reports needs to report the start of a turn as well as its
+//! end: its screen only corrects an end that went unreported.
 
 pub mod claude;
 pub mod pi;
@@ -73,7 +90,8 @@ pub trait Adapter: Sync {
         None
     }
 
-    /// A reader for the transcript at `path` (as its reports named it).
+    /// A reader for the transcript at `path` (as its reports named it). Reads
+    /// nothing yet: whether an agent has one at all is asked this way.
     fn transcript(&self, _path: &Path) -> Option<Box<dyn Transcript>> {
         None
     }

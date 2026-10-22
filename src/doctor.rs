@@ -32,7 +32,8 @@ pub struct Diagnosis {
     pub problems: usize,
 }
 
-/// Variables that mean the server was started from inside tmux or Claude Code.
+/// Variables that mean the server was started from inside tmux or Claude Code:
+/// the telling few of `tmux::LEAKY_ENV`, which roster keeps out of it.
 const LEAKY: &[&str] = &["TMUX", "TMUX_PANE", "CLAUDECODE"];
 
 struct Report {

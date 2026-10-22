@@ -5,14 +5,42 @@ use super::*;
 
 impl App {
     pub(super) fn act(&mut self, action: Action) -> Option<Op> {
-        if self.mode == Mode::Server {
-            return self.act_in_server_view(action);
+        // What works the same everywhere.
+        match action {
+            Action::Help => self.help = true,
+            Action::Open(menu) => self.menu = Some(menu),
+            // Only the session list quits; in a view it's back, like Esc.
+            Action::Quit if self.mode != Mode::Sessions => self.set_mode(Mode::Sessions),
+            Action::Quit => return Some(Op::Quit),
+            Action::ShowServer => self.toggle_view(Mode::Server),
+            Action::ShowProjects => self.toggle_view(Mode::Projects),
+            Action::ToggleGroup => {
+                self.grouped = !self.grouped;
+                self.set_mode(Mode::Sessions);
+                self.rebuild();
+            }
+            _ => {
+                return match self.mode {
+                    Mode::Sessions => self.act_in_list(action),
+                    Mode::Projects => self.act_in_projects_view(action),
+                    Mode::Server => self.act_in_server_view(action),
+                };
+            }
         }
-        if self.mode == Mode::Projects
-            && let Some(op) = self.act_in_projects_view(action)
-        {
-            return op;
-        }
+        None
+    }
+
+    /// A view, or back to the session list from it.
+    fn toggle_view(&mut self, view: Mode) {
+        self.set_mode(if self.mode == view {
+            Mode::Sessions
+        } else {
+            view
+        });
+    }
+
+    /// In the session list.
+    fn act_in_list(&mut self, action: Action) -> Option<Op> {
         match action {
             // The list wraps around.
             Action::Up => self.selected = wrap(self.selected, self.entries.len(), false),
@@ -21,93 +49,75 @@ impl App {
             Action::Expand => self.fold(false),
             Action::Confirm => return self.confirm_selected(),
             Action::Search => self.typing = Some((self.search.clone(), self.selected_key())),
-            Action::Quit => return Some(Op::Quit),
-            Action::Help => self.help = true,
-            Action::Open(menu) => self.menu = Some(menu),
-            Action::ToggleGroup => {
-                self.grouped = !self.grouped;
-                self.set_mode(Mode::Live);
-                self.rebuild();
-            }
-            Action::ShowServer => self.set_mode(Mode::Server),
-            Action::ShowProjects => self.set_mode(Mode::Projects),
-            Action::NewProject => {
-                let agents = self.agent_names();
-                self.dialog = Some(Dialog::Form(
-                    Form::new_project(&self.default_path, &agents)
-                        .with_model_names(&self.model_names),
-                ));
-            }
-            Action::EditProject => match self.selected_project() {
-                Some(p) => {
-                    let builtin = self.chat_project == Some(p.id);
-                    self.dialog = Some(Dialog::Form(
-                        Form::edit_project(&p, &self.agent_names(), builtin)
-                            .with_model_names(&self.model_names),
-                    ))
-                }
-                None => {
-                    self.fail("Select a project (group by project) or one of its sessions first")
-                }
-            },
-            Action::EditSession => return self.session_action(action),
             Action::FilterProject => self.toggle_filter(),
-            Action::RemoveProject => self.remove_project(),
-            Action::NewSession => self.new_session(),
-            Action::NewChat => return Some(Op::NewChat),
-            Action::Adopt => return Some(Op::FindConversations),
-            Action::Start
+            Action::EditSession
+            | Action::Start
             | Action::Stop
             | Action::Restart
             | Action::Archive
             | Action::Delete
             | Action::ToggleRead
-            | Action::Retitle => {
-                return self.session_action(action);
-            }
+            | Action::Retitle => return self.session_action(action),
+            _ => return self.act_on_projects(action),
         }
         None
     }
 
-    /// In the projects view: move, pick a project to see its sessions, or leave.
-    /// None for what works as anywhere else (the project menu acts on the
-    /// selected row).
-    pub(super) fn act_in_projects_view(&mut self, action: Action) -> Option<Option<Op>> {
+    /// In the projects view: move, pick a project to see its sessions; the
+    /// project menu acts on the selected row.
+    fn act_in_projects_view(&mut self, action: Action) -> Option<Op> {
         match action {
             Action::Up => self.project_row = wrap(self.project_row, self.projects.len(), false),
             Action::Down => self.project_row = wrap(self.project_row, self.projects.len(), true),
             Action::Confirm | Action::FilterProject => match self.projects.get(self.project_row) {
                 Some(p) => {
                     self.filter = Some(p.id);
-                    self.set_mode(Mode::Live);
-                    self.rebuild();
+                    self.set_mode(Mode::Sessions);
                 }
                 None => {
                     let key = self.chord(Menu::Project, Action::NewProject);
                     self.fail(format!("No projects yet; {key} adds one"));
                 }
             },
-            Action::ShowProjects => self.set_mode(Mode::Live),
             Action::Collapse | Action::Expand => {}
             Action::NewProject
             | Action::EditProject
             | Action::RemoveProject
             | Action::NewSession
             | Action::NewChat
-            | Action::Adopt
-            | Action::ToggleGroup
-            | Action::ShowServer
-            | Action::Open(_)
-            | Action::Help => return None,
-            // Only the session list quits; here it's back, like Esc.
-            Action::Quit => self.set_mode(Mode::Live),
+            | Action::Adopt => return self.act_on_projects(action),
             _ => self.fail("This is the projects view: Esc goes back to the sessions"),
         }
-        Some(None)
+        None
+    }
+
+    /// Projects, new sessions, chats and adopting: from the session list or
+    /// the projects view.
+    fn act_on_projects(&mut self, action: Action) -> Option<Op> {
+        match action {
+            Action::NewProject => {
+                self.open_form(Form::new_project(&self.default_path, &self.agents));
+            }
+            Action::EditProject => match self.selected_project() {
+                Some(p) => {
+                    let builtin = self.chat_project == Some(p.id);
+                    self.open_form(Form::edit_project(&p, &self.agents, builtin))
+                }
+                None => {
+                    self.fail("Select a project (group by project) or one of its sessions first")
+                }
+            },
+            Action::RemoveProject => self.remove_project(),
+            Action::NewSession => self.new_session(),
+            Action::NewChat => return Some(Op::NewChat),
+            Action::Adopt => return Some(Op::FindConversations),
+            _ => {}
+        }
+        None
     }
 
     /// In the server view: scroll, kill orphans, or leave.
-    pub(super) fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
+    fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
         match action {
             Action::Up => self.report_scroll = self.report_scroll.saturating_sub(1),
             Action::Down => {
@@ -122,16 +132,6 @@ impl App {
                 self.confirm(question, Op::KillOrphans);
             }
             Action::Confirm => self.flash("No orphaned tmux sessions to remove"),
-            // Only the session list quits; here it's back, like Esc.
-            Action::Quit => self.set_mode(Mode::Live),
-            Action::Help => self.help = true,
-            Action::Open(menu) => self.menu = Some(menu),
-            Action::ShowServer => self.set_mode(Mode::Live),
-            Action::ShowProjects => self.set_mode(Mode::Projects),
-            Action::ToggleGroup => {
-                self.grouped = !self.grouped;
-                self.set_mode(Mode::Live);
-            }
             _ => self.fail("This is the server view: Esc goes back to the sessions"),
         }
         None
@@ -141,9 +141,7 @@ impl App {
     pub(super) fn fold(&mut self, fold: bool) {
         let group = match self.selected_entry() {
             Some(Entry::Heading { group, .. }) => *group,
-            Some(Entry::Card(s) | Entry::Row(s)) if fold && self.mode == Mode::Live => {
-                list::group_of(s, self.grouped)
-            }
+            Some(Entry::Card(s) | Entry::Row(s)) if fold => list::group_of(s, self.grouped),
             _ => return,
         };
         let folds = if self.hits.is_some() {
@@ -212,9 +210,7 @@ impl App {
         }
         match action {
             Action::EditSession => {
-                self.dialog = Some(Dialog::Form(
-                    Form::edit_session(&s).with_model_names(&self.model_names),
-                ));
+                self.open_form(Form::edit_session(&s));
                 None
             }
             Action::Start | Action::Restart if !self.resumes(&s.agent) => {
@@ -287,9 +283,11 @@ impl App {
             return;
         }
         let selected = self.selected_project();
-        let form = Form::new_session(&self.projects, selected.as_ref(), &self.agent_names())
-            .with_model_names(&self.model_names);
-        self.dialog = Some(Dialog::Form(form));
+        self.open_form(Form::new_session(
+            &self.projects,
+            selected.as_ref(),
+            &self.agents,
+        ));
     }
 
     /// Offers `found` to pick from.
@@ -318,23 +316,13 @@ impl App {
                     name: None,
                 },
             ),
-            None => {
-                self.dialog = Some(Dialog::Form(
-                    Form::adopt(&a).with_model_names(&self.model_names),
-                ))
-            }
+            None => self.open_form(Form::adopt(&a)),
         }
     }
 
     /// The new-chat form, once the chats project exists (`projects` has it).
     pub fn open_chat_form(&mut self, projects: &[Project], chats: &Project) {
-        let form = Form::new_chat(projects, chats, &self.agent_names())
-            .with_model_names(&self.model_names);
-        self.dialog = Some(Dialog::Form(form));
-    }
-
-    pub(super) fn agent_names(&self) -> Vec<String> {
-        self.agents.iter().map(|(name, _)| name.clone()).collect()
+        self.open_form(Form::new_chat(projects, chats, &self.agents));
     }
 
     pub(super) fn toggle_filter(&mut self) {

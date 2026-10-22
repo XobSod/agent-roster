@@ -140,6 +140,41 @@ pub struct Event {
 }
 
 impl Session {
+    /// A session of `agent` in `project`, in its directory, stopped and with
+    /// nothing known about it yet.
+    pub fn new(id: &str, project: &Project, name: &str, agent: &str, now: i64) -> Session {
+        Session {
+            id: id.to_string(),
+            project_id: project.id,
+            project: project.name.clone(),
+            name: name.to_string(),
+            agent: agent.to_string(),
+            workdir: project.origin.clone(),
+            conversation_id: None,
+            transcript_path: None,
+            state: State::Stopped,
+            unread: false,
+            exit_status: None,
+            last_event_at: None,
+            screen_hash: None,
+            screen_changed_at: None,
+            created_at: now,
+            deleted_at: None,
+            baseline_at: None,
+            title: None,
+            model: None,
+            effort: None,
+            state_since: Some(now),
+            pending_prompt: None,
+            running_model: None,
+            running_effort: None,
+            title_override: None,
+            turns: 0,
+            worked_ms: 0,
+            fork_from: None,
+        }
+    }
+
     /// Name of this session's tmux session on roster's private server.
     pub fn tmux_name(&self) -> String {
         format!("r-{}", self.id)
@@ -382,37 +417,20 @@ pub mod tests {
         assert!(s.has_default_name());
     }
 
+    /// A working Claude session in project 1, "demo", in /tmp.
     pub fn session(id: &str) -> Session {
-        Session {
-            id: id.into(),
-            project_id: 1,
-            project: "demo".into(),
-            name: format!("s-{id}"),
-            agent: "claude".into(),
-            workdir: "/tmp".into(),
-            conversation_id: None,
-            transcript_path: None,
-            state: State::Working,
-            unread: false,
-            exit_status: None,
-            last_event_at: None,
-            screen_hash: None,
-            screen_changed_at: None,
-            created_at: 0,
-            deleted_at: None,
-            baseline_at: None,
-            title: None,
+        let demo = Project {
+            id: 1,
+            name: "demo".into(),
+            origin: "/tmp".into(),
+            agent: None,
             model: None,
             effort: None,
-            state_since: None,
-            pending_prompt: None,
-            running_model: None,
-            running_effort: None,
-            title_override: None,
-            turns: 0,
-            worked_ms: 0,
-            fork_from: None,
-        }
+        };
+        let mut s = Session::new(id, &demo, &format!("s-{id}"), "claude", 0);
+        s.state = State::Working;
+        s.state_since = None;
+        s
     }
 
     fn event(kind: &str, at: i64) -> Event {

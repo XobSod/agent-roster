@@ -13,11 +13,8 @@ impl App {
                 .map(|(key, what)| (key.to_string(), what))
                 .into();
         }
-        if self.mode == Mode::Projects {
-            return self.projects_view_hints();
-        }
-        let actions: Vec<(Action, &'static str)> = match self.mode {
-            Mode::Live => {
+        let mut hints = match self.mode {
+            Mode::Sessions => {
                 let enter = match self.selected_entry() {
                     Some(Entry::Heading { open: true, .. }) => "fold",
                     Some(Entry::Heading { open: false, .. }) => "unfold",
@@ -27,49 +24,43 @@ impl App {
                 let mut actions = vec![(Action::Confirm, enter)];
                 actions.extend(Menu::ALL.map(|m| (Action::Open(m), m.name())));
                 actions.push((Action::Search, "filter"));
-                actions
+                self.labelled(actions)
             }
-            Mode::Projects => Vec::new(),
+            Mode::Projects => self.projects_view_hints(),
             Mode::Server if self.orphans > 0 => {
-                vec![(Action::Confirm, "kill orphans"), (Action::Down, "scroll")]
+                self.labelled([(Action::Confirm, "kill orphans"), (Action::Down, "scroll")])
             }
-            Mode::Server => vec![(Action::Down, "scroll")],
+            Mode::Server => self.labelled([(Action::Down, "scroll")]),
         };
-        let mut hints: Vec<(String, &'static str)> = actions
-            .into_iter()
-            .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
-            .collect();
-        if self.mode == Mode::Live && !self.search.is_empty() {
-            hints.push(("Esc".into(), "clear filter"));
+        // Then the same everywhere: Esc, help, and in the session list quit (in a
+        // view the quit key goes back, like Esc).
+        match self.mode {
+            Mode::Sessions if !self.search.is_empty() => hints.push(("Esc".into(), "clear filter")),
+            Mode::Sessions => {}
+            Mode::Projects | Mode::Server => hints.push(("Esc".into(), "back")),
         }
-        // In a view the quit key goes back, like Esc.
-        let quit = if self.mode == Mode::Live {
-            Some((Action::Quit, "quit"))
-        } else {
-            hints.push(("Esc".into(), "back"));
-            None
-        };
-        for (a, what) in [(Action::Help, "help")].into_iter().chain(quit) {
-            if let Some(key) = self.keymap.label(a) {
-                hints.push((key.to_string(), what));
-            }
+        hints.extend(self.labelled([(Action::Help, "help")]));
+        if self.mode == Mode::Sessions {
+            hints.extend(self.labelled([(Action::Quit, "quit")]));
         }
         hints
     }
 
-    /// The projects view's hints: its project keys work without `p`.
-    pub(super) fn projects_view_hints(&self) -> Vec<(String, &'static str)> {
-        let mut hints = Vec::new();
-        let mut push = |key: Option<String>, what| {
-            if let Some(key) = key {
-                hints.push((key, what));
-            }
-        };
+    /// Hints for actions with a key.
+    fn labelled(
+        &self,
+        actions: impl IntoIterator<Item = (Action, &'static str)>,
+    ) -> Vec<(String, &'static str)> {
+        actions
+            .into_iter()
+            .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
+            .collect()
+    }
+
+    /// The projects view's own hints: its project keys work without `p`.
+    fn projects_view_hints(&self) -> Vec<(String, &'static str)> {
         let km = &self.keymap;
-        push(
-            km.label(Action::Confirm).map(String::from),
-            "show its sessions",
-        );
+        let mut hints = self.labelled([(Action::Confirm, "show its sessions")]);
         for (action, what) in [
             (Action::NewProject, "new"),
             (Action::EditProject, "edit"),
@@ -79,13 +70,11 @@ impl App {
                 km.menu_label(Menu::Project, action)
                     .map(|_| self.chord(Menu::Project, action))
             });
-            push(key, what);
+            hints.extend(key.map(|key| (key, what)));
         }
-        for menu in [Menu::Session, Menu::View] {
-            push(km.label(Action::Open(menu)).map(String::from), menu.name());
-        }
-        push(Some("Esc".into()), "back");
-        push(km.label(Action::Help).map(String::from), "help");
+        hints.extend(
+            self.labelled([Menu::Session, Menu::View].map(|m| (Action::Open(m), m.name()))),
+        );
         hints
     }
 
@@ -180,7 +169,7 @@ impl App {
     /// Preview when there's nothing to select.
     pub fn empty_info(&self) -> Text<'static> {
         match self.mode {
-            Mode::Live | Mode::Projects if self.projects.is_empty() => Text::from(vec![
+            Mode::Sessions | Mode::Projects if self.projects.is_empty() => Text::from(vec![
                 Line::from(format!(
                     "No projects yet. Press {} to add one: a name and its directory.",
                     self.chord(Menu::Project, Action::NewProject)
@@ -190,10 +179,10 @@ impl App {
                     self.chord(Menu::Session, Action::NewChat)
                 )),
             ]),
-            Mode::Live if self.hits.is_some() => {
+            Mode::Sessions if self.hits.is_some() => {
                 Text::from(format!("No session matches “{}”.", self.search.trim()))
             }
-            Mode::Live => Text::from(format!(
+            Mode::Sessions => Text::from(format!(
                 "No sessions yet. Press {} to start one, or {} for a chat.",
                 self.chord(Menu::Session, Action::NewSession),
                 self.chord(Menu::Session, Action::NewChat)

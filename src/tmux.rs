@@ -140,27 +140,19 @@ impl Tmux {
 
     /// Panes of roster's sessions by tmux session name; empty if the server isn't running.
     pub fn panes(&self) -> Result<HashMap<String, Pane>> {
-        let out = self
-            .command()
-            .args([
-                "list-panes",
-                "-a",
-                "-F",
-                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t\
-                 #{window_width}\t#{window_height}\t#{session_attached}\t#{alternate_on}\t\
-                 #{pane_title}",
-            ])
-            .output()
-            .context("can't run tmux (is it installed?)")?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            if err.contains("no server running") || err.contains("error connecting") {
-                return Ok(HashMap::new());
-            }
-            bail!("tmux: {}", err.trim());
-        }
+        let Some(out) = self.query(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t\
+             #{window_width}\t#{window_height}\t#{session_attached}\t#{alternate_on}\t\
+             #{pane_title}",
+        ])?
+        else {
+            return Ok(HashMap::new());
+        };
         let mut panes = HashMap::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+        for line in out.lines() {
             // The title comes last and may itself contain tabs.
             let fields: Vec<&str> = line.splitn(9, '\t').collect();
             if let [

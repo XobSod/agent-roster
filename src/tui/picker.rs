@@ -1,7 +1,9 @@
 //! Picking a conversation to adopt: typing filters, ↑/↓ move, Tab shows those
 //! outside your projects too, Enter picks.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+use super::input;
 
 use crate::adopt::Adoptable;
 
@@ -58,37 +60,26 @@ impl Picker {
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Picked {
-        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = e.modifiers.contains(KeyModifiers::ALT);
-        match e.code {
-            KeyCode::Esc => return Picked::Cancel,
-            KeyCode::Char('c') if ctrl => return Picked::Cancel,
-            KeyCode::Enter => {
+        if input::cancels(e) {
+            return Picked::Cancel;
+        }
+        match (e.code, input::vertical(e)) {
+            (KeyCode::Enter, _) => {
                 if let Some(a) = self.shown().get(self.selected) {
                     return Picked::Pick(Box::new((*a).clone()));
                 }
             }
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Char('p' | 'k') if ctrl => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected += 1,
-            KeyCode::Char('n' | 'j') if ctrl => self.selected += 1,
-            KeyCode::Tab | KeyCode::BackTab => {
+            (_, Some(false)) => self.selected = self.selected.saturating_sub(1),
+            (_, Some(true)) => self.selected += 1,
+            (KeyCode::Tab | KeyCode::BackTab, _) => {
                 self.all = !self.all;
                 self.selected = 0;
             }
-            KeyCode::Backspace => {
-                self.query.pop();
-                self.selected = 0;
+            _ => {
+                if input::edit_line(&mut self.query, e) {
+                    self.selected = 0;
+                }
             }
-            KeyCode::Char('u') if ctrl => {
-                self.query.clear();
-                self.selected = 0;
-            }
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.query.push(c);
-                self.selected = 0;
-            }
-            _ => {}
         }
         self.selected = self.selected.min(self.shown().len().saturating_sub(1));
         Picked::Continue
@@ -119,6 +110,7 @@ fn haystack(a: &Adoptable) -> String {
 pub mod tests {
     use super::*;
     use crate::agent::claude::conversations::Conversation;
+    use ratatui::crossterm::event::KeyModifiers;
 
     pub fn adoptable(id: &str, title: &str, project: Option<&str>) -> Adoptable {
         Adoptable {

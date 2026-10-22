@@ -6,6 +6,7 @@ use std::path::Path;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::input;
 use super::op::Op;
 use crate::agent::{self, CLAUDE};
 use crate::model::{Project, Session};
@@ -130,6 +131,22 @@ fn or_default(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| DEFAULT.to_string())
 }
 
+/// Free text, `placeholder` shown while it's empty.
+fn text(placeholder: &str) -> Kind {
+    Kind::Text {
+        path: false,
+        placeholder: placeholder.to_string(),
+    }
+}
+
+/// A directory; Tab completes it.
+fn path() -> Kind {
+    Kind::Text {
+        path: true,
+        placeholder: String::new(),
+    }
+}
+
 /// The model field; its choices are the agent's (see `Form::update`).
 fn model_field(value: impl Into<String>) -> Field {
     Field::new(Id::Model, "Model", Kind::Combo(Vec::new()), value)
@@ -142,24 +159,8 @@ fn effort_field(value: impl Into<String>) -> Field {
 impl Form {
     pub fn new_project(directory: &str, agents: &[String]) -> Form {
         let fields = vec![
-            Field::new(
-                Id::Directory,
-                "Directory",
-                Kind::Text {
-                    path: true,
-                    placeholder: String::new(),
-                },
-                directory,
-            ),
-            Field::new(
-                Id::Name,
-                "Name",
-                Kind::Text {
-                    path: false,
-                    placeholder: "from the directory".into(),
-                },
-                "",
-            ),
+            Field::new(Id::Directory, "Directory", path(), directory),
+            Field::new(Id::Name, "Name", text("from the directory"), ""),
             Field::new(
                 Id::Agent,
                 "Agent",
@@ -190,28 +191,13 @@ impl Form {
 
     /// `builtin`: the chats project, whose directory follows `chats_dir`.
     pub fn edit_project(p: &Project, agents: &[String], builtin: bool) -> Form {
-        let mut fields = vec![
-            Field::new(
-                Id::Name,
-                "Name",
-                Kind::Text {
-                    path: false,
-                    placeholder: String::new(),
-                },
-                &p.name,
-            ),
+        let fields = vec![
+            Field::new(Id::Name, "Name", text(""), &p.name),
             Field::new(
                 Id::Directory,
                 "Directory",
                 // The chats project's follows `chats_dir` in config.toml.
-                if builtin {
-                    Kind::Info
-                } else {
-                    Kind::Text {
-                        path: true,
-                        placeholder: String::new(),
-                    }
-                },
+                if builtin { Kind::Info } else { path() },
                 p.origin.display().to_string(),
             ),
             Field::new(
@@ -224,7 +210,6 @@ impl Form {
             effort_field(or_default(&p.effort)),
             Field::new(Id::EnvFile, "Env file", Kind::Info, ""),
         ];
-        fields[0].edited = true;
         let title = if builtin {
             format!("Edit project {} (built-in, for chats)", p.name)
         } else {
@@ -244,15 +229,7 @@ impl Form {
             .map_or(String::new(), |p| p.name.clone());
         let fields = vec![
             Field::new(Id::Project, "Project", Kind::Choice(names), project),
-            Field::new(
-                Id::Name,
-                "Name",
-                Kind::Text {
-                    path: false,
-                    placeholder: "automatic".into(),
-                },
-                "",
-            ),
+            Field::new(Id::Name, "Name", text("automatic"), ""),
             Field::new(
                 Id::Agent,
                 "Agent",
@@ -264,10 +241,7 @@ impl Form {
             Field::new(
                 Id::Prompt,
                 "Prompt",
-                Kind::Text {
-                    path: false,
-                    placeholder: "optional: typed in once the agent is ready".into(),
-                },
+                text("optional: typed in once the agent is ready"),
                 "",
             ),
         ];
@@ -285,34 +259,22 @@ impl Form {
     }
 
     pub fn edit_session(s: &Session) -> Form {
-        let mut fields = vec![
-            Field::new(
-                Id::Name,
-                "Name",
-                Kind::Text {
-                    path: false,
-                    placeholder: String::new(),
-                },
-                &s.name,
-            ),
+        let fields = vec![
+            Field::new(Id::Name, "Name", text(""), &s.name),
             Field::new(
                 Id::Title,
                 "Title",
-                Kind::Text {
-                    path: false,
-                    placeholder: format!(
-                        "{}'s: {}",
-                        s.agent,
-                        s.title.as_deref().unwrap_or("none yet")
-                    ),
-                },
+                text(&format!(
+                    "{}'s: {}",
+                    s.agent,
+                    s.title.as_deref().unwrap_or("none yet")
+                )),
                 s.title_override.clone().unwrap_or_default(),
             ),
             Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
             model_field(or_default(&s.model)),
             effort_field(or_default(&s.effort)),
         ];
-        fields[0].edited = true;
         Form::build(
             Purpose::EditSession(s.id.clone()),
             format!("Edit session {}", s.label()),
@@ -334,15 +296,7 @@ impl Form {
             Some(p) => Field::new(Id::Project, "Project", Kind::Info, &p.name),
             None => {
                 directory.push_str(" · not in a project");
-                Field::new(
-                    Id::Project,
-                    "Project",
-                    Kind::Text {
-                        path: false,
-                        placeholder: String::new(),
-                    },
-                    &a.new_project,
-                )
+                Field::new(Id::Project, "Project", text(""), &a.new_project)
             }
         };
         let defaults = a.project.as_ref();
@@ -370,15 +324,7 @@ impl Form {
             Field::new(Id::Conversation, "Adopting", Kind::Info, what),
             Field::new(Id::Directory, "Directory", Kind::Info, directory),
             project,
-            Field::new(
-                Id::Name,
-                "Name",
-                Kind::Text {
-                    path: false,
-                    placeholder: "automatic".into(),
-                },
-                "",
-            ),
+            Field::new(Id::Name, "Name", text("automatic"), ""),
             model_field(or_default(&defaults.and_then(|p| p.model.clone()))),
             effort_field(or_default(&defaults.and_then(|p| p.effort.clone()))),
             copy,
@@ -549,12 +495,11 @@ impl Form {
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Outcome {
-        let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = e.modifiers.contains(KeyModifiers::ALT);
         self.note = None;
+        if input::cancels(e) {
+            return Outcome::Cancel;
+        }
         match e.code {
-            KeyCode::Esc => return Outcome::Cancel,
-            KeyCode::Char('c') if ctrl => return Outcome::Cancel,
             KeyCode::Enter => {
                 return match self.submit() {
                     Ok(op) => Outcome::Submit(op),
@@ -571,7 +516,7 @@ impl Form {
             }
             KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
-            _ => self.edit(e.code, ctrl, alt),
+            _ => self.edit(e),
         }
         Outcome::Continue
     }
@@ -588,11 +533,12 @@ impl Form {
         }
     }
 
-    fn edit(&mut self, code: KeyCode, ctrl: bool, alt: bool) {
+    fn edit(&mut self, e: KeyEvent) {
         let Some(field) = self.fields.get_mut(self.focus) else {
             return;
         };
         let before = field.value.clone();
+        let code = e.code;
         match (&field.kind, code) {
             (Kind::Choice(opts) | Kind::Combo(opts), KeyCode::Left | KeyCode::Right) => {
                 field.value = cycle(opts, &field.value, code == KeyCode::Right);
@@ -600,18 +546,20 @@ impl Form {
             (Kind::Choice(opts), KeyCode::Char('h' | 'l' | ' ')) => {
                 field.value = cycle(opts, &field.value, code != KeyCode::Char('h'));
             }
-            (Kind::Text { .. } | Kind::Combo(_), KeyCode::Backspace) => {
-                field.value.pop();
-            }
-            (Kind::Text { .. } | Kind::Combo(_), KeyCode::Char('u')) if ctrl => field.value.clear(),
-            (Kind::Combo(_), KeyCode::Char(c)) if !ctrl && !alt => {
+            (Kind::Text { .. } | Kind::Combo(_), _) => {
                 // Typing replaces "default" rather than appending to it.
-                if field.value == DEFAULT {
+                let typed = matches!(code, KeyCode::Char(_))
+                    && !e
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                if matches!(field.kind, Kind::Combo(_)) && field.value == DEFAULT && typed {
                     field.value.clear();
                 }
-                field.value.push(c);
+                if !input::edit_line(&mut field.value, e) {
+                    field.value = before;
+                    return;
+                }
             }
-            (Kind::Text { .. }, KeyCode::Char(c)) if !ctrl && !alt => field.value.push(c),
             _ => return,
         }
         if field.value != before {
@@ -843,6 +791,10 @@ mod tests {
         assert_eq!(form.value(Id::Model), "opus");
         form.on_key(key(KeyCode::Left));
         assert_eq!(form.value(Id::Model), "default");
+        // Typing replaces "default", a capital (with Shift) too.
+        form.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(form.value(Id::Model), "X");
+        form.on_key(key(KeyCode::Backspace));
         type_text(&mut form, "claude-opus-5-5");
         assert_eq!(form.value(Id::Model), "claude-opus-5-5");
         form.on_key(key(KeyCode::Down)); // effort

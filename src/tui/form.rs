@@ -441,13 +441,7 @@ impl Form {
                 .cloned()
         };
         let mut notes = std::collections::HashMap::new();
-        let mut name = agent.chars();
-        let name: String = name
-            .next()
-            .into_iter()
-            .flat_map(char::to_uppercase)
-            .chain(name)
-            .collect();
+        let name = crate::util::capitalize(agent);
         notes.insert(
             DEFAULT.to_string(),
             learned(DEFAULT).unwrap_or_else(|| format!("{name}'s default")),

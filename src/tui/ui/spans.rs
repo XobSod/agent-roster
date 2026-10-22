@@ -14,7 +14,7 @@ pub(super) fn project_name(project: &str, marks: &[usize]) -> Vec<Span<'static>>
 }
 
 /// The colored two-letter project badge.
-pub(super) fn badge(project: &str) -> Span<'static> {
+pub(crate) fn badge(project: &str) -> Span<'static> {
     Span::styled(
         theme::monogram(project),
         Style::new()
@@ -117,7 +117,7 @@ pub(super) fn whereabouts(s: &Session) -> Vec<Span<'static>> {
 }
 
 /// The agent's glyph and name, model and effort, as in the header.
-pub(super) fn agent_spans(s: &Session) -> Vec<Span<'static>> {
+pub(crate) fn agent_spans(s: &Session) -> Vec<Span<'static>> {
     let mut spans = vec![
         glyph(&s.agent),
         Span::raw(" "),

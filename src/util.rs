@@ -95,6 +95,14 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// `s` with its first letter in upper case: "claude" → "Claude".
+pub fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map_or(String::new(), |c| {
+        c.to_uppercase().collect::<String>() + chars.as_str()
+    })
+}
+
 /// `s` on one line, its runs of white space each one space.
 pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")

@@ -99,6 +99,15 @@ pub trait Adapter: Sync {
         None
     }
 
+    /// A one-off run of the agent for a small job such as a title: the prompt
+    /// goes last, the answer comes on stdout, and nothing of it is kept
+    /// (no tools, no session). `[agents.<name>] title_model` picks its model,
+    /// else a cheap one the adapter knows, else the agent's default. None if
+    /// the agent has no such mode.
+    fn oneoff(&self, _config: &Config) -> Option<Vec<String>> {
+        None
+    }
+
     /// A reader for the transcript at `path` (as its reports named it). Reads
     /// nothing yet: whether an agent has one at all is asked this way.
     fn transcript(&self, _path: &Path) -> Option<Box<dyn Transcript>> {

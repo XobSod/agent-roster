@@ -18,7 +18,9 @@ use unicode_width::UnicodeWidthStr;
 use popups::*;
 use sidebar::*;
 pub use spans::status_line;
+// For the previews of sessions without a screen (app::texts).
 use spans::*;
+pub(crate) use spans::{agent_spans, badge};
 use text::*;
 use views::*;
 
@@ -103,7 +105,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         head,
     );
     // The session's statistics: what roster counts and what the agent can tell.
-    if let Some(s) = app.selected_session().filter(|s| s.deleted_at.is_none()) {
+    if let Some(s) = app.selected_session() {
         let parts = crate::stats::summary(s, app.preview.stats.as_ref(), now);
         let line = truncate(&parts.join(" · "), stats.width as usize);
         f.render_widget(

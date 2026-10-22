@@ -83,6 +83,26 @@ impl Adapter for Pi {
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(PiTranscript::new(path)))
     }
+
+    /// `pi -p`, with none of the user's extensions, tools or context files and
+    /// no session kept. roster can't tell which of pi's models is a cheap one:
+    /// pi's own default unless `title_model` says otherwise.
+    fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
+        let agent = config.agent(PI);
+        let mut argv = vec![
+            agent.command.unwrap_or_else(|| PI.to_string()),
+            "-p".into(),
+            "--no-session".into(),
+            "--no-tools".into(),
+            "--no-extensions".into(),
+            "--no-context-files".into(),
+            "--offline".into(),
+        ];
+        if let Some(model) = agent.title_model {
+            argv.extend(["--model".into(), model]);
+        }
+        Some(argv)
+    }
 }
 
 /// The models in `pi --list-models`' table ("provider  model  context  …"),
@@ -232,6 +252,19 @@ openrouter gpt-5              400K     128K     yes       yes
         // It failed, or printed nothing: none to offer, any can be typed.
         assert!(Pi.models(&config(), &|_| None).is_empty());
         assert!(Pi.models(&config(), &|_| Some(String::new())).is_empty());
+    }
+
+    #[test]
+    fn titles_are_made_by_pis_default_unless_told() {
+        let argv = Pi.oneoff(&config()).unwrap();
+        assert_eq!(argv[..3], ["pi", "-p", "--no-session"]);
+        assert!(!argv.contains(&"--model".to_string()));
+        let agent = AgentConfig {
+            title_model: Some("claude-haiku-4-5".into()),
+            ..AgentConfig::default()
+        };
+        let argv = Pi.oneoff(&config_with(PI, agent)).unwrap();
+        assert_eq!(argv[argv.len() - 2..], ["--model", "claude-haiku-4-5"]);
     }
 
     #[test]

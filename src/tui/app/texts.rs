@@ -4,6 +4,7 @@
 use ratatui::text::{Line, Text};
 
 use super::*;
+use crate::tui::theme;
 
 impl App {
     /// Footer hints: keys that act here and now.
@@ -148,22 +149,105 @@ impl App {
         ])
     }
 
-    /// Preview for an archived session.
-    pub fn archived_info(&self, s: &Session) -> Text<'static> {
-        let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
-        let delete = self.chord(Menu::Session, Action::Delete);
-        Text::from(vec![
-            format!(
-                "conversation  {}",
-                s.conversation_id.as_deref().unwrap_or("none")
-            )
-            .into(),
-            format!("directory     {}", s.workdir.display()).into(),
-            "".into(),
-            format!("Press {restore} to restore it; starting it then resumes the conversation.")
-                .into(),
-            format!("{delete} deletes it for good.").into(),
-        ])
+    /// Preview for a session with no screen to show (archived, or stopped and
+    /// gone from tmux): where it got to, what it is, what it was about (its
+    /// last `prompts`), and what can be done with it.
+    pub fn session_info(&self, s: &Session, prompts: &[String], now: i64) -> Text<'static> {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::Span;
+        let muted = Style::new().fg(theme::MUTED);
+        let field = |label: &str, mut value: Vec<Span<'static>>| {
+            value.insert(0, Span::styled(format!("  {label:<11}"), muted));
+            Line::from(value)
+        };
+        let ago = |at: i64| match crate::util::ago(now - at) {
+            just if just == "now" => "just now".to_string(),
+            ago => format!("{ago} ago"),
+        };
+        let mut lines = vec![match (s.deleted_at, s.exit_status) {
+            (Some(at), _) => Line::from(format!("Archived {}.", ago(at))),
+            (None, Some(code)) => Line::from(format!(
+                "Stopped {}: its agent exited with {code}.",
+                ago(s.state_since.unwrap_or(s.created_at))
+            )),
+            (None, None) => Line::from(format!(
+                "Stopped {}.",
+                ago(s.state_since.unwrap_or(s.created_at))
+            )),
+        }];
+        lines.push(Line::default());
+        let project = self.project(s.project_id);
+        lines.push(field(
+            "Project",
+            vec![
+                crate::tui::ui::badge(&s.project),
+                Span::raw(format!(" {}  ", s.project)),
+                Span::styled(
+                    project.map_or_else(String::new, |p| crate::util::short_path(&p.origin)),
+                    muted,
+                ),
+            ],
+        ));
+        if project.is_none_or(|p| p.origin != s.workdir) {
+            lines.push(field(
+                "Directory",
+                vec![Span::raw(crate::util::short_path(&s.workdir))],
+            ));
+        }
+        lines.push(field("Agent", crate::tui::ui::agent_spans(s)));
+        let whose = match (&s.title_override, &s.title) {
+            (Some(_), _) => Some("yours".to_string()),
+            (None, Some(_)) => Some(format!("{}'s", crate::util::capitalize(&s.agent))),
+            (None, None) => None,
+        };
+        if let (Some(title), Some(whose)) = (s.title(), whose) {
+            lines.push(field(
+                "Title",
+                vec![
+                    Span::raw(format!("{title} ")),
+                    Span::styled(format!("({whose})"), muted),
+                ],
+            ));
+        }
+        if !prompts.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Last prompts",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            for p in prompts {
+                lines.push(Line::from(vec![
+                    Span::styled("  › ", muted),
+                    Span::raw(crate::util::one_line(p)),
+                ]));
+            }
+        }
+        // What can be done with it.
+        lines.push(Line::default());
+        let conversation = match (&s.conversation_id, self.resumes(&s.agent)) {
+            (Some(id), true) => format!("resumes its conversation ({})", id.get(..8).unwrap_or(id)),
+            _ => "starts a new conversation".to_string(),
+        };
+        if s.deleted_at.is_some() {
+            let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
+            let delete = self.chord(Menu::Session, Action::Delete);
+            lines.push(Line::from(format!(
+                "{restore} restores it; starting it then {conversation}."
+            )));
+            let kept = if crate::agent::adapter(&s.agent).adopts() {
+                format!(
+                    "; its {} conversation stays and can be adopted again",
+                    crate::util::capitalize(&s.agent)
+                )
+            } else {
+                String::new()
+            };
+            lines.push(Line::from(format!("{delete} deletes it for good{kept}.")));
+        } else {
+            let start = self.chord(Menu::Session, Action::Start);
+            lines.push(Line::from(format!("{start} starts it; it {conversation}.")));
+        }
+        Text::from(lines)
     }
 
     /// Preview when there's nothing to select.

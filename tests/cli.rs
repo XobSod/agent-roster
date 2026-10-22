@@ -461,6 +461,13 @@ fn pi_reports_through_rosters_extension() {
         t.session("p", false).unwrap()["conversation_id"],
         conversation.as_str()
     );
+
+    // pi makes its title itself (the stand-in echoes its arguments).
+    let title = t.ok(&["retitle", "p"]);
+    assert!(
+        title.starts_with("fake pi: -p --no-session --no-tools"),
+        "{title}"
+    );
 }
 
 #[test]

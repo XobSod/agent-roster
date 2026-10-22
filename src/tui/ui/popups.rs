@@ -92,7 +92,7 @@ pub(super) fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         };
         let mut section = vec![title(format!(
             "{} menu ({open} …)",
-            capitalize(menu.name())
+            crate::util::capitalize(menu.name())
         ))];
         if menu == Menu::Project {
             section.push(Line::styled(

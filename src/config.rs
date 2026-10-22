@@ -26,8 +26,10 @@
 //! [agents.claude]
 //! command = "claude"              # default: the agent's name, found on PATH
 //! args = ["--model", "haiku"]     # added to every launch
+//! title_model = "sonnet"          # makes generated titles; Claude's default haiku
 //! [agents.pi]                     # pi is offered once installed; this only adds to it
 //! args = ["--tui-mode", "regular"]
+//! title_model = "claude-haiku-4-5" # default: pi's default model
 //!
 //! [agents.aider]                  # any other agent: state from its screen
 //! idle_after = 4                  # seconds without screen changes = idle
@@ -257,6 +259,8 @@ pub struct AgentConfig {
     /// Seconds without screen changes after which an agent without hooks is idle.
     pub idle_after: Option<u64>,
     pub fit_preview: Option<FitPreview>,
+    /// The model a generated title is made with (by the agent's one-off mode).
+    pub title_model: Option<String>,
 }
 
 impl Config {

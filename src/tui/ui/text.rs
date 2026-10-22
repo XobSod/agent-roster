@@ -52,13 +52,6 @@ pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-pub(super) fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    chars.next().map_or(String::new(), |c| {
-        c.to_uppercase().collect::<String>() + chars.as_str()
-    })
-}
-
 /// `s` cut to `width` columns, with "…" if it was longer.
 pub(super) fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {

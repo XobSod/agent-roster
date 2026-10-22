@@ -189,6 +189,16 @@ fn fit(roster: &mut Roster, app: &mut App) {
 }
 
 fn update_preview(roster: &Roster, app: &mut App) {
+    // What its transcript tells, first: a session with no screen shows its
+    // last prompts.
+    let (stats, prompts) = app
+        .selected_session()
+        .cloned()
+        .and_then(|s| transcript_info(roster, app, &s))
+        .unzip();
+    let prompts = prompts.unwrap_or_default();
+    let now = crate::util::now_ms();
+    app.preview.stats = stats;
     app.preview.text = match app.selected_entry().cloned() {
         None => app.empty_info(),
         Some(Entry::Heading {
@@ -203,35 +213,23 @@ fn update_preview(roster: &Roster, app: &mut App) {
             count,
             ..
         }) => app.shelf_info(shelf, count),
-        Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => app.archived_info(&s),
+        Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => {
+            app.session_info(&s, &prompts, now)
+        }
         Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s, true) {
             Ok(screen) => screen_text(&screen),
-            Err(_) => {
-                let key = app.chord(Menu::Session, Action::Start);
-                let then = if app.resumes(&s.agent) {
-                    "it resumes its conversation"
-                } else {
-                    "it starts a new conversation"
-                };
-                Text::from(format!("Not running. Press {key} to start it; {then}."))
-            }
+            Err(_) => app.session_info(&s, &prompts, now),
         },
     };
-    app.preview.stats = app
-        .selected_session()
-        .cloned()
-        .and_then(|s| agent_stats(roster, app, &s));
 }
 
-/// What the agent can tell about a session, its transcript read incrementally.
-fn agent_stats(
+/// What the agent can tell about a session, its transcript read incrementally:
+/// its statistics and its last prompts.
+fn transcript_info(
     roster: &Roster,
     app: &mut App,
     s: &crate::model::Session,
-) -> Option<crate::stats::AgentStats> {
-    if s.deleted_at.is_some() {
-        return None;
-    }
+) -> Option<(crate::stats::AgentStats, Vec<String>)> {
     let path = std::path::Path::new(s.transcript_path.as_deref()?);
     // After /clear the conversation, and its transcript, change.
     if app
@@ -245,7 +243,8 @@ fn agent_stats(
     }
     let reader = app.preview.transcripts.get_mut(&s.id)?;
     reader.update().ok()?;
-    Some(roster.with_window(reader.stats(s.running_model.as_deref()), s))
+    let stats = roster.with_window(reader.stats(s.running_model.as_deref()), s);
+    Some((stats, reader.recent_prompts()))
 }
 
 /// A captured screen as styled text, without the empty lines below the content.
@@ -410,11 +409,7 @@ fn perform(
             }),
         Op::RetitleSession(id) => {
             let label = app.session_label(&id);
-            busy(
-                terminal,
-                app,
-                format!("Asking Haiku for a title for {label}…"),
-            )?;
+            busy(terminal, app, format!("Asking for a title for {label}…"))?;
             roster
                 .generate_title(&id)
                 .map(|title| format!("New title: {title}"))

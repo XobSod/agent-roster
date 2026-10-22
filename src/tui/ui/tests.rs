@@ -468,3 +468,60 @@ fn long_project_names_keep_their_count_and_fold_mark() {
     assert_eq!(line.width(), 34, "{line}");
     assert!(line.contains("… (3) ") && line.ends_with(" ⌄ "), "{line}");
 }
+
+#[test]
+fn sessions_without_a_screen_say_what_they_were() {
+    let app = app();
+    let now = now_ms();
+    let text = |t: Text| -> String {
+        t.lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    };
+    let mut s = app.sessions[0].clone();
+    s.deleted_at = Some(now - 2 * 86_400_000);
+    s.conversation_id = Some("c0ffee123456".into());
+    s.workdir = "/r/services".into();
+    let prompts = [
+        "fix the tests".to_string(),
+        "and the\nchangelog".to_string(),
+    ];
+    let shown = text(app.session_info(&s, &prompts, now));
+    for part in [
+        "Archived 2d ago.",
+        "Project    RO roster  /r",
+        "Directory  /r/services",
+        "Agent      ✱ claude · opus · high",
+        "Title      Fix scrollback (Claude's)",
+        "Last prompts\n  › fix the tests\n  › and the changelog",
+        "Enter restores it; starting it then resumes its conversation (c0ffee12).",
+        "s D deletes it for good; its Claude conversation stays and can be adopted again.",
+    ] {
+        assert!(shown.contains(part), "{part:?} in\n{shown}");
+    }
+    // Stopped, gone from tmux: how to start it; its own directory isn't repeated.
+    s.deleted_at = None;
+    s.workdir = "/r".into();
+    s.exit_status = Some(1);
+    s.state_since = Some(now - 3 * 3_600_000);
+    let shown = text(app.session_info(&s, &[], now));
+    assert!(
+        shown.starts_with("Stopped 3h ago: its agent exited with 1."),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("Directory") && !shown.contains("Last prompts"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("s s starts it; it resumes its conversation"),
+        "{shown}"
+    );
+}

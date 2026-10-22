@@ -148,6 +148,26 @@ impl Adapter for Claude {
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(ClaudeTranscript::new(path)))
     }
+
+    /// `claude -p`: no tools, no settings (so no hooks), nothing saved; Haiku
+    /// unless `title_model` says otherwise.
+    fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
+        let agent = config.agent(CLAUDE);
+        let command = agent.command.unwrap_or_else(|| CLAUDE.to_string());
+        let model = agent.title_model.unwrap_or_else(|| "haiku".to_string());
+        let argv = [
+            command.as_str(),
+            "-p",
+            "--no-session-persistence",
+            "--setting-sources",
+            "",
+            "--tools",
+            "",
+            "--model",
+            &model,
+        ];
+        Some(argv.map(String::from).to_vec())
+    }
 }
 
 /// Extra settings for this run only: hooks that report to roster. They run next to
@@ -163,28 +183,6 @@ fn settings(roster_exe: &Path) -> String {
         "Stop": report("idle"),
     }})
     .to_string()
-}
-
-/// A one-off `claude -p` call for small jobs such as a title: Haiku, no tools,
-/// no settings (so no hooks), nothing saved. The prompt goes last.
-pub fn oneoff(config: &Config) -> Vec<String> {
-    let command = config
-        .agent(CLAUDE)
-        .command
-        .unwrap_or_else(|| CLAUDE.to_string());
-    [
-        command.as_str(),
-        "-p",
-        "--no-session-persistence",
-        "--setting-sources",
-        "",
-        "--tools",
-        "",
-        "--model",
-        "haiku",
-    ]
-    .map(String::from)
-    .to_vec()
 }
 
 /// The last `"model":"claude-…"` in (the last megabyte of) a transcript, for
@@ -347,6 +345,19 @@ mod tests {
         assert_eq!(report.effort.as_deref(), Some("xhigh"));
         assert_eq!(read_report(CLAUDE, Some("not json")), Report::default());
         assert_eq!(read_report(CLAUDE, None), Report::default());
+    }
+
+    #[test]
+    fn titles_are_made_by_haiku_unless_told() {
+        let argv = Claude.oneoff(&Config::default()).unwrap();
+        assert_eq!(argv[..2], ["claude", "-p"]);
+        assert_eq!(arg_after(&argv, "--model"), Some("haiku"));
+        let agent = AgentConfig {
+            title_model: Some("sonnet".into()),
+            ..AgentConfig::default()
+        };
+        let argv = Claude.oneoff(&config_with("claude", agent)).unwrap();
+        assert_eq!(arg_after(&argv, "--model"), Some("sonnet"));
     }
 
     #[test]

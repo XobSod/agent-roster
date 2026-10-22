@@ -288,15 +288,18 @@ pub(super) fn card(
     lines
 }
 
-/// A stopped or archived session's line: project / title and its state.
+/// A stopped or archived session's line: project / title, its state and its
+/// agent.
 pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
-    let right = match s.deleted_at {
+    // Its state, then its agent's mark, where a card has it.
+    let mut right = match s.deleted_at {
         Some(at) => vec![Span::styled(
-            format!("archived {} ", theme::ago(now - at)),
+            format!("archived {}", theme::ago(now - at)),
             Style::new().fg(FAINT),
         )],
-        None => [status(s, now), vec![Span::raw(" ")]].concat(),
+        None => status(s, now),
     };
+    right.extend([Span::raw(" "), glyph(&s.agent), Span::raw(" ")]);
     let none = Hit::default();
     let hit = hit(app, s).unwrap_or(&none);
     let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));

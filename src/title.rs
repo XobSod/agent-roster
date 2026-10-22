@@ -1,4 +1,5 @@
-//! Titles made for a session: Haiku names what its recent prompts are about.
+//! Titles made for a session: its agent, in a one-off run, names what its
+//! recent prompts are about.
 
 use std::path::Path;
 use std::time::Duration;
@@ -9,8 +10,9 @@ use crate::engine::Roster;
 use crate::{agent, launch};
 
 impl Roster {
-    /// Asks Haiku for a title from the session's recent prompts and keeps it as
-    /// the session's title (the agent's own stays the same otherwise).
+    /// Asks the session's agent (`Adapter::oneoff`) for a title from its
+    /// recent prompts and keeps it as the session's title (the agent's own
+    /// stays the same otherwise).
     pub fn generate_title(&mut self, id: &str) -> Result<String> {
         let mut s = self.db.session(id)?;
         let adapter = agent::adapter(&s.agent);
@@ -32,8 +34,9 @@ impl Roster {
         if prompts.is_empty() {
             bail!("{} has no prompts to title yet", s.label());
         }
-        // Haiku makes the title, whichever agent the session runs.
-        let mut argv = agent::claude::oneoff(&self.config);
+        let Some(mut argv) = adapter.oneoff(&self.config) else {
+            bail!("{} can't make a title; set one with edit", s.agent);
+        };
         argv.push(title_request(&prompts, s.display_title()));
         let argv = self.wrapped(&s, &argv)?;
         let mut cmd = std::process::Command::new(&argv[0]);
@@ -45,16 +48,21 @@ impl Roster {
         for var in crate::tmux::LEAKY_ENV {
             cmd.env_remove(var);
         }
-        let output = launch::run_with_timeout(cmd, "claude", TITLE_TIMEOUT)?;
+        let agent = &s.agent;
+        let output = launch::run_with_timeout(cmd, agent, TITLE_TIMEOUT)?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
+            let err = err
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("no output");
+            // Its model may be one you can't use.
             bail!(
-                "claude couldn't make a title: {}",
-                err.lines().next().unwrap_or("no output")
+                "{agent} couldn't make a title: {err} (title_model under [agents.{agent}] in config.toml picks its model)"
             );
         }
         let title = clean_title(&String::from_utf8_lossy(&output.stdout))
-            .context("claude gave no title")?;
+            .with_context(|| format!("{agent} gave no title"))?;
         s.title_override = Some(title.clone());
         self.db.save_session(&s)?;
         Ok(title)

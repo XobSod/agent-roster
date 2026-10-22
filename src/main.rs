@@ -170,7 +170,7 @@ enum Cmd {
     },
     /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
     Info { session: String },
-    /// Give a Claude or pi session a fresh title, made by Haiku from its recent prompts
+    /// Give a Claude or pi session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
     Retitle { session: String },
     /// Mark a session read
     Read { session: String },

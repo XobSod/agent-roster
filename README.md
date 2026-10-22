@@ -74,7 +74,7 @@ roster new myproj --prompt "fix the failing tests"   # typed in once Claude is r
 roster chat --prompt "explain tmux copy mode"         # no project needed: a chat
 roster edit api --model sonnet          # applies on the next start
 roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
-roster retitle api                      # a fresh title from Haiku, from the recent prompts
+roster retitle api                      # a fresh title from its agent, from the recent prompts
 roster info api                         # created, prompts, time worked, context, tokens, cost
 roster adopt --list                     # Claude conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
@@ -116,8 +116,10 @@ All files are optional and live in `~/.config/agent-roster/`:
     archive newest first.
   - `[keys]`: every TUI key, plus `detach` for Ctrl+Q.
   - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
-    for pi's classic screen, `args = ["--tui-mode", "regular"]`). Any other agent goes
-    in its own table and is then offered for new sessions:
+    for pi's classic screen, `args = ["--tui-mode", "regular"]`), and `title_model`, the
+    model a generated title (`s t`) is made with: Claude's default is `haiku`, pi's its
+    own default model. Any other agent goes in its own table and is then offered for
+    new sessions:
 
     ```toml
     [agents.aider]          # runs `aider`; or set command = "..."

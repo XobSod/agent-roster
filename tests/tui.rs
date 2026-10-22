@@ -194,10 +194,11 @@ fn agents_drawing_full_screen_fit_the_preview() {
     }
     assert_eq!(size("a"), "160x47");
 
-    // The terminal resized: so is the preview, and so are they.
+    // The terminal resized: so is the preview, and so are they (the list is
+    // at its widest, 40).
     term.resize((140, 34));
     t.wait_for("the agents fitted again", |_| {
-        size("b") == "96x30" && size("c") == "96x30"
+        size("b") == "98x30" && size("c") == "98x30"
     });
 
     // Attached, an agent has the terminal's size; back, the preview's again.
@@ -214,7 +215,7 @@ fn agents_drawing_full_screen_fit_the_preview() {
     t.wait_for("b at the terminal's size", |_| size("b") == "140x33");
     term.keys(&["C-q"]);
     term.wait_for("the list again", "Enter attach");
-    t.wait_for("b fitted again", |_| size("b") == "96x30");
+    t.wait_for("b fitted again", |_| size("b") == "98x30");
     // The classic agent (normal screen, scrollback in tmux) was never resized.
     assert_eq!(size("a"), "160x47");
 }

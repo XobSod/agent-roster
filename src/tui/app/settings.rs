@@ -52,7 +52,7 @@ impl App {
             KeyCode::Char('e') => Some(Some(Op::EditConfig)),
             KeyCode::Char('n') => {
                 let prompt =
-                    "A new agent: its command, and arguments if any (aider, codex --full-auto):";
+                    "A new agent: its command, and arguments if any (aider, gemini --yolo):";
                 self.input(prompt, String::new(), dialog::Purpose::NewAgent);
                 Some(None)
             }

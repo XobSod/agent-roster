@@ -1,13 +1,13 @@
 # agent-roster
 
-A keyboard-first terminal manager for AI coding agent sessions: Claude Code, pi, or
-any other CLI agent.
+A keyboard-first terminal manager for AI coding agent sessions: Claude Code, pi,
+Codex, or any other CLI agent.
 Agents run in roster's own private tmux server; roster tracks whether each one is
 working, needs input, is idle or stopped, and whether you've seen its latest turn.
 
 Claude Code is tracked through its hooks, [pi](#pi) through a small extension roster
-loads into it; any other CLI agent can be added as a generic agent, tracked by its
-screen.
+loads into it, [Codex](#codex) through hooks it hands each run it starts; any other
+CLI agent can be added as a generic agent, tracked by its screen.
 
 ![roster: a finished turn read and given a follow-up, a question that came in meanwhile answered, and the follow-up coming back up](demo/gifs/roster.gif)
 
@@ -16,7 +16,7 @@ screen.
 
 ## Install
 
-Requires tmux ≥ 3.2, an agent on `PATH` (Claude Code, pi, or any CLI agent you
+Requires tmux ≥ 3.2, an agent on `PATH` (Claude Code, pi, Codex, or any CLI agent you
 [configure](#configure)), and to build it a recent stable Rust
 ([rustup](https://rustup.rs)).
 
@@ -80,14 +80,15 @@ picks one; "default" leaves it to that. A new session can also get a first promp
 typed into the agent once it's ready. `s c` starts a chat, a
 session that needs no project: chats share one directory in a built-in project.
 
-A Claude or pi conversation started outside roster (plain `claude` or `pi`, another
+A Claude, pi or Codex conversation started outside roster (plain `claude`, `pi` or
+`codex`, another
 session manager) can be adopted with `s a`: pick it (typing filters, `Tab` shows those
 outside your projects), and it continues as a session here, in its project or a new one
 for its directory. It goes on with the model and effort it last ran on (as far as its
 agent recorded them), the defaults (the project's, if the project runs the same agent,
 else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--effort` on
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
-Roster can tell when one is open in Claude, but not in pi.
+Roster can tell when one is open in Claude, but not in pi or Codex.
 
 Each session can have a note, what's left to do in it, say. `s o` opens it under the
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
@@ -157,7 +158,7 @@ All files are optional and live in `~/.config/agent-roster/`:
   config kept in dotfiles stays there). Roster also reads the file again when it
   changes, after an editor or a `git pull`, say. The settings:
   - `default_agent`: the agent new sessions get unless their project names one
-    (default `claude`; `"pi"`, or any agent under `[agents]`). On a machine where
+    (default `claude`; `"pi"`, `"codex"`, or any agent under `[agents]`). On a machine where
     it isn't installed, Claude.
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
   - `chats_dir`: where chats run (default inside roster's state directory).
@@ -230,15 +231,16 @@ All files are optional and live in `~/.config/agent-roster/`:
     settings = "s"            # every setting, to see and change
     ```
 
-  - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
+  - `[agents.claude]`, `[agents.pi]` and `[agents.codex]`: `command`, `args` (added to
+    every start;
     for pi on the normal screen, so tmux's copy mode scrolls its history,
     `args = ["--tui-mode", "regular"]`), `model` and `effort`, what new sessions get
     unless they or their project pick one (default: the agent's own, from its own
     settings, which roster doesn't change), and `title_model`, the model a generated
     title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
-    quicker). pi names no task itself, so roster has it make a title after a
-    conversation's first turn; `auto_title = false` turns that off. Any other agent
-    goes in its own table and is then offered for new sessions:
+    quicker). pi and Codex name no task themselves, so roster has them make a title
+    after a conversation's first turn; `auto_title = false` turns that off. Any other
+    agent goes in its own table and is then offered for new sessions:
 
     ```toml
     [agents.aider]          # runs `aider`; or set command = "..."
@@ -273,6 +275,32 @@ last one (`--session-id`). The statistics come from pi's session file, cost incl
 with the context window pi reports for the model. Its conversations started elsewhere
 can be adopted, from `~/.pi/agent/sessions` (or where `PI_CODING_AGENT_DIR` or
 `PI_CODING_AGENT_SESSION_DIR` say); a copy is forked with `--fork`.
+
+## codex
+
+Roster starts [Codex](https://github.com/openai/codex) with hooks of its own, given to
+each run as `-c hooks.<Event>=[…]` arguments, for its sessions only; your `~/.codex`
+config and `hooks.json` stay as they are. Codex only runs hooks you have trusted once
+by hand, so each start also says not to ask (`--dangerously-bypass-hook-trust`), which
+Codex itself points out as a warning when it starts. The hooks report its state: the
+tools it calls say working, a question it asks (`PermissionRequest`) needs input, the
+end of a turn idle.
+
+Codex names its conversation itself, so roster learns it, and the file it's kept in,
+from the first thing the hooks say; starting a session again resumes that conversation
+(`codex resume <id>`). A session's model is anything Codex takes as `-c model=` (forms
+offer the slugs of `codex debug models`, its catalog as it comes from its server), its
+effort the reasoning level as `-c model_reasoning_effort=` (`low` … `ultra`). Codex
+names no task itself, so roster has it make a title after a conversation's first turn
+(`title_model`, made by `codex exec`, which keeps nothing); `auto_title = false` turns
+that off.
+
+The statistics come from its rollout, under `~/.codex/sessions` (or wherever
+`CODEX_HOME` says): prompts, tokens, and the context window Codex counts. What a
+subscription costs it doesn't say, so neither does `roster info`. Its conversations
+started elsewhere can be adopted by their id; a copy is forked with `codex fork`. Codex
+doesn't say which conversation a running Codex has open, so roster can only warn you
+to close it first.
 
 ## Scrolling back
 

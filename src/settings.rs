@@ -100,8 +100,8 @@ impl crate::engine::Roster {
             .with_context(|| format!("{dotted} is changed, but roster's tmux didn't take it"))
     }
 
-    /// Adds an agent that runs `line` (`codex --full-auto`): named after its
-    /// command (`npx @openai/codex` after the package it runs), the rest its
+    /// Adds an agent that runs `line` (`gemini --yolo`): named after its
+    /// command (`npx @xai/grok@latest` after the package it runs), the rest its
     /// arguments. Returns its name.
     pub fn add_agent(&mut self, line: &str) -> Result<String> {
         let words = split_words(line)?;
@@ -228,7 +228,7 @@ fn agent_named(name: &str) -> bool {
 }
 
 /// The name an agent run by `command` gets: the command's, or, for one that
-/// runs a package (`npx @openai/codex@latest`), the package's.
+/// runs a package (`npx @xai/grok@latest`), the package's.
 fn agent_name(command: &str, args: &[String]) -> String {
     let base = |word: &str| {
         Path::new(word)
@@ -250,7 +250,7 @@ fn agent_name(command: &str, args: &[String]) -> String {
 }
 
 /// The kind of the setting at `path`: one in `sections`, or one of an agent
-/// not configured yet (`agents.codex.command`).
+/// not configured yet (`agents.aider.command`).
 fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
     let found = sections
         .iter()
@@ -1592,8 +1592,8 @@ mod tests {
             agent_name(&words[0], &words[1..])
         };
         assert_eq!(name("aider --yes"), "aider");
-        assert_eq!(name("/opt/bin/codex"), "codex");
-        assert_eq!(name("npx -y @openai/codex@latest"), "codex");
+        assert_eq!(name("/opt/bin/grok"), "grok");
+        assert_eq!(name("npx -y @xai/grok@latest"), "grok");
         assert_eq!(name("pipx run gpt-engineer"), "gpt-engineer");
         assert!(!agent_named("a b") && !agent_named("") && agent_named("my-agent_2"));
     }
@@ -1605,8 +1605,8 @@ mod tests {
         let kind = |dotted: &str| kind_at(&sections, &at(dotted));
         assert_eq!(kind("status_line"), Some(Kind::Bool));
         // An agent not configured yet: its settings.
-        assert_eq!(kind("agents.codex.command"), Some(Kind::Text));
-        assert_eq!(kind("agents.codex.model"), None);
+        assert_eq!(kind("agents.aider.command"), Some(Kind::Text));
+        assert_eq!(kind("agents.aider.model"), None);
         let sections = super::sections(
             &config,
             "",

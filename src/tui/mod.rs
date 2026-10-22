@@ -103,15 +103,17 @@ fn only_one(state_dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-/// The agents' models, asked in the background: pi takes a moment to list
-/// its own. Forms offer what's known meanwhile.
-fn list_models(roster: &Roster) -> std::sync::mpsc::Receiver<HashMap<String, Vec<agent::Model>>> {
+/// The agents' models, asked in the background: pi takes a moment to list its
+/// own, and codex asks its server. Each agent's arrive as they're known, so a
+/// slow one holds up neither the forms nor the others.
+fn list_models(roster: &Roster) -> std::sync::mpsc::Receiver<(String, Vec<agent::Model>)> {
     let (send, models) = std::sync::mpsc::channel();
     let list = roster.model_lister();
     let agents = agent::available(&roster.config);
     std::thread::spawn(move || {
-        let offered = agents.iter().map(|a| (a.clone(), list(a))).collect();
-        send.send(offered).ok();
+        for agent in agents {
+            send.send((agent.clone(), list(&agent))).ok();
+        }
     });
     models
 }
@@ -135,11 +137,24 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
     reload(roster, app);
     let mut last_reload = Instant::now();
     loop {
-        if let Some(offered) = app.listing.as_ref().and_then(|r| r.try_recv().ok()) {
-            app.models.offered = offered;
-            app.listing = None;
-            // Into a form opened before they came, too.
-            if let Some(app::Dialog::Form(form)) = &mut app.dialog {
+        // What each agent has answered of its models, as it answers, into an
+        // open form too; the receiver goes once its thread is done.
+        if let Some(listing) = &app.listing {
+            let mut arrived = false;
+            loop {
+                match listing.try_recv() {
+                    Ok((agent, models)) => {
+                        app.models.offered.insert(agent, models);
+                        arrived = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        app.listing = None;
+                        break;
+                    }
+                }
+            }
+            if arrived && let Some(app::Dialog::Form(form)) = &mut app.dialog {
                 form.set_models(&app.models);
             }
         }

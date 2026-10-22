@@ -400,7 +400,7 @@ impl Roster {
 
     /// Creates a session and starts it; `customize` adjusts it before it's saved
     /// (adopting sets its conversation and directory).
-    fn create_session(
+    pub(crate) fn create_session(
         &mut self,
         req: NewSession,
         customize: impl FnOnce(&mut Session),
@@ -499,24 +499,12 @@ impl Roster {
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
         }
-        let project = self
-            .db
-            .projects()?
-            .into_iter()
-            .find(|p| p.id == s.project_id)
-            .with_context(|| format!("{} has no project", s.label()))?;
         let cx = agent::Context {
             roster: &self.exe,
             state_dir: &self.paths.state_dir,
         };
         let launch = agent::launch(&s, &self.config, &cx)?;
-        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
-        let argv = launch::wrap(
-            &shell,
-            &self.paths.global_env(),
-            &project.origin.join(PROJECT_ENV),
-            &launch.argv,
-        );
+        let argv = self.wrapped(&s, &launch.argv)?;
         // What an agent's hooks need to report (`roster report`).
         let env = [
             ("ROSTER_SESSION", s.id.clone()),
@@ -550,6 +538,24 @@ impl Roster {
             s.baseline_at = Some(now + BOOT_GRACE_MS);
         }
         self.db.save_session(&s)
+    }
+
+    /// `argv` run by roster's shell for `s`, after it sources the env files:
+    /// the global one, then that of `s`'s project.
+    pub(crate) fn wrapped(&self, s: &Session, argv: &[String]) -> Result<Vec<String>> {
+        let project = self
+            .db
+            .projects()?
+            .into_iter()
+            .find(|p| p.id == s.project_id);
+        let project_env = project.map_or_else(PathBuf::new, |p| p.origin.join(PROJECT_ENV));
+        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
+        Ok(launch::wrap(
+            &shell,
+            &self.paths.global_env(),
+            &project_env,
+            argv,
+        ))
     }
 
     /// Stops a session's agent (SIGTERM, then SIGKILL), keeping its entry and last
@@ -736,184 +742,6 @@ impl Roster {
         stats
     }
 
-    /// Asks Haiku for a title from the session's recent prompts and keeps it as
-    /// the session's title (the agent's own stays the same otherwise).
-    pub fn generate_title(&mut self, id: &str) -> Result<String> {
-        let mut s = self.db.session(id)?;
-        let adapter = agent::adapter(&s.agent);
-        // (Asked without a path: whether it has a transcript roster reads at all.)
-        if adapter.transcript(Path::new("")).is_none() {
-            bail!(
-                "{} keeps no transcript roster can read, so it can't get a generated title; set one with edit",
-                s.agent
-            );
-        }
-        let path = s.transcript_path.clone().filter(|p| Path::new(p).exists());
-        let path =
-            path.with_context(|| format!("{} has no conversation to title yet", s.label()))?;
-        let mut transcript = adapter
-            .transcript(Path::new(&path))
-            .context("no transcript")?;
-        transcript.update()?;
-        let prompts = transcript.recent_prompts();
-        if prompts.is_empty() {
-            bail!("{} has no prompts to title yet", s.label());
-        }
-        // Haiku makes the title, whichever agent the session runs.
-        let mut argv = agent::claude::oneoff(&self.config);
-        argv.push(title_request(&prompts, s.display_title()));
-        let project = self
-            .db
-            .projects()?
-            .into_iter()
-            .find(|p| p.id == s.project_id);
-        let project_env = project.map_or_else(PathBuf::new, |p| p.origin.join(PROJECT_ENV));
-        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
-        let argv = launch::wrap(&shell, &self.paths.global_env(), &project_env, &argv);
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .current_dir(&s.workdir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        for var in crate::tmux::LEAKY_ENV {
-            cmd.env_remove(var);
-        }
-        let output = run_with_timeout(cmd, "claude", TITLE_TIMEOUT)?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "claude couldn't make a title: {}",
-                err.lines().next().unwrap_or("no output")
-            );
-        }
-        let title = clean_title(&String::from_utf8_lossy(&output.stdout))
-            .context("claude gave no title")?;
-        s.title_override = Some(title.clone());
-        self.db.save_session(&s)?;
-        Ok(title)
-    }
-
-    /// Claude conversations roster could take over: not already one of its live
-    /// sessions, each with the project whose directory holds it (the deepest
-    /// one), if any, and an archived roster session it belongs to, if any. With
-    /// `all` false, only those in a project's directory.
-    pub fn adoptable(&self, all: bool) -> Result<Vec<Adoptable>> {
-        self.adoptable_where(all, |_| true)
-    }
-
-    /// `adoptable`, for the conversations whose id `wanted` says yes to.
-    fn adoptable_where(&self, all: bool, wanted: impl Fn(&str) -> bool) -> Result<Vec<Adoptable>> {
-        let Some(dir) = crate::adopt::claude_dir() else {
-            return Ok(Vec::new());
-        };
-        let projects = self.db.projects()?;
-        let sessions = self.db.sessions(true)?;
-        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        let session = |id: &str| {
-            sessions
-                .iter()
-                .find(|s| s.conversation_id.as_deref() == Some(id))
-        };
-        // Those of live sessions aren't even read: they're often the largest.
-        let live = |id: &str| session(id).is_some_and(|s| s.deleted_at.is_none());
-        let mut found = Vec::new();
-        for conversation in crate::adopt::conversations(&dir, |id| wanted(id) && !live(id)) {
-            let known = session(&conversation.id);
-            let project = projects
-                .iter()
-                .filter(|p| conversation.cwd.starts_with(&p.origin))
-                .max_by_key(|p| p.origin.components().count())
-                .cloned();
-            if project.is_none() && !all {
-                continue;
-            }
-            let new_project = new_project_name(&conversation.cwd, &names);
-            found.push(Adoptable {
-                conversation,
-                project,
-                new_project,
-                archived: known.cloned(),
-            });
-        }
-        Ok(found)
-    }
-
-    /// Takes over a Claude conversation started elsewhere: a session (in its
-    /// project, or in a new project for its directory) that resumes it, or with
-    /// `fork`, a copy of it. A conversation open in Claude is refused unless
-    /// `force`: two Claudes would write the same conversation.
-    pub fn adopt(&mut self, req: Adopt) -> Result<Session> {
-        let wanted = |id: &str| {
-            id == req.conversation
-                || (req.conversation.len() >= 4 && id.starts_with(&req.conversation))
-        };
-        let candidates = self.adoptable_where(true, wanted)?;
-        let matches: Vec<&Adoptable> = candidates.iter().collect();
-        let found = match matches[..] {
-            [one] => one.clone(),
-            [] => bail!(
-                "no conversation {:?} to adopt (`roster adopt --list --all` shows them)",
-                req.conversation
-            ),
-            _ => bail!(
-                "{:?} matches several conversations; give more of the id",
-                req.conversation
-            ),
-        };
-        if let Some(s) = &found.archived {
-            bail!(
-                "that conversation is the archived session {}; restore it instead (`roster restore {}`)",
-                s.label(),
-                s.id
-            );
-        }
-        let c = &found.conversation;
-        if let Some(pid) = c.open_in
-            && !req.fork
-            && !req.force
-        {
-            bail!(
-                "it's open in Claude (pid {pid}); close it there first, or adopt a copy (--fork), or adopt it anyway (--yes)"
-            );
-        }
-        let project = match (&req.project, &found.project) {
-            (Some(name), _) => match self.db.project(name)? {
-                Some(p) => p,
-                None => self.add_project(name, &c.cwd, Defaults::default())?,
-            },
-            (None, Some(p)) => p.clone(),
-            (None, None) => self.add_project(&found.new_project, &c.cwd, Defaults::default())?,
-        };
-        let request = NewSession {
-            project: project.name.clone(),
-            name: req.name,
-            agent: Some(agent::CLAUDE.to_string()),
-            model: req.model.unwrap_or(project.model.clone()),
-            effort: req.effort.unwrap_or(project.effort.clone()),
-            prompt: None,
-        };
-        let fork_from = req.fork.then(|| c.id.clone());
-        let (conversation_id, transcript_path) = if req.fork {
-            (uuid::Uuid::new_v4().to_string(), None)
-        } else {
-            (c.id.clone(), Some(c.path.to_string_lossy().into_owned()))
-        };
-        self.create_session(request, |s| {
-            s.workdir = c.cwd.clone();
-            s.conversation_id = Some(conversation_id);
-            s.transcript_path = transcript_path;
-            s.fork_from = fork_from;
-            s.title = c.title.clone();
-            // A name it was given is like a title of your own.
-            s.title_override = c.custom_title.clone();
-            // What it last ran on, which resuming keeps, unless another is asked for.
-            if s.model.is_none() {
-                s.running_model = c.model.clone();
-            }
-        })
-    }
-
     /// Waits (refreshing) until a session's first prompt has been typed in, for
     /// one-shot commands. False if the agent wasn't ready within `timeout`.
     pub fn wait_for_prompt(&mut self, id: &str, timeout: Duration) -> Result<bool> {
@@ -1011,99 +839,6 @@ fn backfill_models(db: &Db) -> Result<()> {
     db.learn_model_names()
 }
 
-/// How long a title may take.
-const TITLE_TIMEOUT: Duration = Duration::from_secs(60);
-
-fn title_request(prompts: &[String], current: &str) -> String {
-    let mut request =
-        String::from("These are the latest requests in a coding session, oldest first:\n\n");
-    for p in prompts {
-        let p: String = p.chars().take(300).collect();
-        request.push_str(&format!("- {}\n", p.replace('\n', " ")));
-    }
-    request.push_str(&format!(
-        "\nIts title so far: {current}\n\nGive a short title (3 to 7 words) for what the session is working on now. Reply with the title only."
-    ));
-    request
-}
-
-/// The first line of the reply, without quotes or markdown, at most 80 characters.
-fn clean_title(reply: &str) -> Option<String> {
-    let line = reply.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let line = line.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '#' | ' '));
-    let title: String = line.chars().take(80).collect();
-    (!title.is_empty()).then_some(title)
-}
-
-/// Runs `cmd` (`what`, in messages) to its end, for at most `timeout`. Its
-/// output is read meanwhile, so a full pipe can't hold it up.
-fn run_with_timeout(
-    mut cmd: std::process::Command,
-    what: &str,
-    timeout: Duration,
-) -> Result<std::process::Output> {
-    use std::io::Read;
-    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut out);
-            }
-            out
-        })
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{what} took longer than {}s", timeout.as_secs());
-        }
-        sleep(Duration::from_millis(100));
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
-/// A conversation roster could adopt.
-#[derive(Clone, Debug)]
-pub struct Adoptable {
-    pub conversation: crate::adopt::Conversation,
-    /// The project whose directory holds it, if any.
-    pub project: Option<Project>,
-    /// Otherwise, the name a new project for its directory gets.
-    pub new_project: String,
-    /// An archived roster session it belongs to: restore that instead.
-    pub archived: Option<Session>,
-}
-
-/// What to adopt, and how.
-#[derive(Clone, Debug, Default)]
-pub struct Adopt {
-    /// The conversation's id, or a prefix of 4+ characters.
-    pub conversation: String,
-    /// A project to put it in, created for its directory if it doesn't exist;
-    /// default: the project holding its directory, else a new one named after it.
-    pub project: Option<String>,
-    pub name: Option<String>,
-    /// None: the project's default; Some(None): Claude's own.
-    pub model: Option<Option<String>>,
-    pub effort: Option<Option<String>>,
-    /// Adopt a copy (`--fork-session`) and leave the original alone.
-    pub fork: bool,
-    /// Adopt it even though it's open in Claude.
-    pub force: bool,
-}
-
 /// Default agent, model and effort for a project's new sessions.
 #[derive(Clone, Debug, Default)]
 pub struct Defaults {
@@ -1132,7 +867,7 @@ fn signal(pid: i32, sig: libc::c_int) {
 }
 
 /// A name for a new project in `directory`: the directory's, unless taken.
-fn new_project_name(directory: &Path, taken: &[&str]) -> String {
+pub(crate) fn new_project_name(directory: &Path, taken: &[&str]) -> String {
     let base: String = util::directory_name(directory).chars().take(60).collect();
     let base = if base.is_empty() {
         "project".to_string()
@@ -1160,21 +895,6 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn titles_are_one_clean_line() {
-        assert_eq!(
-            clean_title("\n  \"Fix Login Tests\"  \nmore").as_deref(),
-            Some("Fix Login Tests")
-        );
-        assert_eq!(
-            clean_title("# **Retry uploads**").as_deref(),
-            Some("Retry uploads")
-        );
-        assert_eq!(clean_title("  \n "), None);
-        let request = title_request(&["fix\nthe tests".into()], "Old");
-        assert!(request.contains("- fix the tests") && request.contains("Its title so far: Old"));
-    }
 
     #[test]
     fn names_are_simple() {

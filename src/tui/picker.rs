@@ -3,7 +3,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::engine::Adoptable;
+use crate::adopt::Adoptable;
 
 pub struct Picker {
     items: Vec<Adoptable>,
@@ -118,7 +118,7 @@ fn haystack(a: &Adoptable) -> String {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::adopt::Conversation;
+    use crate::agent::claude::conversations::Conversation;
 
     pub fn adoptable(id: &str, title: &str, project: Option<&str>) -> Adoptable {
         Adoptable {

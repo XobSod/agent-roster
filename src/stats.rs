@@ -2,10 +2,13 @@
 //! tokens, cost, changed lines. Every field is optional; each agent fills in what
 //! it can, from its transcript (see `Transcript`).
 
-use std::path::Path;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 /// How many recent prompts a transcript keeps, for generating a title.
-pub const RECENT_PROMPTS: usize = 5;
+const RECENT_PROMPTS: usize = 5;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentStats {
@@ -31,6 +34,99 @@ pub trait Transcript: Send {
     fn stats(&self, model: Option<&str>) -> AgentStats;
     /// The last few prompts the user typed, oldest first.
     fn recent_prompts(&self) -> Vec<String>;
+}
+
+/// What an agent's JSONL transcript adds up to, line by line: what each
+/// agent's reader knows of its format (`Jsonl` does the reading).
+pub trait Tally: Default + Send {
+    /// One complete line of the file.
+    fn line(&mut self, line: &[u8]);
+    /// The totals so far; see `Transcript::stats`.
+    fn stats(&self, model: Option<&str>) -> AgentStats;
+    fn prompts(&self) -> &Prompts;
+}
+
+/// Reads a JSONL transcript as it grows: each read takes only what was added
+/// since, a line still being written waits for the next, and a file that got
+/// shorter (rewritten) is read again from the start.
+#[derive(Debug, Default)]
+pub struct Jsonl<T> {
+    path: PathBuf,
+    offset: u64,
+    /// An incomplete last line, finished by the next read.
+    rest: Vec<u8>,
+    tally: T,
+}
+
+impl<T: Tally> Jsonl<T> {
+    pub fn new(path: &Path) -> Jsonl<T> {
+        Jsonl {
+            path: path.to_path_buf(),
+            offset: 0,
+            rest: Vec::new(),
+            tally: T::default(),
+        }
+    }
+}
+
+impl<T: Tally> Transcript for Jsonl<T> {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn update(&mut self) -> std::io::Result<()> {
+        let mut file = File::open(&self.path)?;
+        let len = file.metadata()?.len();
+        if len < self.offset {
+            *self = Jsonl::new(&self.path.clone());
+        }
+        if len == self.offset {
+            return Ok(());
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut text = std::mem::take(&mut self.rest);
+        self.offset += file.read_to_end(&mut text)? as u64;
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', &text) {
+            self.tally.line(&text[start..end]);
+            start = end + 1;
+        }
+        text.drain(..start);
+        self.rest = text;
+        Ok(())
+    }
+
+    fn stats(&self, model: Option<&str>) -> AgentStats {
+        self.tally.stats(model)
+    }
+
+    fn recent_prompts(&self) -> Vec<String> {
+        self.tally.prompts().recent.iter().cloned().collect()
+    }
+}
+
+/// The prompts the user typed: how many, and the last few.
+#[derive(Debug, Default)]
+pub struct Prompts {
+    pub count: u64,
+    recent: VecDeque<String>,
+}
+
+impl Prompts {
+    pub fn push(&mut self, text: String) {
+        self.count += 1;
+        if self.recent.len() == RECENT_PROMPTS {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(text);
+    }
+}
+
+/// The type of a JSONL entry that names it first (`{"type":"…",`), which
+/// tells most entries apart without parsing them; None if it isn't first.
+pub fn leading_type(line: &[u8]) -> Option<&[u8]> {
+    let rest = line.strip_prefix(br#"{"type":""#)?;
+    Some(&rest[..memchr::memchr(b'"', rest)?])
 }
 
 /// A session's statistics as short parts, for the header and `roster info`:

@@ -1,0 +1,406 @@
+//! What the TUI's actions do: in the session list, the projects view and the
+//! server view.
+
+use super::*;
+
+impl App {
+    pub(super) fn act(&mut self, action: Action) -> Option<Op> {
+        if self.mode == Mode::Server {
+            return self.act_in_server_view(action);
+        }
+        if self.mode == Mode::Projects
+            && let Some(op) = self.act_in_projects_view(action)
+        {
+            return op;
+        }
+        match action {
+            // The list wraps around.
+            Action::Up => self.selected = wrap(self.selected, self.entries.len(), false),
+            Action::Down => self.selected = wrap(self.selected, self.entries.len(), true),
+            Action::Collapse => self.fold(true),
+            Action::Expand => self.fold(false),
+            Action::Confirm => return self.confirm_selected(),
+            Action::Search => self.typing = Some((self.search.clone(), self.selected_key())),
+            Action::Quit => return Some(Op::Quit),
+            Action::Help => self.help = true,
+            Action::Open(menu) => self.menu = Some(menu),
+            Action::ToggleGroup => {
+                self.grouped = !self.grouped;
+                self.set_mode(Mode::Live);
+                self.rebuild();
+            }
+            Action::ShowServer => self.set_mode(Mode::Server),
+            Action::ShowProjects => self.set_mode(Mode::Projects),
+            Action::NewProject => {
+                let agents = self.agent_names();
+                self.dialog = Some(Dialog::Form(
+                    Form::new_project(&self.default_path, &agents)
+                        .with_model_names(&self.model_names),
+                ));
+            }
+            Action::EditProject => match self.selected_project() {
+                Some(p) => {
+                    let builtin = self.chat_project == Some(p.id);
+                    self.dialog = Some(Dialog::Form(
+                        Form::edit_project(&p, &self.agent_names(), builtin)
+                            .with_model_names(&self.model_names),
+                    ))
+                }
+                None => {
+                    self.fail("Select a project (group by project) or one of its sessions first")
+                }
+            },
+            Action::EditSession => return self.session_action(action),
+            Action::FilterProject => self.toggle_filter(),
+            Action::RemoveProject => self.remove_project(),
+            Action::NewSession => self.new_session(),
+            Action::NewChat => return Some(Op::NewChat),
+            Action::Adopt => return Some(Op::FindConversations),
+            Action::Start
+            | Action::Stop
+            | Action::Restart
+            | Action::Archive
+            | Action::Delete
+            | Action::ToggleRead
+            | Action::Retitle => {
+                return self.session_action(action);
+            }
+        }
+        None
+    }
+
+    /// In the projects view: move, pick a project to see its sessions, or leave.
+    /// None for what works as anywhere else (the project menu acts on the
+    /// selected row).
+    pub(super) fn act_in_projects_view(&mut self, action: Action) -> Option<Option<Op>> {
+        match action {
+            Action::Up => self.project_row = wrap(self.project_row, self.projects.len(), false),
+            Action::Down => self.project_row = wrap(self.project_row, self.projects.len(), true),
+            Action::Confirm | Action::FilterProject => match self.projects.get(self.project_row) {
+                Some(p) => {
+                    self.filter = Some(p.id);
+                    self.set_mode(Mode::Live);
+                    self.rebuild();
+                }
+                None => {
+                    let key = self.chord(Menu::Project, Action::NewProject);
+                    self.fail(format!("No projects yet; {key} adds one"));
+                }
+            },
+            Action::ShowProjects => self.set_mode(Mode::Live),
+            Action::Collapse | Action::Expand => {}
+            Action::NewProject
+            | Action::EditProject
+            | Action::RemoveProject
+            | Action::NewSession
+            | Action::NewChat
+            | Action::Adopt
+            | Action::ToggleGroup
+            | Action::ShowServer
+            | Action::Open(_)
+            | Action::Help => return None,
+            // Only the session list quits; here it's back, like Esc.
+            Action::Quit => self.set_mode(Mode::Live),
+            _ => self.fail("This is the projects view: Esc goes back to the sessions"),
+        }
+        Some(None)
+    }
+
+    /// In the server view: scroll, kill orphans, or leave.
+    pub(super) fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
+        match action {
+            Action::Up => self.report_scroll = self.report_scroll.saturating_sub(1),
+            Action::Down => {
+                self.report_scroll =
+                    (self.report_scroll + 1).min(self.report.len().saturating_sub(1))
+            }
+            Action::Confirm if self.orphans > 0 => {
+                let question = format!(
+                    "Kill {} orphaned tmux session(s)? Their programs end.",
+                    self.orphans
+                );
+                self.confirm(question, Op::KillOrphans);
+            }
+            Action::Confirm => self.flash("No orphaned tmux sessions to remove"),
+            // Only the session list quits; here it's back, like Esc.
+            Action::Quit => self.set_mode(Mode::Live),
+            Action::Help => self.help = true,
+            Action::Open(menu) => self.menu = Some(menu),
+            Action::ShowServer => self.set_mode(Mode::Live),
+            Action::ShowProjects => self.set_mode(Mode::Projects),
+            Action::ToggleGroup => {
+                self.grouped = !self.grouped;
+                self.set_mode(Mode::Live);
+            }
+            _ => self.fail("This is the server view: Esc goes back to the sessions"),
+        }
+        None
+    }
+
+    /// Folds (or unfolds) the selected group; from a session, its group.
+    pub(super) fn fold(&mut self, fold: bool) {
+        let group = match self.selected_entry() {
+            Some(Entry::Heading { group, .. }) => *group,
+            Some(Entry::Card(s) | Entry::Row(s)) if fold && self.mode == Mode::Live => {
+                list::group_of(s, self.grouped)
+            }
+            _ => return,
+        };
+        let folds = if self.hits.is_some() {
+            &mut self.search_folded
+        } else {
+            &mut self.folded
+        };
+        let changed = if fold {
+            folds.insert(group)
+        } else {
+            folds.remove(&group)
+        };
+        if changed {
+            self.select_next = Some(EntryKey::Group(group));
+            self.rebuild();
+        }
+    }
+
+    pub(super) fn confirm_selected(&mut self) -> Option<Op> {
+        match self.selected_entry().cloned()? {
+            Entry::Heading { open, .. } => {
+                self.fold(open);
+                None
+            }
+            Entry::Card(s) | Entry::Row(s) if s.deleted_at.is_some() => self.restore(s),
+            Entry::Card(s) | Entry::Row(s) => {
+                // Starting an agent that can't resume loses its conversation: ask.
+                if s.state == State::Stopped && !self.resumes(&s.agent) {
+                    self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
+                    return None;
+                }
+                Some(Op::Attach(s.id))
+            }
+        }
+    }
+
+    pub(super) fn session_action(&mut self, action: Action) -> Option<Op> {
+        let Some(s) = self.selected_session().cloned() else {
+            self.fail("Select a session first");
+            return None;
+        };
+        let archive = self.chord(Menu::Session, Action::Archive);
+        if s.deleted_at.is_some() {
+            return match action {
+                Action::Archive => self.restore(s),
+                Action::Delete => {
+                    let kept = if crate::agent::adapter(&s.agent).adopts() {
+                        format!(
+                            "; its Claude conversation stays and can be adopted again ({})",
+                            self.chord(Menu::Session, Action::Adopt)
+                        )
+                    } else {
+                        String::new()
+                    };
+                    self.confirm(
+                        format!("Delete {} for good? Roster forgets it{kept}.", s.label()),
+                        Op::Delete(s.id),
+                    );
+                    None
+                }
+                _ => {
+                    self.fail(format!("{} is archived; {archive} restores it", s.label()));
+                    None
+                }
+            };
+        }
+        match action {
+            Action::EditSession => {
+                self.dialog = Some(Dialog::Form(
+                    Form::edit_session(&s).with_model_names(&self.model_names),
+                ));
+                None
+            }
+            Action::Start | Action::Restart if !self.resumes(&s.agent) => {
+                let op = if action == Action::Start {
+                    Op::Start(s.id.clone())
+                } else {
+                    Op::Restart(s.id.clone())
+                };
+                self.confirm(self.new_conversation_question(&s), op);
+                None
+            }
+            Action::Start => Some(Op::Start(s.id)),
+            Action::Stop => Some(Op::Stop(s.id)),
+            Action::Restart if s.state == State::Working => {
+                self.confirm(
+                    format!("{} is working. Restart it?", s.label()),
+                    Op::Restart(s.id),
+                );
+                None
+            }
+            Action::Restart => Some(Op::Restart(s.id)),
+            Action::Archive => {
+                let question = format!(
+                    "Archive {}? Its agent stops; {archive} on it under Archived restores it.",
+                    s.label()
+                );
+                self.confirm(question, Op::Archive(s.id));
+                None
+            }
+            Action::Delete => {
+                self.fail(format!(
+                    "Only archived sessions can be deleted; {archive} archives {}",
+                    s.label()
+                ));
+                None
+            }
+            Action::ToggleRead => Some(Op::SetUnread(s.id, !s.unread)),
+            Action::Retitle => Some(Op::RetitleSession(s.id)),
+            _ => None,
+        }
+    }
+
+    /// The project the selection belongs to; with only one project, that one.
+    pub(super) fn selected_project(&self) -> Option<Project> {
+        if self.mode == Mode::Projects {
+            return self.projects.get(self.project_row).cloned();
+        }
+        let id = match self.selected_entry() {
+            Some(Entry::Heading {
+                group: Group::Project(id),
+                ..
+            }) => Some(*id),
+            Some(Entry::Card(s) | Entry::Row(s)) => Some(s.project_id),
+            _ => self.filter,
+        };
+        match id {
+            Some(id) => self.project(id).cloned(),
+            None if self.projects.len() == 1 => self.projects.first().cloned(),
+            None => None,
+        }
+    }
+
+    pub(super) fn new_session(&mut self) {
+        if self.projects.is_empty() {
+            let key = self.chord(Menu::Project, Action::NewProject);
+            let chat = self.chord(Menu::Session, Action::NewChat);
+            self.fail(format!(
+                "Add a project first ({key}), or start a chat, which needs none ({chat})"
+            ));
+            return;
+        }
+        let selected = self.selected_project();
+        let form = Form::new_session(&self.projects, selected.as_ref(), &self.agent_names())
+            .with_model_names(&self.model_names);
+        self.dialog = Some(Dialog::Form(form));
+    }
+
+    /// Offers `found` to pick from.
+    pub fn pick_conversation(&mut self, found: Vec<crate::adopt::Adoptable>) {
+        if found.is_empty() {
+            self.flash("No Claude conversations to adopt");
+            return;
+        }
+        self.dialog = Some(Dialog::Picker(Picker::new(found)));
+    }
+
+    /// The form for adopting `a`, or for an archived session's conversation, restoring it.
+    pub(super) fn adopt(&mut self, a: crate::adopt::Adoptable) {
+        match a.archived {
+            // Its name taken meanwhile: restoring asks for another.
+            Some(s) if self.name_taken(&s) => {
+                self.restore(s);
+            }
+            Some(s) => self.confirm(
+                format!(
+                    "That conversation is the archived session {}. Restore it?",
+                    s.label()
+                ),
+                Op::Restore {
+                    id: s.id,
+                    name: None,
+                },
+            ),
+            None => {
+                self.dialog = Some(Dialog::Form(
+                    Form::adopt(&a).with_model_names(&self.model_names),
+                ))
+            }
+        }
+    }
+
+    /// The new-chat form, once the chats project exists (`projects` has it).
+    pub fn open_chat_form(&mut self, projects: &[Project], chats: &Project) {
+        let form = Form::new_chat(projects, chats, &self.agent_names())
+            .with_model_names(&self.model_names);
+        self.dialog = Some(Dialog::Form(form));
+    }
+
+    pub(super) fn agent_names(&self) -> Vec<String> {
+        self.agents.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    pub(super) fn toggle_filter(&mut self) {
+        if self.filter.is_some() {
+            self.filter = None;
+        } else if let Some(p) = self.selected_project() {
+            self.filter = Some(p.id);
+        } else {
+            self.fail("Select a session or a project first");
+            return;
+        }
+        self.rebuild();
+    }
+
+    pub(super) fn remove_project(&mut self) {
+        let Some(p) = self.selected_project() else {
+            self.fail("Select a project (group by project) or one of its sessions first");
+            return;
+        };
+        let (archived, live): (Vec<&Session>, Vec<&Session>) = self
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == p.id)
+            .partition(|s| s.deleted_at.is_some());
+        if !live.is_empty() {
+            let archive = self.chord(Menu::Session, Action::Archive);
+            self.fail(format!(
+                "{} still has sessions; archive them first ({archive})",
+                p.name
+            ));
+            return;
+        }
+        // Removing a project deletes its archived sessions for good.
+        let question = match archived.len() {
+            0 => format!("Remove project {}?", p.name),
+            1 => format!(
+                "Remove project {}? Its archived session goes for good.",
+                p.name
+            ),
+            n => format!(
+                "Remove project {}? Its {n} archived sessions go for good.",
+                p.name
+            ),
+        };
+        self.confirm(question, Op::RemoveProject(p.name));
+    }
+
+    /// Whether a live session in `s`'s project has its name.
+    pub(super) fn name_taken(&self, s: &Session) -> bool {
+        self.sessions
+            .iter()
+            .any(|o| o.deleted_at.is_none() && o.project_id == s.project_id && o.name == s.name)
+    }
+
+    pub(super) fn restore(&mut self, s: Session) -> Option<Op> {
+        if self.name_taken(&s) {
+            let prompt = format!(
+                "{} already has a session named {}. Restore as:",
+                s.project, s.name
+            );
+            self.input(&prompt, String::new(), Purpose::RestoreName { id: s.id });
+            return None;
+        }
+        Some(Op::Restore {
+            id: s.id,
+            name: None,
+        })
+    }
+}

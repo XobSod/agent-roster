@@ -6,7 +6,7 @@ use std::path::Path;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::Op;
+use super::op::Op;
 use crate::agent::{self, CLAUDE};
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
@@ -322,7 +322,7 @@ impl Form {
     }
 
     /// Adopting `a`: into the project holding its directory, or a new one.
-    pub fn adopt(a: &crate::engine::Adoptable) -> Form {
+    pub fn adopt(a: &crate::adopt::Adoptable) -> Form {
         let c = &a.conversation;
         let what = c.label();
         let branch = c

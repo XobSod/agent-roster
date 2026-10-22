@@ -95,6 +95,11 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// `s` on one line, its runs of white space each one space.
+pub fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// `~/…` as a path in the home directory.
 pub fn expand_tilde(path: &str) -> String {
     match (path.strip_prefix('~'), dirs::home_dir()) {

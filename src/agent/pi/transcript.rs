@@ -1,25 +1,18 @@
 //! Pi's session file: JSONL entries forming a tree (branches stay in the file),
 //! each message with its usage and cost. Whatever can't be read is left out.
 
-use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-
 use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::stats::{AgentStats, RECENT_PROMPTS, Transcript};
+use crate::stats::{AgentStats, Jsonl, Prompts, Tally, leading_type};
 
-/// Reads a pi session file as it grows, keeping running totals.
+/// Reads a pi session file as it grows.
+pub type PiTranscript = Jsonl<Totals>;
+
+/// A pi session file's running totals.
 #[derive(Debug, Default)]
-pub struct PiTranscript {
-    path: PathBuf,
-    offset: u64,
-    /// An incomplete last line, finished by the next read.
-    rest: Vec<u8>,
-    prompts: u64,
-    recent: VecDeque<String>,
+pub struct Totals {
+    prompts: Prompts,
     output: u64,
     /// The tokens in context after the last reply; unknown after a compaction
     /// until the next one.
@@ -29,14 +22,17 @@ pub struct PiTranscript {
     costed: bool,
 }
 
-impl PiTranscript {
-    pub fn new(path: &Path) -> PiTranscript {
-        PiTranscript {
-            path: path.to_path_buf(),
-            ..PiTranscript::default()
+impl Totals {
+    fn count(&mut self, usage: &Usage) {
+        self.output += usage.output;
+        if let Some(total) = usage.cost.as_ref().and_then(|c| c.total) {
+            self.cost += total;
+            self.costed = true;
         }
     }
+}
 
+impl Tally for Totals {
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -62,11 +58,7 @@ impl PiTranscript {
                         if let Some(Text(Some(text))) = message.content
                             && !text.trim().is_empty()
                         {
-                            self.prompts += 1;
-                            if self.recent.len() == RECENT_PROMPTS {
-                                self.recent.pop_front();
-                            }
-                            self.recent.push_back(text);
+                            self.prompts.push(text);
                         }
                     }
                     _ => {}
@@ -83,48 +75,11 @@ impl PiTranscript {
         }
     }
 
-    fn count(&mut self, usage: &Usage) {
-        self.output += usage.output;
-        if let Some(total) = usage.cost.as_ref().and_then(|c| c.total) {
-            self.cost += total;
-            self.costed = true;
-        }
-    }
-}
-
-impl Transcript for PiTranscript {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn update(&mut self) -> std::io::Result<()> {
-        let mut file = File::open(&self.path)?;
-        let len = file.metadata()?.len();
-        if len < self.offset {
-            // Rewritten: start over.
-            *self = PiTranscript::new(&self.path.clone());
-        }
-        if len == self.offset {
-            return Ok(());
-        }
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut text = std::mem::take(&mut self.rest);
-        self.offset += file.read_to_end(&mut text)? as u64;
-        let mut start = 0;
-        for end in memchr::memchr_iter(b'\n', &text) {
-            self.line(&text[start..end]);
-            start = end + 1;
-        }
-        text.drain(..start);
-        self.rest = text;
-        Ok(())
-    }
-
     /// The context window isn't in the file; pi reports it (see
     /// `Report::context_window`).
     fn stats(&self, _model: Option<&str>) -> AgentStats {
         AgentStats {
-            prompts: Some(self.prompts),
+            prompts: Some(self.prompts.count),
             context_used: self.context,
             output_tokens: (self.output > 0).then_some(self.output),
             cost_usd: self.costed.then_some(self.cost),
@@ -132,8 +87,8 @@ impl Transcript for PiTranscript {
         }
     }
 
-    fn recent_prompts(&self) -> Vec<String> {
-        self.recent.iter().cloned().collect()
+    fn prompts(&self) -> &Prompts {
+        &self.prompts
     }
 }
 
@@ -225,28 +180,27 @@ impl Block {
 /// messages whose role comes early on the line (tool results and the system
 /// prompt are most of a long session).
 fn wanted(line: &[u8]) -> bool {
-    let Some(rest) = line.strip_prefix(br#"{"type":""#) else {
-        return true;
-    };
-    if rest.starts_with(b"usage\"") || rest.starts_with(b"compaction\"") {
-        return true;
-    }
-    if !rest.starts_with(b"message\"") {
-        return false;
-    }
-    let head = &line[..line.len().min(400)];
-    match memchr::memmem::find(head, br#""role":""#) {
-        Some(i) => {
-            let role = &head[i + br#""role":""#.len()..];
-            role.starts_with(b"user\"") || role.starts_with(b"assistant\"")
-        }
+    match leading_type(line) {
         None => true,
+        Some(b"usage" | b"compaction") => true,
+        Some(b"message") => {
+            let head = &line[..line.len().min(400)];
+            match memchr::memmem::find(head, br#""role":""#) {
+                Some(i) => {
+                    let role = &head[i + br#""role":""#.len()..];
+                    role.starts_with(b"user\"") || role.starts_with(b"assistant\"")
+                }
+                None => true,
+            }
+        }
+        Some(_) => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::Transcript;
 
     fn message(role: &str, rest: serde_json::Value) -> String {
         let mut message = serde_json::json!({"role": role});

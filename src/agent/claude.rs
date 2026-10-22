@@ -1,6 +1,7 @@
 //! Claude Code: hooks injected for each run report its state, its
 //! conversations resume, and its transcript gives the statistics.
 
+pub mod conversations;
 mod transcript;
 
 use std::fs;

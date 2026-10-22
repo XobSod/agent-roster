@@ -2,41 +2,29 @@
 //! An internal format that may change, so whatever can't be read is simply
 //! left out.
 
-use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::stats::{AgentStats, RECENT_PROMPTS, Transcript};
+use crate::stats::{AgentStats, Jsonl, Prompts, Tally, leading_type};
 
-/// Reads a Claude transcript as it grows, keeping running totals.
+/// Reads a Claude transcript as it grows.
+pub type ClaudeTranscript = Jsonl<Totals>;
+
+/// A Claude transcript's running totals.
 #[derive(Debug, Default)]
-pub struct ClaudeTranscript {
-    path: PathBuf,
-    offset: u64,
-    /// An incomplete last line, finished by the next read.
-    rest: Vec<u8>,
+pub struct Totals {
     /// Output tokens per reply; Claude writes a reply several times.
     outputs: HashMap<String, u64>,
     context: Option<u64>,
-    prompts: u64,
-    recent: VecDeque<String>,
+    prompts: Prompts,
     /// The last cost-state: cost, lines added, lines removed.
     cost: Option<(f64, u64, u64)>,
     replies_since_cost: bool,
 }
 
-impl ClaudeTranscript {
-    pub fn new(path: &Path) -> ClaudeTranscript {
-        ClaudeTranscript {
-            path: path.to_path_buf(),
-            ..ClaudeTranscript::default()
-        }
-    }
-
+impl Tally for Totals {
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -72,11 +60,7 @@ impl ClaudeTranscript {
                 if let Some(Text(Some(text))) = message.content
                     && !text.trim_start().starts_with('<')
                 {
-                    self.prompts += 1;
-                    if self.recent.len() == RECENT_PROMPTS {
-                        self.recent.pop_front();
-                    }
-                    self.recent.push_back(text);
+                    self.prompts.push(text);
                 }
             }
             Some("cost-state") => {
@@ -90,35 +74,6 @@ impl ClaudeTranscript {
             _ => {}
         }
     }
-}
-
-impl Transcript for ClaudeTranscript {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn update(&mut self) -> std::io::Result<()> {
-        let mut file = File::open(&self.path)?;
-        let len = file.metadata()?.len();
-        if len < self.offset {
-            // Rewritten: start over.
-            *self = ClaudeTranscript::new(&self.path.clone());
-        }
-        if len == self.offset {
-            return Ok(());
-        }
-        file.seek(SeekFrom::Start(self.offset))?;
-        let mut text = std::mem::take(&mut self.rest);
-        self.offset += file.read_to_end(&mut text)? as u64;
-        let mut start = 0;
-        for end in memchr::memchr_iter(b'\n', &text) {
-            self.line(&text[start..end]);
-            start = end + 1;
-        }
-        text.drain(..start);
-        self.rest = text;
-        Ok(())
-    }
 
     /// `model` (as Claude reports it) gives the context window.
     fn stats(&self, model: Option<&str>) -> AgentStats {
@@ -127,7 +82,7 @@ impl Transcript for ClaudeTranscript {
             .context
             .and_then(|used| model.and_then(context_window).filter(|w| *w >= used));
         AgentStats {
-            prompts: Some(self.prompts),
+            prompts: Some(self.prompts.count),
             context_used: self.context,
             context_limit: window,
             output_tokens: (!self.outputs.is_empty()).then(|| self.outputs.values().sum()),
@@ -138,8 +93,8 @@ impl Transcript for ClaudeTranscript {
         }
     }
 
-    fn recent_prompts(&self) -> Vec<String> {
-        self.recent.iter().cloned().collect()
+    fn prompts(&self) -> &Prompts {
+        &self.prompts
     }
 }
 
@@ -210,12 +165,7 @@ impl<'de> Deserialize<'de> for Text {
 /// those lines are told apart without parsing them; in a long transcript
 /// they're most of it (46 of 80 MB in one, seen in real use).
 fn wanted(line: &[u8]) -> bool {
-    match line.strip_prefix(br#"{"type":""#) {
-        Some(kind) => [&b"assistant\""[..], b"user\"", b"cost-state\""]
-            .iter()
-            .any(|k| kind.starts_with(k)),
-        None => true,
-    }
+    leading_type(line).is_none_or(|kind| matches!(kind, b"assistant" | b"user" | b"cost-state"))
 }
 
 /// Context windows of Claude's models, from the model catalog built into Claude
@@ -268,6 +218,7 @@ pub fn context_window(model: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::Transcript;
 
     fn line(v: serde_json::Value) -> String {
         format!("{v}\n")

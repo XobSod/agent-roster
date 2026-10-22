@@ -5,6 +5,7 @@
 mod app;
 mod form;
 mod list;
+mod op;
 mod picker;
 mod theme;
 mod ui;
@@ -25,11 +26,13 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::text::Text;
 
+use crate::adopt::Adopt;
 use crate::agent;
-use crate::engine::{Adopt, Defaults, NewSession, Roster};
+use crate::engine::{Defaults, NewSession, Roster};
 use crate::keys::{Action, Keymap, Menu};
-use app::{App, Mode, Op};
+use app::{App, Mode};
 use list::{Entry, EntryKey, Group};
+use op::Op;
 
 /// How often states and the preview refresh.
 const TICK: Duration = Duration::from_secs(1);

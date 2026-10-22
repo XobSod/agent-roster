@@ -35,9 +35,11 @@ fn tui_walkthrough() {
     term.keys(&["Enter"]);
     term.wait_for("the project", "Added project demo");
 
-    // The session menu's form starts on the name; its screen shows in the preview.
+    // The session menu's form starts on the agent, then its name; its screen
+    // shows in the preview.
     term.keys(&["s", "n"]);
     term.wait_for("the new-session form", "New session");
+    term.keys(&["Down"]);
     term.text("one");
     term.keys(&["Enter"]);
     term.wait_for("the agent's screen in the preview", "fake agent:");
@@ -215,4 +217,33 @@ fn agents_drawing_full_screen_fit_the_preview() {
     t.wait_for("b fitted again", |_| size("b") == "96x30");
     // The classic agent (normal screen, scrollback in tmux) was never resized.
     assert_eq!(size("a"), "160x47");
+}
+
+#[test]
+fn pi_offers_the_models_it_lists() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("models") else {
+        return;
+    };
+    // A stand-in pi that only lists its models.
+    let pi = t.path("fake-pi");
+    std::fs::write(
+        &pi,
+        "#!/bin/sh\n[ \"$1\" = --list-models ] || exit 1\nprintf 'provider  model         context  max-out\\nfake      fake-model-1  1M       128K\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text += &format!("[agents.pi]\ncommand = \"{}\"\n", pi.display());
+    std::fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    term.keys(&["s", "n"]);
+    term.wait_for("the new-session form", "New session");
+    // Agent: pi; down past its name to the model, then its first model.
+    term.keys(&["Right", "Down", "Down", "Right"]);
+    term.wait_for("pi's model", "‹ fake-model-1 ›  1M context");
 }

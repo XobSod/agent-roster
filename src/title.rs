@@ -1,13 +1,12 @@
 //! Titles made for a session: Haiku names what its recent prompts are about.
 
 use std::path::Path;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::agent;
 use crate::engine::Roster;
+use crate::{agent, launch};
 
 impl Roster {
     /// Asks Haiku for a title from the session's recent prompts and keeps it as
@@ -46,7 +45,7 @@ impl Roster {
         for var in crate::tmux::LEAKY_ENV {
             cmd.env_remove(var);
         }
-        let output = run_with_timeout(cmd, "claude", TITLE_TIMEOUT)?;
+        let output = launch::run_with_timeout(cmd, "claude", TITLE_TIMEOUT)?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -84,45 +83,6 @@ fn clean_title(reply: &str) -> Option<String> {
     let line = line.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '#' | ' '));
     let title: String = line.chars().take(80).collect();
     (!title.is_empty()).then_some(title)
-}
-
-/// Runs `cmd` (`what`, in messages) to its end, for at most `timeout`. Its
-/// output is read meanwhile, so a full pipe can't hold it up.
-fn run_with_timeout(
-    mut cmd: std::process::Command,
-    what: &str,
-    timeout: Duration,
-) -> Result<std::process::Output> {
-    use std::io::Read;
-    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut out);
-            }
-            out
-        })
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{what} took longer than {}s", timeout.as_secs());
-        }
-        sleep(Duration::from_millis(100));
-    };
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
 }
 
 #[cfg(test)]

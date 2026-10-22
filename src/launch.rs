@@ -2,6 +2,10 @@
 //! (behaviour verified in bash, zsh and sh).
 
 use std::path::Path;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 
@@ -56,6 +60,45 @@ pub fn wrap(
     ];
     argv.extend(agent_argv.iter().cloned());
     argv
+}
+
+/// Runs `cmd` (`what`, in messages) to its end, for at most `timeout`. Its
+/// output is read meanwhile, so a full pipe can't hold it up.
+pub fn run_with_timeout(
+    mut cmd: std::process::Command,
+    what: &str,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut out);
+            }
+            out
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{what} took longer than {}s", timeout.as_secs());
+        }
+        sleep(Duration::from_millis(100));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]

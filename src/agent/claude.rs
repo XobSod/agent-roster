@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::{Adapter, Choices, Context, Launch, Report};
+use super::{Adapter, Ask, Choices, Context, Launch, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -49,11 +49,21 @@ impl Adapter for Claude {
     }
 
     fn choices(&self) -> Option<Choices> {
-        Some(Choices {
-            aliases: MODELS,
-            pinned: PINNED,
-            efforts: EFFORTS,
-        })
+        Some(Choices { efforts: EFFORTS })
+    }
+
+    /// Claude can't list its models, so roster knows them: the aliases, then
+    /// the current ones by id.
+    fn models(&self, _config: &Config, _ask: &Ask<'_>) -> Vec<Model> {
+        let aliases = MODELS.iter().map(|m| Model {
+            id: m.to_string(),
+            note: None,
+        });
+        let pinned = PINNED.iter().map(|id| Model {
+            id: id.to_string(),
+            note: Some(crate::util::model_name(id)),
+        });
+        aliases.chain(pinned).collect()
     }
 
     /// A new conversation, or its existing one resumed.

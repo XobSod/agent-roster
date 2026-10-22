@@ -13,6 +13,7 @@ mod ui;
 
 pub use ui::status_line;
 
+use std::collections::HashMap;
 use std::io::stdout;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -48,8 +49,17 @@ pub fn run(roster: &mut Roster) -> Result<()> {
         .unwrap_or_default();
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
+    // The agents' models, asked in the background: pi takes a moment to list
+    // its own. Forms offer what's known meanwhile.
+    let (send, models) = std::sync::mpsc::channel();
+    let list = roster.model_lister();
+    let agents = agent::available(&roster.config);
+    std::thread::spawn(move || {
+        let offered = agents.iter().map(|a| (a.clone(), list(a))).collect();
+        send.send(offered).ok();
+    });
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, roster, &mut app);
+    let result = event_loop(&mut terminal, roster, &mut app, &models);
     ratatui::restore();
     result
 }
@@ -93,10 +103,18 @@ fn only_one(state_dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App) -> Result<()> {
+fn event_loop(
+    terminal: &mut DefaultTerminal,
+    roster: &mut Roster,
+    app: &mut App,
+    models: &std::sync::mpsc::Receiver<HashMap<String, Vec<agent::Model>>>,
+) -> Result<()> {
     reload(roster, app);
     let mut last_reload = Instant::now();
     loop {
+        if let Ok(offered) = models.try_recv() {
+            app.models.offered = offered;
+        }
         terminal.draw(|f| ui::draw(f, app))?;
         // Redraw often enough to move the spinners, refresh the data once a tick.
         let until_reload = TICK.saturating_sub(last_reload.elapsed());
@@ -145,7 +163,7 @@ fn reload(roster: &mut Roster, app: &mut App) {
         (Err(e), _) | (_, Err(e)) => app.fail(format!("{e:#}")),
     }
     if let Ok(names) = roster.db.model_names() {
-        app.model_names = names;
+        app.models.names = names;
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
     // Only the session list shows the preview.

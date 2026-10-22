@@ -506,6 +506,40 @@ impl Roster {
         self.db.save_session(&s)
     }
 
+    /// What lists each agent's models (`Adapter::models`), to run anywhere,
+    /// a thread included: an agent's own command runs as its sessions would,
+    /// the global env file sourced (in roster's state directory, away from
+    /// any project's settings), for at most 10 seconds.
+    pub fn model_lister(&self) -> impl Fn(&str) -> Vec<agent::Model> + Send + 'static {
+        let config = Config {
+            agents: self.config.agents.clone(),
+            ..Config::default()
+        };
+        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
+        let global_env = self.paths.global_env();
+        let dir = self.paths.state_dir.clone();
+        move |name: &str| {
+            let ask = |argv: &[String]| -> Option<String> {
+                let argv = launch::wrap(&shell, &global_env, Path::new(""), argv);
+                let mut cmd = std::process::Command::new(&argv[0]);
+                cmd.args(&argv[1..])
+                    .current_dir(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null());
+                for var in crate::tmux::LEAKY_ENV {
+                    cmd.env_remove(var);
+                }
+                let output = launch::run_with_timeout(cmd, name, Duration::from_secs(10)).ok()?;
+                output
+                    .status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+            };
+            agent::adapter(name).models(&config, &ask)
+        }
+    }
+
     /// `argv` run by roster's shell for `s`, after it sources the env files:
     /// the global one, then that of `s`'s project.
     pub(crate) fn wrapped(&self, s: &Session, argv: &[String]) -> Result<Vec<String>> {

@@ -225,7 +225,7 @@ fn working_and_archived_sit_at_the_bottom_while_all_fits() {
 #[test]
 fn the_projects_view_shows_each_project() {
     let mut app = app();
-    app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
+    app.models.names = [("opus".to_string(), "Opus 5.5".to_string())].into();
     let mut projects = app.projects.clone();
     projects[0].model = Some("opus".into());
     projects.push(Project {
@@ -356,17 +356,19 @@ fn forms_show_fields_choices_and_hints() {
     let screen = render(&app, 120, 24);
     assert!(screen.contains(" New session "), "{screen}");
     assert!(screen.contains("Project    roster"), "{screen}");
-    assert!(screen.contains("▸ Name       automatic"), "{screen}");
+    assert!(screen.contains("▸ Agent      ‹ claude ›"), "{screen}");
+    assert!(screen.contains("Agent name automatic"), "{screen}");
     assert!(screen.contains("Effort     default"), "{screen}");
     assert!(
         screen.contains("optional: typed in once the agent is ready"),
         "{screen}"
     );
     assert!(screen.contains("Enter start · Esc cancel"), "{screen}");
+    assert!(screen.contains("←→ change"), "{screen}");
+    // Then the agent's name.
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let screen = render(&app, 120, 24);
-    assert!(screen.contains("▸ Agent      ‹ claude ›"), "{screen}");
-    assert!(screen.contains("←→ change"), "{screen}");
+    assert!(screen.contains("▸ Agent name automatic"), "{screen}");
     assert_eq!(tail("/a/very/long/path", 8), "…ng/path");
 }
 
@@ -403,7 +405,7 @@ fn cards_and_forms_show_the_model_claude_reports() {
     let mut sessions = app.sessions.clone();
     sessions[0].running_model = Some("claude-opus-5-5[1m]".into());
     app.set_data(app.projects.clone(), sessions);
-    app.model_names = [("opus".to_string(), "Opus 5.5".to_string())].into();
+    app.models.names = [("opus".to_string(), "Opus 5.5".to_string())].into();
     app.preview.stats = Some(crate::stats::AgentStats {
         prompts: Some(5),
         output_tokens: Some(92_000),

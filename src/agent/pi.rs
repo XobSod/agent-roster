@@ -12,7 +12,8 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Adapter, Choices, Context, Launch, Report};
+use super::{Adapter, Ask, Choices, Context, Launch, Model, Report};
+use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
 use transcript::PiTranscript;
@@ -36,13 +37,16 @@ impl Adapter for Pi {
         true
     }
 
-    /// Any model pi knows, by id or a part of its name; no list to offer.
     fn choices(&self) -> Option<Choices> {
-        Some(Choices {
-            aliases: &[],
-            pinned: &[],
-            efforts: THINKING,
-        })
+        Some(Choices { efforts: THINKING })
+    }
+
+    /// Those pi has credentials for, as `pi --list-models` lists them (it
+    /// takes any of its models by id or a part of its name, too).
+    fn models(&self, config: &Config, ask: &Ask<'_>) -> Vec<Model> {
+        let command = config.agent(PI).command.unwrap_or_else(|| PI.to_string());
+        let argv = [command, "--list-models".into(), "--offline".into()];
+        ask(&argv).map_or_else(Vec::new, |table| listed_models(&table))
     }
 
     /// `--session-id` opens the conversation, or creates it the first time.
@@ -79,6 +83,28 @@ impl Adapter for Pi {
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(PiTranscript::new(path)))
     }
+}
+
+/// The models in `pi --list-models`' table ("provider  model  context  …"),
+/// by id, with their context window; by `provider/id` if several providers
+/// offer one.
+fn listed_models(table: &str) -> Vec<Model> {
+    let rows: Vec<Vec<&str>> = table
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .filter(|r| r.len() >= 3 && r[0] != "provider")
+        .collect();
+    let offered = |id: &str| rows.iter().filter(|r| r[1] == id).count();
+    rows.iter()
+        .map(|r| Model {
+            id: if offered(r[1]) > 1 {
+                format!("{}/{}", r[0], r[1])
+            } else {
+                r[1].to_string()
+            },
+            note: Some(format!("{} context", r[2])),
+        })
+        .collect()
 }
 
 /// Puts the extension in roster's state directory, unless it's there already
@@ -177,6 +203,35 @@ mod tests {
             }
         );
         assert_eq!(read_report(PI, Some("[1, 2]")), Report::default());
+    }
+
+    #[test]
+    fn lists_the_models_pi_has() {
+        let table = "provider   model              context  max-out  thinking  images
+anthropic  claude-opus-4-8    1M       128K     yes       yes
+anthropic  claude-haiku-4-5   200K     64K      yes       yes
+openai     gpt-5              400K     128K     yes       yes
+openrouter gpt-5              400K     128K     yes       yes
+";
+        let ask = |argv: &[String]| {
+            assert_eq!(argv[1..], ["--list-models", "--offline"]);
+            Some(table.to_string())
+        };
+        let models = Pi.models(&config(), &ask);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "claude-opus-4-8",
+                "claude-haiku-4-5",
+                "openai/gpt-5",
+                "openrouter/gpt-5"
+            ]
+        );
+        assert_eq!(models[0].note.as_deref(), Some("1M context"));
+        // It failed, or printed nothing: none to offer, any can be typed.
+        assert!(Pi.models(&config(), &|_| None).is_empty());
+        assert!(Pi.models(&config(), &|_| Some(String::new())).is_empty());
     }
 
     #[test]

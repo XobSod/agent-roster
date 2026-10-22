@@ -74,7 +74,7 @@ enum Cmd {
         /// holding its directory, else a new one named after the directory)
         #[arg(long)]
         project: Option<String>,
-        /// Session name (default: claude-1, claude-2, …)
+        /// The agent's name in the project (default: claude-1, claude-2, …)
         #[arg(long)]
         name: Option<String>,
         /// Claude model (default: the project's; "default" for Claude's own)
@@ -96,6 +96,7 @@ enum Cmd {
     /// Rename a session, set its title, or change its model and effort (applies on its next start)
     Edit {
         session: String,
+        /// The agent's name in the project
         #[arg(long)]
         name: Option<String>,
         /// A title of your own ("" follows the agent's title again)
@@ -225,6 +226,7 @@ enum ProjectCmd {
 /// What a new session or chat should be.
 #[derive(clap::Args)]
 struct SessionArgs {
+    /// The agent's name in the project, a role say (default: <agent>-1, <agent>-2, …)
     #[arg(short, long)]
     name: Option<String>,
     /// claude, pi, or an agent from [agents] in config.toml (default: the project's)

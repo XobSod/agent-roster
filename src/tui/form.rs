@@ -116,8 +116,32 @@ pub struct Form {
     projects: Vec<Project>,
     /// The project the session fields were last filled in from.
     filled_from: Option<String>,
+    models: Models,
+}
+
+/// What forms know of agents' models.
+#[derive(Clone, Debug, Default)]
+pub struct Models {
+    /// Each agent's to offer (`Adapter::models`), by agent.
+    pub offered: std::collections::HashMap<String, Vec<agent::Model>>,
     /// What models asked for turned out to be (`Db::model_names`).
-    model_names: std::collections::HashMap<String, String>,
+    pub names: std::collections::HashMap<String, String>,
+}
+
+impl Models {
+    /// What's known without asking the agents: the lists roster has itself
+    /// (Claude's).
+    pub fn known() -> Models {
+        let unasked: &agent::Ask<'_> = &|_| None;
+        let config = crate::config::Config::default();
+        Models {
+            offered: agent::BUILT_IN
+                .iter()
+                .map(|a| (a.to_string(), agent::adapter(a).models(&config, unasked)))
+                .collect(),
+            names: Default::default(),
+        }
+    }
 }
 
 fn options(first: &str, rest: &[&str]) -> Vec<String> {
@@ -229,13 +253,15 @@ impl Form {
             .map_or(String::new(), |p| p.name.clone());
         let fields = vec![
             Field::new(Id::Project, "Project", Kind::Choice(names), project),
-            Field::new(Id::Name, "Name", text("automatic"), ""),
             Field::new(
                 Id::Agent,
                 "Agent",
                 Kind::Choice(agents.to_vec()),
                 agent::DEFAULT,
             ),
+            // The agent's name in the project (a role, say); its title is
+            // another thing, the task it's on.
+            Field::new(Id::Name, "Agent name", text("automatic"), ""),
             model_field(DEFAULT),
             effort_field(DEFAULT),
             Field::new(
@@ -251,7 +277,7 @@ impl Form {
             fields,
             projects.to_vec(),
         );
-        // Start on the name when the project is already chosen.
+        // Start on the agent when the project is already chosen.
         if selected.is_some() || projects.len() == 1 {
             form.focus = 1;
         }
@@ -260,7 +286,8 @@ impl Form {
 
     pub fn edit_session(s: &Session) -> Form {
         let fields = vec![
-            Field::new(Id::Name, "Name", text(""), &s.name),
+            Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
+            Field::new(Id::Name, "Agent name", text(""), &s.name),
             Field::new(
                 Id::Title,
                 "Title",
@@ -271,16 +298,17 @@ impl Form {
                 )),
                 s.title_override.clone().unwrap_or_default(),
             ),
-            Field::new(Id::Agent, "Agent", Kind::Info, &s.agent),
             model_field(or_default(&s.model)),
             effort_field(or_default(&s.effort)),
         ];
-        Form::build(
+        let mut form = Form::build(
             Purpose::EditSession(s.id.clone()),
             format!("Edit session {}", s.label()),
             fields,
             Vec::new(),
-        )
+        );
+        form.focus = form.fields.iter().position(Field::focusable).unwrap_or(0);
+        form
     }
 
     /// Adopting `a`: into the project holding its directory, or a new one.
@@ -324,7 +352,8 @@ impl Form {
             Field::new(Id::Conversation, "Adopting", Kind::Info, what),
             Field::new(Id::Directory, "Directory", Kind::Info, directory),
             project,
-            Field::new(Id::Name, "Name", text("automatic"), ""),
+            Field::new(Id::Agent, "Agent", Kind::Info, CLAUDE),
+            Field::new(Id::Name, "Agent name", text("automatic"), ""),
             model_field(or_default(&defaults.and_then(|p| p.model.clone()))),
             effort_field(or_default(&defaults.and_then(|p| p.effort.clone()))),
             copy,
@@ -352,17 +381,17 @@ impl Form {
             note: None,
             projects,
             filled_from: None,
-            model_names: Default::default(),
+            models: Models::known(),
         };
         form.update();
         form
     }
 
-    /// What each model choice is, shown next to it: the default or an alias
-    /// as it turned out (`names`, learned from sessions; "latest" until known),
-    /// a pinned id by its name.
-    pub fn with_model_names(mut self, names: &std::collections::HashMap<String, String>) -> Form {
-        self.model_names = names.clone();
+    /// The models to offer for each agent, and what each is: the default or
+    /// an alias as it turned out (learned from sessions; "latest" until
+    /// known), any other by what its agent says of it.
+    pub fn with_models(mut self, models: &Models) -> Form {
+        self.models = models.clone();
         self.update();
         self
     }
@@ -389,17 +418,25 @@ impl Form {
         self.field(id).map_or("", |f| f.value.as_str())
     }
 
-    /// The agent the form is about; without an agent field, it adopts a
-    /// conversation, which is Claude's.
+    /// The agent the form is about: its Agent field's.
     fn agent(&self) -> &str {
         self.field(Id::Agent).map_or(CLAUDE, |f| f.value.as_str())
     }
 
-    /// What the agent's model choices are (see `with_model_names`).
+    /// The models the form's agent offers (see `with_models`).
+    fn offered(&self) -> &[agent::Model] {
+        self.models
+            .offered
+            .get(self.agent())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// What the agent's model choices are (see `with_models`).
     fn model_notes(&self) -> std::collections::HashMap<String, String> {
         let agent = self.agent();
         let learned = |asked: &str| {
-            self.model_names
+            self.models
+                .names
                 .get(&agent::learned_key(agent, asked))
                 .cloned()
         };
@@ -415,16 +452,12 @@ impl Form {
             DEFAULT.to_string(),
             learned(DEFAULT).unwrap_or_else(|| format!("{name}'s default")),
         );
-        if let Some(c) = agent::adapter(agent).choices() {
-            for alias in c.aliases {
-                notes.insert(
-                    alias.to_string(),
-                    learned(alias).unwrap_or_else(|| "latest".into()),
-                );
-            }
-            for id in c.pinned {
-                notes.insert(id.to_string(), crate::util::model_name(id));
-            }
+        for m in self.offered() {
+            let note = match &m.note {
+                Some(note) => note.clone(),
+                None => learned(&m.id).unwrap_or_else(|| "latest".into()),
+            };
+            notes.insert(m.id.clone(), note);
         }
         notes
     }
@@ -440,12 +473,11 @@ impl Form {
         // Model and effort choices are the agent's; one that takes neither hides them.
         let choices = agent::adapter(self.agent()).choices();
         let notes = self.model_notes();
+        let offered: Vec<String> = self.offered().iter().map(|m| m.id.clone()).collect();
         if let Some(f) = self.field_mut(Id::Model) {
             f.hidden = choices.is_none();
-            f.kind = Kind::Combo(options(
-                DEFAULT,
-                &choices.map_or(Vec::new(), |c| c.models()),
-            ));
+            let offered: Vec<&str> = offered.iter().map(String::as_str).collect();
+            f.kind = Kind::Combo(options(DEFAULT, &offered));
             f.notes = notes;
         }
         if let Some(f) = self.field_mut(Id::Effort) {
@@ -653,7 +685,7 @@ impl Form {
             },
             Purpose::EditSession(id) => Op::EditSession {
                 id: id.clone(),
-                name: required(Id::Name, "The name")?,
+                name: required(Id::Name, "The agent name")?,
                 title: self.setting(Id::Title),
                 model: model(),
                 effort: effort(),
@@ -831,10 +863,43 @@ mod tests {
     }
 
     #[test]
+    fn each_agent_offers_its_own_models() {
+        let projects = vec![project("alpha", None)];
+        let mut models = Models::known();
+        models.offered.insert(
+            "pi".into(),
+            vec![agent::Model {
+                id: "claude-opus-4-8".into(),
+                note: Some("1M context".into()),
+            }],
+        );
+        let agents = vec!["claude".to_string(), "pi".to_string()];
+        let mut form =
+            Form::new_session(&projects, Some(&projects[0]), &agents).with_models(&models);
+        form.on_key(key(KeyCode::Right)); // pi
+        assert_eq!(form.value(Id::Agent), "pi");
+        let model = form.fields.iter().position(|f| f.id == Id::Model).unwrap();
+        form.focus = model;
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Model), "claude-opus-4-8");
+        assert_eq!(form.fields[model].notes["claude-opus-4-8"], "1M context");
+        assert_eq!(form.fields[model].notes["default"], "Pi's default");
+        // Back to Claude: its own list, its aliases first.
+        form.focus = 1;
+        form.on_key(key(KeyCode::Left));
+        form.focus = model;
+        form.on_key(key(KeyCode::Left));
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Model), "opus");
+    }
+
+    #[test]
     fn new_session_takes_the_projects_defaults() {
         let projects = vec![project("alpha", Some("opus")), project("beta", None)];
         let mut form = Form::new_session(&projects, Some(&projects[0]), &agents());
-        assert_eq!(form.fields[form.focus].id, Id::Name);
+        // The agent comes first, then its name.
+        assert_eq!(form.fields[form.focus].id, Id::Agent);
+        assert_eq!(form.fields[form.focus + 1].label, "Agent name");
         assert_eq!(
             (form.value(Id::Model), form.value(Id::Effort)),
             ("opus", "high")

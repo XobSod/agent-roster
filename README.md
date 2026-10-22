@@ -141,11 +141,12 @@ Roster starts [pi](https://github.com/earendil-works/pi) with an extension of it
 `-e ~/.local/state/agent-roster/pi/agent-roster.ts`, for its sessions only; your pi
 settings and extensions stay as they are. The extension reports pi's state to roster:
 working, idle, needs input while a dialog (an extension asking permission, say) holds
-up a turn. A session's model is anything pi's `--model` takes, its effort pi's
-thinking level, and its title the name you give pi's session (`/name`). `/new` starts
-a new conversation in the same session; starting it again resumes the last one
-(`--session-id`). The statistics come from pi's session file, cost included, with the
-context window pi reports for the model. Adopting conversations is for Claude's only.
+up a turn. A session's model is anything pi's `--model` takes (forms offer the ones
+`pi --list-models` lists), its effort pi's thinking level, and its title the name you
+give pi's session (`/name`). `/new` starts a new conversation in the same session;
+starting it again resumes the last one (`--session-id`). The statistics come from pi's
+session file, cost included, with the context window pi reports for the model.
+Adopting conversations is for Claude's only.
 
 ## Scrolling back
 

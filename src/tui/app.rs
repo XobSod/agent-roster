@@ -111,8 +111,8 @@ pub struct App {
     default_path: String,
     /// Agents that can be started, for the forms.
     agents: Vec<String>,
-    /// What each model alias last turned out to be, for the forms.
-    pub model_names: std::collections::HashMap<String, String>,
+    /// The agents' models, for the forms: which to offer, what each is.
+    pub models: form::Models,
     /// Oldest or newest first, per shelf (config.toml).
     pub order: crate::config::Order,
 }
@@ -151,7 +151,7 @@ impl App {
             keep_row: None,
             default_path,
             agents,
-            model_names: Default::default(),
+            models: form::Models::known(),
             order: Default::default(),
         }
     }
@@ -163,7 +163,7 @@ impl App {
 
     /// A form in a dialog, with what model choices turned out to be.
     pub(super) fn open_form(&mut self, form: Form) {
-        self.dialog = Some(Dialog::Form(form.with_model_names(&self.model_names)));
+        self.dialog = Some(Dialog::Form(form.with_models(&self.models)));
     }
 
     /// Replaces the data, keeping the selection on the same entry.

@@ -66,9 +66,18 @@ pub trait Adapter: Sync {
         false
     }
 
-    /// The models and efforts a session can ask for; None if it takes neither.
+    /// The efforts a session can ask for; None if it takes neither a model
+    /// nor an effort.
     fn choices(&self) -> Option<Choices> {
         None
+    }
+
+    /// The models to offer for a session, for forms (any other name can be
+    /// typed). An agent that can list its own does, through `ask`, which runs
+    /// a command of its in the environment its sessions get and returns what
+    /// it printed (None if it failed); others know theirs.
+    fn models(&self, _config: &Config, _ask: &Ask<'_>) -> Vec<Model> {
+        Vec::new()
     }
 
     /// The command line that starts `s`, given its command and the config's
@@ -112,22 +121,24 @@ pub fn adapter(name: &str) -> &'static dyn Adapter {
     }
 }
 
-/// The models and efforts an agent takes.
+/// The efforts an agent takes.
 #[derive(Clone, Copy, Debug)]
 pub struct Choices {
-    /// Names that follow the latest version ("opus").
-    pub aliases: &'static [&'static str],
-    /// Full model ids, for pinning a version.
-    pub pinned: &'static [&'static str],
     pub efforts: &'static [&'static str],
 }
 
-impl Choices {
-    /// The aliases, then the pinned ids.
-    pub fn models(&self) -> Vec<&'static str> {
-        self.aliases.iter().chain(self.pinned).copied().collect()
-    }
+/// A model to offer for a session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Model {
+    /// What the agent's model option takes.
+    pub id: String,
+    /// Shown next to it. None for an alias, which follows the latest version:
+    /// what it last turned out to be shows instead ("latest" until known).
+    pub note: Option<String>,
 }
+
+/// Runs an agent's command (its argv) and returns what it printed.
+pub type Ask<'a> = dyn Fn(&[String]) -> Option<String> + 'a;
 
 /// What an agent reported besides its state: `Adapter::report` reads it from
 /// the payload, whatever its agent calls things. An agent whose reports roster

@@ -16,11 +16,25 @@ screen.
 
 ## Install
 
-Requires tmux ≥ 3.2 and Claude Code on `PATH`; pi is offered too once it's installed.
+Requires tmux ≥ 3.2, an agent on `PATH` (Claude Code, pi, or any CLI agent you
+[configure](#configure)), and to build it a recent stable Rust
+([rustup](https://rustup.rs)).
 
 ```sh
-cargo install --path .     # installs `roster` into ~/.cargo/bin
+cargo install --git https://github.com/XobSod/agent-roster   # roster into ~/.cargo/bin
 ```
+
+From a clone:
+
+```sh
+cargo install --path .     # the same, from the checkout
+cargo build --release      # or only build it: ./target/release/roster
+cargo build                # a debug build, quicker to build, slower to run: ./target/debug/roster
+```
+
+Installing puts only the `roster` binary in place. What else roster needs it makes
+as it runs, in `~/.local/state/agent-roster/`: its database, its tmux config, and
+the extension it loads into the [pi](#pi) sessions it starts.
 
 To scroll back through an agent's history while attached, also set up
 [scrolling back](#scrolling-back), and if you run roster inside your own tmux, the
@@ -163,7 +177,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     ```
 
   - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
-    for pi's classic screen, `args = ["--tui-mode", "regular"]`), and `title_model`, the
+    for pi on the normal screen, so tmux's copy mode scrolls its history,
+    `args = ["--tui-mode", "regular"]`), and `title_model`, the
     model a generated title (`s t`) is made with: Claude's default is `haiku`, pi's its
     own default model. Any other agent goes in its own table and is then offered for
     new sessions:
@@ -218,6 +233,10 @@ keys, `PgUp`/`PgDn`, or `Ctrl+O` for the transcript, which scrolls like `less`
 (`j`/`k`, `Ctrl+U`/`Ctrl+D`, `g`/`G`, `/` to search) and where `[` writes the whole
 conversation into tmux's history, for copy mode. Its docs say the mouse wheel needs
 tmux's mouse mode: `set -g mouse on` in roster's `tmux.conf`.
+
+pi draws full screen by default, the same way. For copy mode, run it on the normal
+screen instead: `args = ["--tui-mode", "regular"]` under `[agents.pi]` in
+`config.toml`, from its next start.
 
 ## Inside your own tmux
 

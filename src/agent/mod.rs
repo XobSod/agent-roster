@@ -66,6 +66,12 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// How lists mark its sessions; None for the generic mark, which says only
+    /// that it's an agent, so lists name it as well.
+    fn mark(&self) -> Option<Mark> {
+        None
+    }
+
     /// The efforts a session can ask for; None if it takes neither a model
     /// nor an effort.
     fn choices(&self) -> Option<Choices> {
@@ -128,6 +134,13 @@ pub fn adapter(name: &str) -> &'static dyn Adapter {
         PI => &pi::Pi,
         _ => &Generic,
     }
+}
+
+/// An agent's mark in lists: a glyph, in its colour if it has one.
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    pub glyph: &'static str,
+    pub rgb: Option<(u8, u8, u8)>,
 }
 
 /// The efforts an agent takes.

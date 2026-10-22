@@ -15,8 +15,6 @@ pub const WORKING: Color = Color::Rgb(100, 160, 240);
 pub const INPUT: Color = Color::Rgb(240, 180, 80);
 pub const UNREAD: Color = Color::Rgb(90, 210, 150);
 pub const ERROR: Color = Color::Rgb(235, 105, 105);
-/// Claude's brand orange, for its glyph.
-pub const CLAUDE: Color = Color::Rgb(217, 119, 87);
 
 /// Badge colours; a project gets one by a hash of its name.
 const PROJECT_COLORS: [Color; 12] = [

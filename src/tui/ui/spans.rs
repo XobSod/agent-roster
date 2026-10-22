@@ -23,29 +23,41 @@ pub(crate) fn badge(project: &str) -> Span<'static> {
     )
 }
 
+/// The agent's mark (its adapter's), else the generic one.
 pub(super) fn glyph(agent: &str) -> Span<'static> {
-    match agent {
-        crate::agent::CLAUDE => Span::styled("✱", Style::new().fg(CLAUDE)),
-        // Pi's logo is in plain black and white.
-        crate::agent::PI => Span::raw("π"),
-        _ => Span::styled("◇", Style::new().fg(MUTED)),
+    match crate::agent::adapter(agent).mark() {
+        Some(m) => {
+            let style = m.rgb.map_or(Style::new(), |(r, g, b)| {
+                Style::new().fg(ratatui::style::Color::Rgb(r, g, b))
+            });
+            Span::styled(m.glyph, style)
+        }
+        None => Span::styled("◇", Style::new().fg(MUTED)),
     }
 }
 
-/// The card's second line after the name: model and effort (and the agent, if
-/// not the default one).
-pub(super) fn meta(s: &Session) -> String {
-    let mut meta = String::new();
-    if s.agent != crate::agent::DEFAULT {
-        meta.push_str(&format!(" · {}", s.agent));
+/// A card's second line: the agent's mark, then the name if it was chosen
+/// (a made-up one only repeats the type), the type in words if its mark
+/// doesn't say it, the model and the effort.
+pub(super) fn details(s: &Session, name_marks: &[usize], style: Style) -> Vec<Span<'static>> {
+    let mut parts = Vec::new();
+    if !s.has_default_name() {
+        parts.push(marked(&s.name, name_marks, style));
     }
-    match (s.model_label(), s.effort_label()) {
-        (Some(m), Some(e)) => meta.push_str(&format!(" · {m} {e}")),
-        (Some(m), None) => meta.push_str(&format!(" · {m}")),
-        (None, Some(e)) => meta.push_str(&format!(" · {e}")),
-        (None, None) => {}
+    if crate::agent::adapter(&s.agent).mark().is_none() {
+        parts.push(vec![Span::styled(s.agent.clone(), style)]);
     }
-    meta
+    let model = [s.model_label(), s.effort_label()];
+    let model: Vec<String> = model.into_iter().flatten().collect();
+    if !model.is_empty() {
+        parts.push(vec![Span::styled(model.join(" "), style)]);
+    }
+    let mut spans = vec![glyph(&s.agent)];
+    for (i, part) in parts.into_iter().enumerate() {
+        spans.push(Span::styled(if i == 0 { " " } else { " · " }, style));
+        spans.extend(part);
+    }
+    spans
 }
 
 /// The state at the right of a card: a word, a spinner with a clock, or an age.

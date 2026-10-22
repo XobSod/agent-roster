@@ -413,7 +413,7 @@ fn cards_and_forms_show_the_model_claude_reports() {
     });
     let screen = render(&app, 120, 16);
     assert!(
-        screen.contains("api · Opus 5.5 (1M) high") && screen.contains("2d ✱"),
+        screen.contains("✱ api · Opus 5.5 (1M) high   2d"),
         "{screen}"
     );
     assert!(
@@ -524,4 +524,34 @@ fn sessions_without_a_screen_say_what_they_were() {
         shown.contains("s s starts it; it resumes its conversation"),
         "{shown}"
     );
+}
+
+#[test]
+fn details_name_what_the_mark_doesnt_say() {
+    let text = |s: &Session| -> String {
+        details(s, &[], Style::new())
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect()
+    };
+    let mut s = session("a1");
+    s.model = Some("opus".into());
+    s.effort = Some("high".into());
+    // A made-up name only repeats the type; a chosen one says something.
+    s.name = "claude-1".into();
+    assert_eq!(text(&s), "✱ opus high");
+    s.name = "tester".into();
+    assert_eq!(text(&s), "✱ tester · opus high");
+    s.agent = "pi".into();
+    s.name = "pi-1".into();
+    assert_eq!(text(&s), "π opus high");
+    s.name = "MyName".into();
+    assert_eq!(text(&s), "π MyName · opus high");
+    // The generic mark doesn't say which agent it is: its type does.
+    s.agent = "aider".into();
+    (s.model, s.effort) = (None, None);
+    s.name = "aider-1".into();
+    assert_eq!(text(&s), "◇ aider");
+    s.name = "reviewer".into();
+    assert_eq!(text(&s), "◇ reviewer · aider");
 }

@@ -269,47 +269,48 @@ pub(super) fn card(
     let meta_style = Style::new().fg(meta_color);
     let second = fit(
         width,
-        [
-            vec![Span::raw("   ")],
-            marked(&s.name, &hit.name, meta_style),
-            vec![Span::styled(meta(s), meta_style)],
-        ]
-        .concat(),
-        vec![
-            Span::styled(
-                format!("{} ", theme::ago(now - s.created_at)),
-                Style::new().fg(FAINT),
-            ),
-            glyph(&s.agent),
-            Span::raw(" "),
-        ],
+        [vec![Span::raw("   ")], details(s, &hit.name, meta_style)].concat(),
+        vec![Span::styled(
+            format!("{} ", theme::ago(now - s.created_at)),
+            Style::new().fg(FAINT),
+        )],
     );
     lines.extend([first, second]);
     lines
 }
 
-/// A stopped or archived session's line: project / title, its state and its
-/// agent.
+/// A stopped or archived session's line: its agent's mark, project / title,
+/// and its state.
 pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
-    // Its state, then its agent's mark, where a card has it.
-    let mut right = match s.deleted_at {
+    let right = match s.deleted_at {
         Some(at) => vec![Span::styled(
-            format!("archived {}", theme::ago(now - at)),
+            format!("archived {} ", theme::ago(now - at)),
             Style::new().fg(FAINT),
         )],
-        None => status(s, now),
+        None => [status(s, now), vec![Span::raw(" ")]].concat(),
     };
-    right.extend([Span::raw(" "), glyph(&s.agent), Span::raw(" ")]);
     let none = Hit::default();
     let hit = hit(app, s).unwrap_or(&none);
     let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));
     // Grouped by project, the heading right above says it; archived sessions
     // come from every project.
+    // Its agent's mark first, as on a card's details.
     let left = if app.grouped && s.deleted_at.is_none() {
-        [vec![Span::raw("   ")], title].concat()
+        [
+            vec![Span::raw("   "), glyph(&s.agent), Span::raw(" ")],
+            title,
+        ]
+        .concat()
     } else {
         let slash = Span::styled(" / ", Style::new().fg(FAINT));
-        [project_name(&s.project, &hit.project), vec![slash], title].concat()
+        let mark = vec![glyph(&s.agent), Span::raw(" ")];
+        [
+            mark,
+            project_name(&s.project, &hit.project),
+            vec![slash],
+            title,
+        ]
+        .concat()
     };
     fit(width, left, right)
 }

@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Adapter, Ask, Choices, Context, Launch, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Launch, Mark, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -35,6 +35,14 @@ impl Adapter for Pi {
 
     fn resumes(&self) -> bool {
         true
+    }
+
+    /// Its π, in the terminal's colour: its logo is black and white.
+    fn mark(&self) -> Option<Mark> {
+        Some(Mark {
+            glyph: "π",
+            rgb: None,
+        })
     }
 
     fn choices(&self) -> Option<Choices> {

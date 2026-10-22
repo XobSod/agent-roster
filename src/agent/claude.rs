@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::{Adapter, Ask, Choices, Context, Launch, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Launch, Mark, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -46,6 +46,14 @@ impl Adapter for Claude {
 
     fn adopts(&self) -> bool {
         true
+    }
+
+    /// Its spark, in its brand orange.
+    fn mark(&self) -> Option<Mark> {
+        Some(Mark {
+            glyph: "✱",
+            rgb: Some((217, 119, 87)),
+        })
     }
 
     fn choices(&self) -> Option<Choices> {

@@ -41,9 +41,10 @@ impl App {
                         open_in: Some(pid), ..
                     } = form.purpose =>
                 {
+                    let agent = crate::util::capitalize(form.agent());
                     self.confirm(
                         format!(
-                            "It's open in Claude (pid {pid}): two Claudes would write one conversation. Adopt it anyway?"
+                            "It's open in {agent} (pid {pid}): two would write one conversation. Adopt it anyway?"
                         ),
                         op,
                     );

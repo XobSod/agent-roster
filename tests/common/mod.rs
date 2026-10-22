@@ -79,6 +79,11 @@ impl TestEnv {
         self.path("claude")
     }
 
+    /// pi's own directory (`PI_CODING_AGENT_DIR`), likewise.
+    pub fn pi_dir(&self) -> PathBuf {
+        self.path("pi")
+    }
+
     /// A conversation Claude kept, as if run in `cwd`, with Claude's title.
     pub fn conversation(&self, id: &str, cwd: &std::path::Path, title: &str) -> PathBuf {
         let folder = self.claude_dir().join("projects").join("-somewhere");
@@ -135,6 +140,8 @@ impl TestEnv {
             .env("XDG_STATE_HOME", self.path("state"))
             .env("ROSTER_TMUX_SOCKET", &self.socket)
             .env("CLAUDE_CONFIG_DIR", self.claude_dir())
+            .env("PI_CODING_AGENT_DIR", self.pi_dir())
+            .env_remove("PI_CODING_AGENT_SESSION_DIR")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("ROSTER_SESSION")
@@ -146,11 +153,12 @@ impl TestEnv {
     /// The same as a shell command line, for running roster in a terminal.
     pub fn shell_command(&self) -> String {
         format!(
-            "env -u TMUX -u TMUX_PANE XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' CLAUDE_CONFIG_DIR='{}' '{}'",
+            "env -u TMUX -u TMUX_PANE -u PI_CODING_AGENT_SESSION_DIR XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' CLAUDE_CONFIG_DIR='{}' PI_CODING_AGENT_DIR='{}' '{}'",
             self.path("config").display(),
             self.path("state").display(),
             self.socket,
             self.claude_dir().display(),
+            self.pi_dir().display(),
             env!("CARGO_BIN_EXE_roster"),
         )
     }

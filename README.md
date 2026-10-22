@@ -73,10 +73,11 @@ carry a default agent, model and effort for their sessions; a new session can al
 get a first prompt, typed into the agent once it's ready. `s c` starts a chat, a
 session that needs no project: chats share one directory in a built-in project.
 
-A Claude conversation started outside roster (plain `claude`, another session manager)
-can be adopted with `s a`: pick it (typing filters, `Tab` shows those outside your
-projects), and it continues as a session here, in its project or a new one for its
-directory. Close it where it's open first, or adopt a copy and leave the original alone.
+A Claude or pi conversation started outside roster (plain `claude` or `pi`, another
+session manager) can be adopted with `s a`: pick it (typing filters, `Tab` shows those
+outside your projects), and it continues as a session here, in its project or a new one
+for its directory. Close it where it's open first, or adopt a copy and leave the
+original alone. Roster can tell when one is open in Claude, but not in pi.
 
 Everything is also available from the CLI:
 
@@ -90,7 +91,7 @@ roster edit api --model sonnet          # applies on the next start
 roster edit api --title "Auth rework"   # your title; --title "" follows Claude's again
 roster retitle api                      # a fresh title from its agent, from the recent prompts
 roster info api                         # created, prompts, time worked, context, tokens, cost
-roster adopt --list                     # Claude conversations started elsewhere (--all: not only in your projects)
+roster adopt --list                     # Claude and pi conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen
@@ -100,7 +101,7 @@ roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
 roster archive api && roster restore api   # archived sessions keep their conversation
-roster rm api                           # delete an archived session for good (a Claude conversation can be adopted again)
+roster rm api                           # delete an archived session for good (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
 ```
@@ -213,8 +214,9 @@ up a turn. A session's model is anything pi's `--model` takes (forms offer the o
 after the first turn (with `title_model`), or the name you give its session (`/name`).
 `/new` starts a new conversation in the same session; starting it again resumes the
 last one (`--session-id`). The statistics come from pi's session file, cost included,
-with the context window pi reports for the model. Adopting conversations is for
-Claude's only.
+with the context window pi reports for the model. Its conversations started elsewhere
+can be adopted, from `~/.pi/agent/sessions` (or where `PI_CODING_AGENT_DIR` or
+`PI_CODING_AGENT_SESSION_DIR` say); a copy is forked with `--fork`.
 
 ## Scrolling back
 

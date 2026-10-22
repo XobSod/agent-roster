@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::{Adapter, Ask, Choices, Context, Launch, Mark, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -46,6 +46,11 @@ impl Adapter for Claude {
 
     fn adopts(&self) -> bool {
         true
+    }
+
+    fn conversations(&self, wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
+        conversations::claude_dir()
+            .map_or_else(Vec::new, |dir| conversations::conversations(&dir, wanted))
     }
 
     /// Its spark, in its brand orange.

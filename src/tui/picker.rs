@@ -109,12 +109,13 @@ fn haystack(a: &Adoptable) -> String {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::agent::claude::conversations::Conversation;
+    use crate::agent::Conversation;
     use ratatui::crossterm::event::KeyModifiers;
 
     pub fn adoptable(id: &str, title: &str, project: Option<&str>) -> Adoptable {
         Adoptable {
             conversation: Conversation {
+                agent: "claude".into(),
                 id: id.into(),
                 path: format!("/c/{id}.jsonl").into(),
                 cwd: format!("/{}", project.unwrap_or("elsewhere")).into(),

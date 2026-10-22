@@ -63,6 +63,12 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// The conversations it has kept, started in roster or not, whose id
+    /// `wanted` says yes to (only their files are read), for adopting.
+    fn conversations(&self, _wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
+        Vec::new()
+    }
+
     /// How lists mark its sessions; None for the generic mark, which says only
     /// that it's an agent, so lists name it as well.
     fn mark(&self) -> Option<Mark> {
@@ -138,6 +144,84 @@ pub fn adapter(name: &str) -> &'static dyn Adapter {
         PI => &pi::Pi,
         _ => &Generic,
     }
+}
+
+/// A conversation an agent has kept, as `Adapter::conversations` finds it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversation {
+    pub agent: String,
+    pub id: String,
+    pub path: std::path::PathBuf,
+    /// Where it ran; it's resumed there.
+    pub cwd: std::path::PathBuf,
+    pub branch: Option<String>,
+    /// The name it was given (`claude --name`, `/rename`, pi's `/name`, or a
+    /// session manager).
+    pub custom_title: Option<String>,
+    /// The agent's own title for it.
+    pub title: Option<String>,
+    pub first_prompt: Option<String>,
+    pub last_prompt: Option<String>,
+    /// The model it last used.
+    pub model: Option<String>,
+    /// When the file last changed, in ms.
+    pub modified: i64,
+    /// A process of the agent's that has it open right now, if the agent
+    /// tells (Claude does).
+    pub open_in: Option<i32>,
+}
+
+impl Conversation {
+    /// What to call it, on one line: its name, the agent's title, else a prompt.
+    pub fn label(&self) -> String {
+        [
+            &self.custom_title,
+            &self.title,
+            &self.first_prompt,
+            &self.last_prompt,
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map_or(String::new(), |s| crate::util::one_line(s))
+    }
+}
+
+/// A conversation file's lines worth reading for what it says about itself:
+/// a small file whole, a larger one's start and end (the line cut at the
+/// start of the end left out), as JSON; and when it last changed, in ms.
+pub(crate) fn file_ends(path: &Path) -> Option<(Vec<serde_json::Value>, i64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    const HEAD: u64 = 64 * 1024;
+    const TAIL: u64 = 512 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    if meta.len() <= HEAD + TAIL {
+        file.read_to_end(&mut head).ok()?;
+    } else {
+        (&mut file).take(HEAD).read_to_end(&mut head).ok()?;
+        file.seek(SeekFrom::Start(meta.len() - TAIL)).ok()?;
+        file.read_to_end(&mut tail).ok()?;
+        let cut = tail
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(tail.len(), |i| i + 1);
+        tail.drain(..cut);
+    }
+    let entries = head
+        .split(|b| *b == b'\n')
+        .chain(tail.split(|b| *b == b'\n'))
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect();
+    Some((entries, modified))
 }
 
 /// An agent's mark in lists: a glyph, in its colour if it has one.

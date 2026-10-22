@@ -43,7 +43,7 @@ pub enum Op {
         model: Option<String>,
         effort: Option<String>,
         fork: bool,
-        /// Even though it's open in Claude.
+        /// Even though it's open in its agent.
         force: bool,
     },
     AddProject {

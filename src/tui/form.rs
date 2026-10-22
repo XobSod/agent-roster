@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input;
 use super::op::Op;
-use crate::agent::{self, CLAUDE};
+use crate::agent;
 use crate::model::{Project, Session};
 use crate::paths::PROJECT_ENV;
 use crate::util::expand_tilde;
@@ -335,7 +335,10 @@ impl Form {
         let defaults = a.project.as_ref();
         let moved = match c.open_in {
             Some(pid) => {
-                format!("move it; it's open in Claude (pid {pid}), close it there")
+                format!(
+                    "move it; it's open in {} (pid {pid}), close it there",
+                    crate::util::capitalize(&c.agent)
+                )
             }
             None => "move it; resume it only here from now on".to_string(),
         };
@@ -357,7 +360,7 @@ impl Form {
             Field::new(Id::Conversation, "Adopting", Kind::Info, what),
             Field::new(Id::Directory, "Directory", Kind::Info, directory),
             project,
-            Field::new(Id::Agent, "Agent", Kind::Info, CLAUDE),
+            Field::new(Id::Agent, "Agent", Kind::Info, &c.agent),
             Field::new(Id::Name, "Agent name", text("automatic"), ""),
             model_field(or_default(&defaults.and_then(|p| p.model.clone()))),
             effort_field(or_default(&defaults.and_then(|p| p.effort.clone()))),
@@ -433,8 +436,8 @@ impl Form {
     }
 
     /// The agent the form is about: its Agent field's.
-    fn agent(&self) -> &str {
-        self.field(Id::Agent).map_or(CLAUDE, |f| f.value.as_str())
+    pub fn agent(&self) -> &str {
+        self.field(Id::Agent).map_or("", |f| f.value.as_str())
     }
 
     /// The models the form's agent offers (see `with_models`).

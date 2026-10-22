@@ -20,7 +20,7 @@ pub fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
         } else {
             " in your projects' directories (--all shows the rest)"
         };
-        println!("No Claude conversations to adopt{hint}.");
+        println!("No conversations to adopt{hint}.");
         return Ok(());
     }
     let now = util::now_ms();
@@ -34,13 +34,14 @@ pub fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
             };
             let note = match (&a.archived, c.open_in) {
                 (Some(s), _) => format!("archived in roster as {}", s.label()),
-                (None, Some(pid)) => format!("open in Claude (pid {pid})"),
+                (None, Some(pid)) => format!("open in {} (pid {pid})", util::capitalize(&c.agent)),
                 (None, None) => String::new(),
             };
             let what = c.label();
             let id: String = c.id.chars().take(8).collect();
             vec![
                 id,
+                c.agent.clone(),
                 util::ago(now - c.modified),
                 project,
                 cut(&what, 50),
@@ -48,7 +49,7 @@ pub fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
             ]
         })
         .collect();
-    print_table(&["ID", "UPDATED", "PROJECT", "TITLE", ""], &rows);
+    print_table(&["ID", "AGENT", "UPDATED", "PROJECT", "TITLE", ""], &rows);
     Ok(())
 }
 

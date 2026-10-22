@@ -478,6 +478,74 @@ fn pi_reports_through_rosters_extension() {
 }
 
 #[test]
+fn pi_conversations_can_be_adopted() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("pi-adopt") else {
+        return;
+    };
+    let pi = t.path("fake-pi");
+    fs::write(&pi, FAKE_PI).unwrap();
+    fs::set_permissions(&pi, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("[agents.pi]\ncommand = \"{}\"\n", pi.display()));
+    fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // Two conversations pi kept, started outside roster in the project's directory.
+    let folder = t.pi_dir().join("sessions").join("--proj--");
+    fs::create_dir_all(&folder).unwrap();
+    for (id, name) in [("pc-one", "Parser work"), ("pc-two", "Docs")] {
+        let lines = [
+            serde_json::json!({"type": "session", "version": 3, "id": id, "cwd": t.path("proj")}),
+            serde_json::json!({"type": "message", "id": "a", "message": {"role": "user", "content": [{"type": "text", "text": "fix it"}]}}),
+            serde_json::json!({"type": "session_info", "id": "b", "name": name}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(
+            folder.join(format!("2026-10-22T06-00-00-000Z_{id}.jsonl")),
+            text,
+        )
+        .unwrap();
+    }
+    let list = t.ok(&["adopt", "--list"]);
+    assert!(
+        list.contains("pc-one") && list.contains(" pi ") && list.contains("Parser work"),
+        "{list}"
+    );
+
+    // Adopted, it's a pi session in its project that opens that conversation.
+    t.ok(&["adopt", "pc-one", "--name", "a"]);
+    let s = t.session("a", false).unwrap();
+    assert_eq!(
+        (&s["agent"], &s["conversation_id"]),
+        (&Value::from("pi"), &Value::from("pc-one"))
+    );
+    t.wait_for("pi started", |t| t.ok(&["show", "a"]).contains("fake pi:"));
+    let screen = t.ok(&["show", "a"]);
+    assert!(
+        screen.contains("--session-id pc-one") && !screen.contains("--fork"),
+        "{screen}"
+    );
+    assert!(!t.ok(&["adopt", "--list"]).contains("pc-one"));
+
+    // A copy forks the original into a conversation of its own.
+    t.ok(&["adopt", "pc-two", "--fork", "--name", "b"]);
+    let copy = t.session("b", false).unwrap()["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(copy, "pc-two");
+    t.wait_for("the copy started", |t| {
+        t.ok(&["show", "b"]).contains("fake pi:")
+    });
+    let screen = t.ok(&["show", "b"]);
+    assert!(
+        screen.contains(&format!("--fork pc-two --session-id {copy}")),
+        "{screen}"
+    );
+}
+
+#[test]
 fn config_changes_reach_a_running_server() {
     let Some(t) = TestEnv::new("reload") else {
         return;

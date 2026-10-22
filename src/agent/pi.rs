@@ -3,6 +3,7 @@
 //! its session file gives the statistics. Whatever roster needs that pi
 //! doesn't do goes into that extension, and only that.
 
+pub mod conversations;
 mod transcript;
 
 use std::fs;
@@ -12,7 +13,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Adapter, Ask, Choices, Context, Launch, Mark, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -37,6 +38,15 @@ impl Adapter for Pi {
         true
     }
 
+    fn adopts(&self) -> bool {
+        true
+    }
+
+    fn conversations(&self, wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
+        conversations::sessions_dir()
+            .map_or_else(Vec::new, |dir| conversations::conversations(&dir, wanted))
+    }
+
     /// Its π, in the terminal's colour: its logo is black and white.
     fn mark(&self) -> Option<Mark> {
         Some(Mark {
@@ -57,7 +67,9 @@ impl Adapter for Pi {
         ask(&argv).map_or_else(Vec::new, |table| listed_models(&table))
     }
 
-    /// `--session-id` opens the conversation, or creates it the first time.
+    /// `--session-id` opens the conversation, or creates it the first time;
+    /// an adopted copy is forked from the original (`--fork`) until it has a
+    /// session file of its own.
     fn launch(&self, s: &Session, mut argv: Vec<String>, cx: &Context) -> Result<Launch> {
         // After the config's args, so the session's choice wins.
         if let Some(model) = &s.model {
@@ -71,6 +83,13 @@ impl Adapter for Pi {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let extension = write_extension(cx.state_dir)?;
+        let has_file = s
+            .transcript_path
+            .as_deref()
+            .is_some_and(|p| Path::new(p).exists());
+        if let Some(from) = s.fork_from.as_ref().filter(|_| !has_file) {
+            argv.extend(["--fork".into(), from.clone()]);
+        }
         argv.extend([
             "--session-id".into(),
             id.clone(),
@@ -208,6 +227,30 @@ mod tests {
         assert_eq!(l.conversation_id.as_deref(), Some(id.as_str()));
         assert_eq!(fs::read_to_string(&extension).unwrap(), EXTENSION);
         assert!(check_effort(PI, "minimal").is_ok() && check_effort(PI, "extreme").is_err());
+    }
+
+    #[test]
+    fn an_adopted_copy_forks_until_it_has_a_file_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let cx = Context {
+            roster: Path::new("/bin/roster"),
+            state_dir: dir.path(),
+        };
+        let mut s = pi_session();
+        s.conversation_id = Some("copy".into());
+        s.fork_from = Some("original".into());
+        let l = launch(&s, &config(), &cx).unwrap();
+        let i = l.argv.iter().position(|a| a == "--fork").unwrap();
+        assert_eq!(
+            l.argv[i..i + 4],
+            ["--fork", "original", "--session-id", "copy"]
+        );
+        let file = dir.path().join("copy.jsonl");
+        fs::write(&file, "{}\n").unwrap();
+        s.transcript_path = Some(file.to_string_lossy().into_owned());
+        let l = launch(&s, &config(), &cx).unwrap();
+        assert!(!l.argv.contains(&"--fork".to_string()));
+        assert!(Pi.adopts());
     }
 
     #[test]

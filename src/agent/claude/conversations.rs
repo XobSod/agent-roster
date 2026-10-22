@@ -4,52 +4,12 @@
 //! Claude's internal files, so anything unreadable is skipped.
 
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-/// How much of the start and end of a conversation file is read.
-const HEAD: u64 = 64 * 1024;
-const TAIL: u64 = 512 * 1024;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Conversation {
-    pub id: String,
-    pub path: PathBuf,
-    /// Where it ran; it's resumed there.
-    pub cwd: PathBuf,
-    pub branch: Option<String>,
-    /// The name it was given (`claude --name`, `/rename`, or a session manager).
-    pub custom_title: Option<String>,
-    /// Claude's title for it.
-    pub title: Option<String>,
-    pub first_prompt: Option<String>,
-    pub last_prompt: Option<String>,
-    /// The model it last used.
-    pub model: Option<String>,
-    /// When the file last changed, in ms.
-    pub modified: i64,
-    /// A Claude process that has it open right now.
-    pub open_in: Option<i32>,
-}
-
-impl Conversation {
-    /// What to call it, on one line: its name, Claude's title, else a prompt.
-    pub fn label(&self) -> String {
-        [
-            &self.custom_title,
-            &self.title,
-            &self.first_prompt,
-            &self.last_prompt,
-        ]
-        .into_iter()
-        .flatten()
-        .next()
-        .map_or(String::new(), |s| crate::util::one_line(s))
-    }
-}
+use crate::agent::Conversation;
 
 /// Claude's own directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
 pub fn claude_dir() -> Option<PathBuf> {
@@ -84,31 +44,9 @@ pub fn conversations(claude_dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Co
 /// What one conversation file says about itself, from its start and end.
 fn read(path: &Path) -> Option<Conversation> {
     let id = path.file_stem()?.to_str()?.to_string();
-    let mut file = File::open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    let modified = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis() as i64;
-    // A small file whole; a larger one's start and end.
-    let mut head = Vec::new();
-    let mut tail = Vec::new();
-    if meta.len() <= HEAD + TAIL {
-        file.read_to_end(&mut head).ok()?;
-    } else {
-        (&mut file).take(HEAD).read_to_end(&mut head).ok()?;
-        file.seek(SeekFrom::Start(meta.len() - TAIL)).ok()?;
-        file.read_to_end(&mut tail).ok()?;
-        // The first line is likely cut.
-        let cut = tail
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(tail.len(), |i| i + 1);
-        tail.drain(..cut);
-    }
+    let (entries, modified) = crate::agent::file_ends(path)?;
     let mut c = Conversation {
+        agent: super::CLAUDE.to_string(),
         id,
         path: path.to_path_buf(),
         cwd: PathBuf::new(),
@@ -121,14 +59,8 @@ fn read(path: &Path) -> Option<Conversation> {
         modified,
         open_in: None,
     };
-    let entries = |bytes: &[u8]| -> Vec<Value> {
-        bytes
-            .split(|b| *b == b'\n')
-            .filter_map(|line| serde_json::from_slice(line).ok())
-            .collect()
-    };
     let mut cwd = None;
-    for e in entries(&head).iter().chain(entries(&tail).iter()) {
+    for e in &entries {
         if let Some(dir) = e["cwd"].as_str() {
             cwd = Some(PathBuf::from(dir));
         }

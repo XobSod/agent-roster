@@ -60,7 +60,7 @@ enum Cmd {
         #[command(flatten)]
         session: SessionArgs,
     },
-    /// Take over a Claude conversation started elsewhere, resuming it here
+    /// Take over a Claude or pi conversation started elsewhere, resuming it here
     Adopt {
         /// The conversation's id (4+ characters are enough); without it, lists them
         conversation: Option<String>,
@@ -86,7 +86,7 @@ enum Cmd {
         /// Adopt a copy and leave the original alone
         #[arg(long)]
         fork: bool,
-        /// Adopt it even if it's open in Claude
+        /// Adopt it even if it's open in its agent (Claude tells; pi doesn't)
         #[arg(short, long)]
         yes: bool,
         /// Attach to it right away
@@ -155,7 +155,7 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Delete an archived session for good (a Claude conversation stays, and can be adopted again)
+    /// Delete an archived session for good (its Claude or pi conversation stays, and can be adopted again)
     Rm {
         session: String,
         #[arg(short, long)]
@@ -455,9 +455,12 @@ fn run(cli: Cli) -> Result<()> {
                 },
             };
             let kept = if agent::adapter(&s.agent).adopts() {
-                "; its Claude conversation stays and can be adopted again"
+                format!(
+                    "; its {} conversation stays and can be adopted again",
+                    util::capitalize(&s.agent)
+                )
             } else {
-                ""
+                String::new()
             };
             if !confirm(
                 &format!("Delete {} for good? Roster forgets it{kept}", s.label()),

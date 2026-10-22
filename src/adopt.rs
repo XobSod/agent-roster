@@ -1,16 +1,15 @@
-//! Taking over Claude conversations started elsewhere (plain `claude`,
-//! another session manager): finding them (`agent::claude::conversations`)
-//! and turning one into a session.
+//! Taking over conversations started elsewhere (plain `claude` or `pi`,
+//! another session manager): finding them (each agent's
+//! `Adapter::conversations`) and turning one into a session.
 
 use anyhow::{Result, bail};
 
-use crate::agent;
-use crate::agent::claude::conversations::{self, Conversation};
+use crate::agent::{self, Conversation};
 use crate::engine::{Defaults, NewSession, Roster, new_project_name};
 use crate::model::{Project, Session};
 
 impl Roster {
-    /// Claude conversations roster could take over: not already one of its live
+    /// Conversations roster could take over: not already one of its live
     /// sessions, each with the project whose directory holds it (the deepest
     /// one), if any, and an archived roster session it belongs to, if any. With
     /// `all` false, only those in a project's directory.
@@ -20,22 +19,28 @@ impl Roster {
 
     /// `adoptable`, for the conversations whose id `wanted` says yes to.
     fn adoptable_where(&self, all: bool, wanted: impl Fn(&str) -> bool) -> Result<Vec<Adoptable>> {
-        let Some(dir) = conversations::claude_dir() else {
-            return Ok(Vec::new());
-        };
         let projects = self.db.projects()?;
         let sessions = self.db.sessions(true)?;
         let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        let session = |id: &str| {
+        let session = |agent: &str, id: &str| {
             sessions
                 .iter()
-                .find(|s| s.conversation_id.as_deref() == Some(id))
+                .find(|s| s.agent == agent && s.conversation_id.as_deref() == Some(id))
         };
-        // Those of live sessions aren't even read: they're often the largest.
-        let live = |id: &str| session(id).is_some_and(|s| s.deleted_at.is_none());
+        // Every agent's that can be started and adopts, newest first; those of
+        // live sessions aren't even read: they're often the largest.
+        let mut conversations = Vec::new();
+        for name in agent::available(&self.config) {
+            let adapter = agent::adapter(&name);
+            if adapter.adopts() {
+                let live = |id: &str| session(&name, id).is_some_and(|s| s.deleted_at.is_none());
+                conversations.extend(adapter.conversations(&|id| wanted(id) && !live(id)));
+            }
+        }
+        conversations.sort_by_key(|c| std::cmp::Reverse(c.modified));
         let mut found = Vec::new();
-        for conversation in conversations::conversations(&dir, |id| wanted(id) && !live(id)) {
-            let known = session(&conversation.id);
+        for conversation in conversations {
+            let known = session(&conversation.agent, &conversation.id);
             let project = projects
                 .iter()
                 .filter(|p| conversation.cwd.starts_with(&p.origin))
@@ -55,10 +60,11 @@ impl Roster {
         Ok(found)
     }
 
-    /// Takes over a Claude conversation started elsewhere: a session (in its
-    /// project, or in a new project for its directory) that resumes it, or with
-    /// `fork`, a copy of it. A conversation open in Claude is refused unless
-    /// `force`: two Claudes would write the same conversation.
+    /// Takes over a conversation started elsewhere: a session of its agent (in
+    /// its project, or in a new project for its directory) that resumes it,
+    /// or with `fork`, a copy of it. A conversation open in its agent (as far
+    /// as the agent tells: Claude does) is refused unless `force`: two would
+    /// write the same conversation.
     pub fn adopt(&mut self, req: Adopt) -> Result<Session> {
         let wanted = |id: &str| {
             id == req.conversation
@@ -90,7 +96,8 @@ impl Roster {
             && !req.force
         {
             bail!(
-                "it's open in Claude (pid {pid}); close it there first, or adopt a copy (--fork), or adopt it anyway (--yes)"
+                "it's open in {} (pid {pid}); close it there first, or adopt a copy (--fork), or adopt it anyway (--yes)",
+                crate::util::capitalize(&c.agent)
             );
         }
         let project = match (&req.project, &found.project) {
@@ -104,7 +111,7 @@ impl Roster {
         let request = NewSession {
             project: project.name.clone(),
             name: req.name,
-            agent: Some(agent::CLAUDE.to_string()),
+            agent: Some(c.agent.clone()),
             model: req.model.unwrap_or(project.model.clone()),
             effort: req.effort.unwrap_or(project.effort.clone()),
             prompt: None,
@@ -157,6 +164,6 @@ pub struct Adopt {
     pub effort: Option<Option<String>>,
     /// Adopt a copy (`--fork-session`) and leave the original alone.
     pub fork: bool,
-    /// Adopt it even though it's open in Claude.
+    /// Adopt it even though it's open in its agent.
     pub force: bool,
 }

@@ -190,7 +190,8 @@ impl App {
                 Action::Delete => {
                     let kept = if crate::agent::adapter(&s.agent).adopts() {
                         format!(
-                            "; its Claude conversation stays and can be adopted again ({})",
+                            "; its {} conversation stays and can be adopted again ({})",
+                            crate::util::capitalize(&s.agent),
                             self.chord(Menu::Session, Action::Adopt)
                         )
                     } else {
@@ -293,7 +294,7 @@ impl App {
     /// Offers `found` to pick from.
     pub fn pick_conversation(&mut self, found: Vec<crate::adopt::Adoptable>) {
         if found.is_empty() {
-            self.flash("No Claude conversations to adopt");
+            self.flash("No conversations to adopt");
             return;
         }
         self.dialog = Some(Dialog::Picker(Picker::new(found)));

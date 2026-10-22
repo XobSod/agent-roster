@@ -291,7 +291,7 @@ pub(super) fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
 }
 
 /// Conversations to adopt: a filter line, one row per conversation (age, project,
-/// title, and whether it's open in Claude or an archived session's), and where the
+/// title, and whether it's open in its agent or an archived session's), and where the
 /// selected one ran.
 pub(super) fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
     let now = now_ms();
@@ -356,12 +356,17 @@ pub(super) fn draw_picker(f: &mut Frame, picker: &Picker, area: Rect) {
                 format!("{:>4}  ", crate::util::ago(now - c.modified)),
                 Style::new().fg(MUTED),
             ),
+            glyph(&c.agent),
+            Span::raw(" "),
             Span::styled(pad(&project, project_width) + "  ", project_style),
             Span::raw(what),
         ];
         let right = match (&a.archived, c.open_in) {
             (Some(_), _) => vec![Span::styled("archived session ", Style::new().fg(MUTED))],
-            (None, Some(_)) => vec![Span::styled("open in Claude ", Style::new().fg(INPUT))],
+            (None, Some(_)) => vec![Span::styled(
+                format!("open in {} ", crate::util::capitalize(&c.agent)),
+                Style::new().fg(INPUT),
+            )],
             (None, None) => vec![],
         };
         let mut line = Line::from(fit(width, left, right));

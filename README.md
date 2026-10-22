@@ -114,7 +114,54 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `[order]`: per shelf (`needs_input`, `idle`, `stopped`, `working`, `archived`),
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
-  - `[keys]`: every TUI key, plus `detach` for Ctrl+Q.
+  - `[keys]`: every TUI key. Each takes one key, a list, or `""` for none. A key is a
+    character (`j`, `D`, `/`), `C-x` (Ctrl), `M-x` (Alt), or one of `Enter`, `Esc`,
+    `Tab`, `BackTab`, `Space`, `Backspace`, `Delete`, `Insert`, `Up`, `Down`, `Left`,
+    `Right`, `PageUp`, `PageDown`, `Home`, `End`, `F1`–`F12`. A menu's keys act only
+    inside it, so they may repeat other keys; within a menu, and among the top-level
+    keys and menu openers, a key is used once. The defaults:
+
+    ```toml
+    [keys]
+    detach = "C-q"            # back to roster while attached (a tmux key name)
+    up = ["k", "Up"]
+    down = ["j", "Down"]      # the list wraps around
+    collapse = ["h", "Left"]  # fold
+    expand = ["l", "Right"]   # unfold
+    confirm = "Enter"         # attach, fold or unfold a heading, restore when archived
+    search = "/"              # filter the list
+    quit = ["q", "C-c"]       # in the projects and server views: back
+    help = "?"
+
+    [keys.session]            # the session menu: `menu` opens it, the rest act in it
+    menu = "s"
+    new = "n"
+    chat = "c"                # a new chat, in no project of its own
+    edit = "e"
+    start = "s"
+    stop = "x"
+    restart = "r"
+    archive = "d"             # or restore an archived one
+    delete = "D"              # an archived one, for good
+    toggle_read = "u"
+    retitle = "t"             # a title generated from the recent prompts
+    adopt = "a"               # a conversation started elsewhere
+
+    [keys.project]
+    menu = "p"
+    new = "n"
+    edit = "e"
+    remove = "d"
+    filter = "f"              # show only this project's sessions
+    list = "l"                # the projects view
+
+    [keys.view]
+    menu = "v"
+    group = "g"               # by project, or by shelf
+    projects = "p"            # the projects view
+    server = "t"              # the tmux server and the database
+    ```
+
   - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;
     for pi's classic screen, `args = ["--tui-mode", "regular"]`), and `title_model`, the
     model a generated title (`s t`) is made with: Claude's default is `haiku`, pi's its

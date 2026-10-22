@@ -371,6 +371,26 @@ mod tests {
     }
 
     #[test]
+    fn the_readme_lists_the_default_keys() {
+        // The README's [keys] example is the defaults, word for word.
+        let readme = include_str!("../README.md");
+        let start = readme
+            .find("    ```toml\n    [keys]\n")
+            .expect("the README's [keys]");
+        let block = &readme[start + "    ```toml\n".len()..];
+        let block = &block[..block.find("    ```").unwrap()];
+        let toml: String = block
+            .lines()
+            .map(|l| l.trim_start().to_string() + "\n")
+            .collect();
+        let config = Config::parse(&toml).unwrap();
+        assert_eq!(
+            format!("{:?}", config.keys),
+            format!("{:?}", Keys::default())
+        );
+    }
+
+    #[test]
     fn rejects_unknown_settings_and_unsafe_keys() {
         assert!(Config::parse("colour = 1").is_err());
         assert!(Config::parse("[keys]\ndetach = \"C-q; kill-server\"").is_err());

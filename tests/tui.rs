@@ -248,3 +248,35 @@ fn pi_offers_the_models_it_lists() {
     term.keys(&["Right", "Down", "Down", "Right"]);
     term.wait_for("pi's model", "‹ fake-model-1 ›  1M context");
 }
+
+#[test]
+fn settings_are_changed_in_the_tui_and_followed_on_disk() {
+    let Some(t) = TestEnv::new("settings") else {
+        return;
+    };
+    let file = t.config_dir().join("config.toml");
+    let term = Terminal::start(&t, &t.shell_command(), (120, 40));
+    term.wait_for("the list", "Enter attach");
+    term.keys(&["v", "s"]);
+    term.wait_for("the settings", "roster  settings");
+    term.wait_for("a setting's doc", "while attached, a line at the top");
+    // The second setting is the line at the top: Enter switches it off.
+    term.keys(&["j", "Enter"]);
+    term.wait_for("the change", "Set status_line");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("status_line = false"), "{text}");
+
+    // Changed on disk (an editor, a git pull): it's read again and used.
+    std::fs::write(
+        &file,
+        text.replace("status_line = false", "fit_preview = \"never\""),
+    )
+    .unwrap();
+    term.wait_for("the reload", "config.toml changed: its settings are in use");
+    // Broken: the settings in use stay, and it says why, once.
+    std::fs::write(&file, "fit_preview = \"sometimes\"\n").unwrap();
+    term.wait_for(
+        "the refusal",
+        "config.toml has an error, the settings in use stay",
+    );
+}

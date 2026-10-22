@@ -13,6 +13,7 @@ impl App {
             Action::Quit if self.mode != Mode::Sessions => self.set_mode(Mode::Sessions),
             Action::Quit => return Some(Op::Quit),
             Action::ShowServer => self.toggle_view(Mode::Server),
+            Action::ShowSettings => self.toggle_view(Mode::Settings),
             Action::ShowProjects => self.toggle_view(Mode::Projects),
             Action::ToggleGroup => {
                 self.grouped = !self.grouped;
@@ -24,6 +25,7 @@ impl App {
                     Mode::Sessions => self.act_in_list(action),
                     Mode::Projects => self.act_in_projects_view(action),
                     Mode::Server => self.act_in_server_view(action),
+                    Mode::Settings => self.act_in_settings_view(action),
                 };
             }
         }

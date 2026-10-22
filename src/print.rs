@@ -1,7 +1,7 @@
 //! What the CLI prints: lists, tables, a session's details, events.
 
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -51,6 +51,40 @@ pub fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
         .collect();
     print_table(&["ID", "AGENT", "UPDATED", "PROJECT", "TITLE", ""], &rows);
     Ok(())
+}
+
+/// Every setting: name, value, whether it's yours or the default, what it does.
+pub fn settings(r: &Roster) {
+    let tty = io::stdout().is_terminal();
+    println!("{}", r.paths.config_file().display());
+    for section in r.settings() {
+        let mut title = section.title.clone();
+        if let Some((_, note)) = section.agent.as_ref().filter(|(_, n)| !n.is_empty()) {
+            title.push_str(&format!(" ({note})"));
+        }
+        println!("\n{title}");
+        let width = section
+            .settings
+            .iter()
+            .map(|s| s.name().len())
+            .max()
+            .unwrap_or(0);
+        for s in &section.settings {
+            let source = if s.set { "yours  " } else { "default" };
+            let line = format!(
+                "  {:<width$}  {:<22}  {source}  {}",
+                s.name(),
+                cut(&s.value, 22),
+                s.doc
+            );
+            // Defaults dimmed, so what you set stands out.
+            if tty && !s.set {
+                println!("\x1b[2m{line}\x1b[0m");
+            } else {
+                println!("{line}");
+            }
+        }
+    }
 }
 
 pub fn print_info(r: &Roster, s: &Session) {

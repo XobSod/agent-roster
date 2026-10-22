@@ -32,13 +32,14 @@ impl App {
                 self.labelled([(Action::Confirm, "kill orphans"), (Action::Down, "scroll")])
             }
             Mode::Server => self.labelled([(Action::Down, "scroll")]),
+            Mode::Settings => self.settings_view_hints(),
         };
         // Then the same everywhere: Esc, help, and in the session list quit (in a
         // view the quit key goes back, like Esc).
         match self.mode {
             Mode::Sessions if !self.search.is_empty() => hints.push(("Esc".into(), "clear filter")),
             Mode::Sessions => {}
-            Mode::Projects | Mode::Server => hints.push(("Esc".into(), "back")),
+            Mode::Projects | Mode::Server | Mode::Settings => hints.push(("Esc".into(), "back")),
         }
         hints.extend(self.labelled([(Action::Help, "help")]));
         if self.mode == Mode::Sessions {
@@ -56,6 +57,46 @@ impl App {
             .into_iter()
             .filter_map(|(a, what)| Some((self.keymap.label(a)?.to_string(), what)))
             .collect()
+    }
+
+    /// The settings view's: what changes the selected setting.
+    fn settings_view_hints(&self) -> Vec<(String, &'static str)> {
+        use crate::settings::Kind;
+        if let Some(capture) = &self.capturing {
+            let mut hints = vec![("a key".to_string(), "sets it")];
+            if capture.setting.starts_with("keys.") && capture.setting != "keys.detach" {
+                hints.push(("Backspace".into(), "none"));
+            }
+            hints.push(("Esc".into(), "cancel"));
+            return hints;
+        }
+        let Some(s) = self.selected_setting() else {
+            return vec![("e".into(), "edit config.toml")];
+        };
+        let mut hints = match s.kind {
+            Kind::Bool => self.labelled([(Action::Confirm, "switch")]),
+            Kind::Choice(_) => {
+                let mut hints = self.labelled([(Action::Confirm, "next")]);
+                hints.push(("←→".into(), "choose"));
+                hints
+            }
+            Kind::Keys => {
+                let mut hints = self.labelled([(Action::Confirm, "press its key")]);
+                hints.push(("a".into(), "add a key"));
+                hints
+            }
+            Kind::TmuxKey => self.labelled([(Action::Confirm, "press its key")]),
+            _ => self.labelled([(Action::Confirm, "change")]),
+        };
+        if s.set {
+            hints.push(("d".into(), "default"));
+        }
+        if self.selected_agent().is_some() {
+            hints.push(("x".into(), "remove its settings"));
+        }
+        hints.push(("n".into(), "new agent"));
+        hints.push(("e".into(), "edit config.toml"));
+        hints
     }
 
     /// The projects view's own hints: its project keys work without `p`.
@@ -271,7 +312,7 @@ impl App {
                 self.chord(Menu::Session, Action::NewSession),
                 self.chord(Menu::Session, Action::NewChat)
             )),
-            Mode::Projects | Mode::Server => Text::default(),
+            Mode::Projects | Mode::Server | Mode::Settings => Text::default(),
         }
     }
 }

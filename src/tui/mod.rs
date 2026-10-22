@@ -23,7 +23,9 @@ use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode};
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::text::Text;
 
 use crate::adopt::Adopt;
@@ -47,17 +49,10 @@ pub fn run(roster: &mut Roster) -> Result<()> {
         .unwrap_or_default();
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
-    // The agents' models, asked in the background: pi takes a moment to list
-    // its own. Forms offer what's known meanwhile.
-    let (send, models) = std::sync::mpsc::channel();
-    let list = roster.model_lister();
-    let agents = agent::available(&roster.config);
-    std::thread::spawn(move || {
-        let offered = agents.iter().map(|a| (a.clone(), list(a))).collect();
-        send.send(offered).ok();
-    });
+    app.config_file = roster.paths.config_file();
+    app.listing = Some(list_models(roster));
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, roster, &mut app, &models);
+    let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
     result
 }
@@ -101,17 +96,39 @@ fn only_one(state_dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-fn event_loop(
-    terminal: &mut DefaultTerminal,
-    roster: &mut Roster,
-    app: &mut App,
-    models: &std::sync::mpsc::Receiver<HashMap<String, Vec<agent::Model>>>,
-) -> Result<()> {
+/// The agents' models, asked in the background: pi takes a moment to list
+/// its own. Forms offer what's known meanwhile.
+fn list_models(roster: &Roster) -> std::sync::mpsc::Receiver<HashMap<String, Vec<agent::Model>>> {
+    let (send, models) = std::sync::mpsc::channel();
+    let list = roster.model_lister();
+    let agents = agent::available(&roster.config);
+    std::thread::spawn(move || {
+        let offered = agents.iter().map(|a| (a.clone(), list(a))).collect();
+        send.send(offered).ok();
+    });
+    models
+}
+
+/// Settings just changed (in the view, an editor, a `git pull`): what the
+/// TUI keeps of them follows.
+fn use_config(roster: &Roster, app: &mut App) {
+    match Keymap::new(&roster.config.keys) {
+        Ok(keymap) => app.keymap = keymap,
+        Err(e) => app.fail(format!("{e:#}")),
+    }
+    app.set_agents(agent::available(&roster.config));
+    app.order = roster.config.order.clone();
+    app.preview.fitted.clear();
+    app.listing = Some(list_models(roster));
+}
+
+fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App) -> Result<()> {
     reload(roster, app);
     let mut last_reload = Instant::now();
     loop {
-        if let Ok(offered) = models.try_recv() {
+        if let Some(offered) = app.listing.as_ref().and_then(|r| r.try_recv().ok()) {
             app.models.offered = offered;
+            app.listing = None;
         }
         terminal.draw(|f| ui::draw(f, app))?;
         // Redraw often enough to move the spinners, refresh the data once a tick.
@@ -145,8 +162,23 @@ fn event_loop(
     }
 }
 
-/// Folds hook events, checks the agents, and reloads the data from the database.
+/// Folds hook events, checks the agents, and reloads the data from the database
+/// (and config.toml, if it changed).
 fn reload(roster: &mut Roster, app: &mut App) {
+    match roster.reload_config() {
+        Ok(true) => {
+            use_config(roster, app);
+            app.flash("config.toml changed: its settings are in use");
+        }
+        Ok(false) => {}
+        // What matters first: a long message is cut at its end.
+        Err(e) => app.fail(format!(
+            "config.toml has an error, the settings in use stay: {e:#}"
+        )),
+    }
+    if app.mode == Mode::Settings {
+        app.set_settings(roster.settings());
+    }
     // The server report refreshes too.
     let refreshed = if app.mode == Mode::Server {
         roster.diagnose().map(|d| app.set_report(d))
@@ -268,6 +300,22 @@ fn perform(
     op: Op,
 ) -> Result<()> {
     let outcome: Result<String> = match op {
+        Op::ChangeSetting { setting, input } => {
+            let back = input.is_none();
+            roster.change_setting(&setting, input.as_deref()).map(|()| {
+                use_config(roster, app);
+                if back {
+                    format!("{setting} is back to its default")
+                } else {
+                    format!("Set {setting}")
+                }
+            })
+        }
+        Op::EditConfig => edit_config(terminal, roster, app)?,
+        Op::AddAgent(line) => roster.add_agent(&line).map(|name| {
+            use_config(roster, app);
+            format!("Added the agent {name}: new sessions can run it")
+        }),
         Op::Attach(id) => {
             app.attaching(&id);
             let result = attach(terminal, roster, app, &id)?.map(|prompted| {
@@ -468,6 +516,51 @@ fn busy(terminal: &mut DefaultTerminal, app: &mut App, message: String) -> Resul
     app.flash(message);
     terminal.draw(|f| ui::draw(f, app))?;
     Ok(())
+}
+
+/// Hands the terminal to `$VISUAL` or `$EDITOR` (else vi) on config.toml, made
+/// first from the template of every setting if there's none, then puts what
+/// was saved in use. The outer result is the terminal's.
+fn edit_config(
+    terminal: &mut DefaultTerminal,
+    roster: &mut Roster,
+    app: &mut App,
+) -> Result<Result<String>> {
+    let file = roster.paths.config_file();
+    if !file.exists()
+        && let Err(e) =
+            crate::settings::write_file(&file, &crate::settings::template(&roster.settings()))
+    {
+        return Ok(Err(e));
+    }
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()))
+        .unwrap_or_else(|| "vi".into());
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    // Through a shell, so an editor given with options ("code -w") works.
+    let ran = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("roster-edit")
+        .arg(&file)
+        .status();
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    terminal.hide_cursor()?;
+    Ok(match ran {
+        Err(e) => Err(anyhow::anyhow!("can't run {editor}: {e}")),
+        Ok(_) => match roster.reload_config() {
+            Ok(true) => {
+                use_config(roster, app);
+                Ok("config.toml saved: its settings are in use".into())
+            }
+            Ok(false) => Ok("config.toml unchanged".into()),
+            Err(e) => Err(e.context("config.toml has an error, the settings in use stay")),
+        },
+    })
 }
 
 /// Hands the terminal to `tmux attach` until the user detaches. The outer result

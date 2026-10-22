@@ -48,6 +48,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_server(f, app, main);
     } else if app.mode == Mode::Projects {
         draw_projects(f, app, main);
+    } else if app.mode == Mode::Settings {
+        draw_settings(f, app, main);
     } else {
         draw_sidebar(f, app, side, now);
         f.render_widget(

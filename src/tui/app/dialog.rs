@@ -22,7 +22,15 @@ pub enum Dialog {
 
 #[derive(Clone, Debug)]
 pub enum Purpose {
-    RestoreName { id: String },
+    /// The setting with this dotted name.
+    Setting {
+        setting: String,
+    },
+    /// A new agent's command line.
+    NewAgent,
+    RestoreName {
+        id: String,
+    },
 }
 
 impl App {
@@ -101,6 +109,13 @@ impl App {
             Purpose::RestoreName { id } => Some(Op::Restore {
                 id,
                 name: Some(value),
+            }),
+            Purpose::NewAgent if value.is_empty() => None,
+            Purpose::NewAgent => Some(Op::AddAgent(value)),
+            // Empty is a value too: text back to its default, no keys.
+            Purpose::Setting { setting } => Some(Op::ChangeSetting {
+                setting,
+                input: Some(value),
             }),
         }
     }

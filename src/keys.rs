@@ -63,6 +63,7 @@ pub enum Action {
     ToggleGroup,
     ShowProjects,
     ShowServer,
+    ShowSettings,
 }
 
 impl Action {
@@ -103,6 +104,7 @@ impl Action {
             Action::ToggleGroup => "group by project / shelves",
             Action::ShowProjects => "projects",
             Action::ShowServer => "tmux server",
+            Action::ShowSettings => "settings",
         }
     }
 }
@@ -319,6 +321,13 @@ impl Keymap {
             &mut labels,
         )?;
         view.bind(t, "server", &k.server, Action::ShowServer, &mut labels)?;
+        view.bind(
+            t,
+            "settings",
+            &k.settings,
+            Action::ShowSettings,
+            &mut labels,
+        )?;
 
         let menus = HashMap::from([
             (Menu::Session, session),

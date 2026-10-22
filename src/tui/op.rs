@@ -3,6 +3,15 @@
 /// Work for the run loop, which owns the terminal and the roster.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
+    /// A setting changed to `input` (as typed), or back to its default.
+    ChangeSetting {
+        setting: String,
+        input: Option<String>,
+    },
+    /// config.toml opened in `$EDITOR`.
+    EditConfig,
+    /// A new agent that runs this command line.
+    AddAgent(String),
     Attach(String),
     Start(String),
     Stop(String),

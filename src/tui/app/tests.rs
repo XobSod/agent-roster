@@ -689,3 +689,86 @@ fn errors_stay_until_a_key_is_pressed() {
     keys(&mut app, "j");
     assert!(app.message().is_none());
 }
+
+#[test]
+fn the_settings_view_changes_settings() {
+    let mut app = app();
+    keys(&mut app, "vs");
+    assert_eq!(app.mode, Mode::Settings);
+    let config = crate::config::Config::parse("status_line = false\n[agents.aider]\n").unwrap();
+    let agents = vec!["claude".to_string(), "aider".to_string()];
+    let env = crate::settings::Env {
+        shell: "/bin/sh",
+        chats_dir: "~/chats",
+        agents: &agents,
+    };
+    app.set_settings(crate::settings::sections(
+        &config,
+        "status_line = false\n[agents.aider]\n",
+        &env,
+    ));
+    let select = |app: &mut App, dotted: &str| {
+        app.setting_row = app
+            .all_settings()
+            .iter()
+            .position(|s| s.dotted() == dotted)
+            .unwrap();
+    };
+    let change = |setting: &str, input: Option<&str>| Op::ChangeSetting {
+        setting: setting.into(),
+        input: input.map(String::from),
+    };
+    // On and off, the next choice.
+    select(&mut app, "status_line");
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(change("status_line", Some("on")))
+    );
+    assert_eq!(keys(&mut app, "d"), Some(change("status_line", None)));
+    select(&mut app, "fit_preview");
+    assert_eq!(
+        app.on_key(key(KeyCode::Right)),
+        Some(change("fit_preview", Some("never")))
+    );
+    // A key: the next one pressed; `a` adds one; Backspace leaves none.
+    select(&mut app, "keys.session.stop");
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert_eq!(
+        keys(&mut app, "y"),
+        Some(change("keys.session.stop", Some("y")))
+    );
+    assert_eq!(keys(&mut app, "a"), None);
+    assert_eq!(
+        app.on_key(key(KeyCode::Delete)),
+        Some(change("keys.session.stop", Some("x Delete")))
+    );
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.on_key(key(KeyCode::Esc)),
+        None,
+        "Esc leaves it as it was"
+    );
+    assert_eq!(app.mode, Mode::Settings);
+    // Text is typed.
+    select(&mut app, "agents.claude.title_model");
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(&app.dialog, Some(Dialog::Input { .. })));
+    keys(&mut app, "sonnet");
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(change("agents.claude.title_model", Some("sonnet")))
+    );
+    // Agents: removing one asks first; a new one is a command line.
+    select(&mut app, "agents.aider.command");
+    keys(&mut app, "x");
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Confirm { question, .. }) if question.contains("Remove the agent aider"))
+    );
+    assert_eq!(keys(&mut app, "y"), Some(change("agents.aider", None)));
+    keys(&mut app, "n");
+    keys(&mut app, "codex");
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(Op::AddAgent("codex".into()))
+    );
+}

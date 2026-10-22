@@ -10,6 +10,7 @@ use ratatui::text::Text;
 
 mod act;
 mod dialog;
+mod settings;
 mod texts;
 
 pub use dialog::Dialog;
@@ -35,6 +36,8 @@ pub enum Mode {
     Projects,
     /// The tmux server and database report.
     Server,
+    /// Every setting, to see and change.
+    Settings,
 }
 
 pub struct Message {
@@ -113,6 +116,15 @@ pub struct App {
     agents: Vec<String>,
     /// The agents' models, for the forms: which to offer, what each is.
     pub models: form::Models,
+    /// The agents' models being listed in the background (see `tui::run`).
+    pub listing: Option<std::sync::mpsc::Receiver<HashMap<String, Vec<crate::agent::Model>>>>,
+    /// The settings view's settings, and the one selected (of all, in order).
+    pub settings: Vec<crate::settings::Section>,
+    pub setting_row: usize,
+    /// Where config.toml is, to say so.
+    pub config_file: std::path::PathBuf,
+    /// A key setting waiting for its key to be pressed.
+    pub capturing: Option<settings::Capture>,
     /// Oldest or newest first, per shelf (config.toml).
     pub order: crate::config::Order,
 }
@@ -152,11 +164,21 @@ impl App {
             default_path,
             agents,
             models: form::Models::known(),
+            listing: None,
+            settings: Vec::new(),
+            setting_row: 0,
+            config_file: std::path::PathBuf::new(),
+            capturing: None,
             order: Default::default(),
         }
     }
 
     /// Whether starting a session of `agent` again resumes its conversation.
+    /// The agents that can be started, after a change of settings.
+    pub fn set_agents(&mut self, agents: Vec<String>) {
+        self.agents = agents;
+    }
+
     /// The agent new sessions get unless their project picks one: the first
     /// of those that can be started (`agent::available`).
     pub fn default_agent(&self) -> &str {
@@ -348,6 +370,9 @@ impl App {
         if self.message.as_ref().is_some_and(|m| m.error) {
             self.message = None;
         }
+        if let Some(capture) = self.capturing.take() {
+            return self.on_captured_key(capture, &e);
+        }
         if self.dialog.is_some() {
             return self.on_dialog_key(e);
         }
@@ -362,6 +387,11 @@ impl App {
         if let Some(menu) = self.menu.take() {
             // Anything that isn't one of the menu's keys just closes it.
             return self.keymap.menu(menu, &e).and_then(|a| self.act(a));
+        }
+        if self.mode == Mode::Settings
+            && let Some(op) = self.on_settings_key(&e)
+        {
+            return op;
         }
         if self.mode != Mode::Sessions && e.code == KeyCode::Esc {
             self.set_mode(Mode::Sessions);

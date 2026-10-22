@@ -165,6 +165,8 @@ pub struct ViewKeys {
     /// The projects view (also in the project menu).
     pub projects: KeyList,
     pub server: KeyList,
+    /// Every setting, to see and change.
+    pub settings: KeyList,
 }
 
 fn keys(names: &[&str]) -> KeyList {
@@ -229,6 +231,7 @@ impl Default for ViewKeys {
             group: keys(&["g"]),
             projects: keys(&["p"]),
             server: keys(&["t"]),
+            settings: keys(&["s"]),
         }
     }
 }
@@ -270,20 +273,26 @@ pub struct AgentConfig {
     pub auto_title: Option<bool>,
 }
 
+/// The config file's text; "" if there's none.
+pub fn read_text(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("can't read {}", path.display())),
+    }
+}
+
 impl Config {
-    /// Reads `path`; a missing file means all defaults.
-    pub fn load(path: &Path) -> Result<Config> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Config::default()),
-            Err(e) => return Err(e).with_context(|| format!("can't read {}", path.display())),
-        };
+    /// Reads `path`, with the text it came from; a missing file means all
+    /// defaults ("").
+    pub fn load_text(path: &Path) -> Result<(Config, String)> {
+        let text = read_text(path)?;
         let config =
             Config::parse(&text).with_context(|| format!("invalid config {}", path.display()))?;
-        Ok(config)
+        Ok((config, text))
     }
 
-    fn parse(text: &str) -> Result<Config> {
+    pub fn parse(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text)?;
         let key = &config.keys.detach;
         // It goes into the generated tmux config, so only allow tmux key-name characters.

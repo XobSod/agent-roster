@@ -546,6 +546,58 @@ fn pi_conversations_can_be_adopted() {
 }
 
 #[test]
+fn settings_change_config_toml_in_place() {
+    let Some(t) = TestEnv::new("settings") else {
+        return;
+    };
+    // The config directory a link into dotfiles, as many keep it.
+    let dotfiles = t.path("dotfiles/agent-roster");
+    fs::create_dir_all(dotfiles.parent().unwrap()).unwrap();
+    fs::rename(t.config_dir(), &dotfiles).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, t.config_dir()).unwrap();
+    let file = dotfiles.join("config.toml");
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.insert_str(0, "# Mine.\n");
+    fs::write(&file, &text).unwrap();
+
+    let shown = t.ok(&["config"]);
+    assert!(
+        shown.contains("status_line    on") && shown.contains("default"),
+        "{shown}"
+    );
+    t.ok(&["config", "set", "status_line", "off"]);
+    t.ok(&["config", "set", "keys.session.stop", "y Delete"]);
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(
+        text.starts_with("# Mine.\n") && text.contains("status_line = false"),
+        "{text}"
+    );
+    assert!(text.contains("stop = [\"y\", \"Delete\"]"), "{text}");
+    assert!(
+        fs::symlink_metadata(t.config_dir())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let shown = t.ok(&["config"]);
+    assert!(
+        shown.contains("status_line    off") && shown.contains("yours"),
+        "{shown}"
+    );
+    // An invalid one is refused, and the file stays as it was.
+    let out = t.run(&["config", "set", "keys.up", "Nope"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown key"),
+        "{out:?}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    t.ok(&["config", "unset", "status_line"]);
+    assert!(!fs::read_to_string(&file).unwrap().contains("status_line"));
+    assert!(t.ok(&["config", "--defaults"]).contains("# [keys.session]"));
+}
+
+#[test]
 fn config_changes_reach_a_running_server() {
     let Some(t) = TestEnv::new("reload") else {
         return;

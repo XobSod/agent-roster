@@ -13,6 +13,7 @@ mod paths;
 mod print;
 mod report;
 mod search;
+mod settings;
 mod stats;
 mod title;
 mod tmux;
@@ -182,6 +183,14 @@ enum Cmd {
     Read { session: String },
     /// Mark a session unread
     Unread { session: String },
+    /// Every setting of config.toml: its value, whether you set it, what it does
+    Config {
+        #[command(subcommand)]
+        change: Option<ConfigCmd>,
+        /// Print a config.toml with every setting commented out at its default
+        #[arg(long)]
+        defaults: bool,
+    },
     /// Check roster's tmux server and database against each other
     Doctor {
         /// Kill orphaned tmux sessions
@@ -265,6 +274,15 @@ impl SessionArgs {
         };
         (request, self.attach)
     }
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Change a setting in config.toml (keeping the rest of it): `set agents.pi.title_model
+    /// claude-haiku-4-5`, `set keys.up "k Up"`
+    Set { setting: String, value: String },
+    /// Take a setting out of config.toml, so its default holds again
+    Unset { setting: String },
 }
 
 /// A project's defaults for new sessions; "default" clears one.
@@ -561,6 +579,18 @@ fn run(cli: Cli) -> Result<()> {
             let s = r.resolve(&session, false)?;
             r.set_unread(&s.id, true)?;
         }
+        Cmd::Config { change, defaults } => match change {
+            Some(ConfigCmd::Set { setting, value }) => {
+                r.change_setting(&setting, Some(&value))?;
+                println!("Set {setting}");
+            }
+            Some(ConfigCmd::Unset { setting }) => {
+                r.change_setting(&setting, None)?;
+                println!("{setting} is back to its default");
+            }
+            None if defaults => print!("{}", settings::template(&r.settings())),
+            None => print::settings(&r),
+        },
         Cmd::Doctor { fix, yes } => {
             let mut diagnosis = r.diagnose()?;
             if fix && !diagnosis.orphans.is_empty() {

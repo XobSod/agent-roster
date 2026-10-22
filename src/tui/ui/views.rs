@@ -155,3 +155,115 @@ pub(super) fn draw_server(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     f.render_widget(Paragraph::new(lines), body);
 }
+
+/// Every setting, full width: by section, each with its value (yours, or the
+/// default, dimmed) and what it does; the selected one's details below.
+pub(super) fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let width = area.width as usize;
+    let [head, _, table, details] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(3),
+    ])
+    .areas(area);
+    let all = app.all_settings();
+    let yours = all.iter().filter(|s| s.set).count();
+    let title = vec![
+        Span::raw(" "),
+        "roster".bold(),
+        Span::styled("  settings", Style::new().fg(MUTED)),
+    ];
+    let count = match yours {
+        0 => "all defaults".to_string(),
+        1 => "1 of yours".to_string(),
+        n => format!("{n} of yours"),
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(fit(
+            width,
+            title,
+            vec![Span::styled(count, Style::new().fg(MUTED)), Span::raw(" ")],
+        ))),
+        head,
+    );
+
+    let name_w = all.iter().map(|s| s.name().width()).max().unwrap_or(0);
+    let value_w = all
+        .iter()
+        .map(|s| s.value.width())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 24);
+    // Headings and settings, the row of each setting noted to keep it in view.
+    let mut lines = Vec::new();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    for section in &app.settings {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        let heading = match &section.agent {
+            Some((name, note)) => vec![
+                Span::raw("   "),
+                glyph(name),
+                Span::raw(" "),
+                name.clone().bold(),
+                Span::styled(
+                    if note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {note}")
+                    },
+                    Style::new().fg(MUTED),
+                ),
+            ],
+            None => vec![Span::raw("   "), section.title.clone().bold()],
+        };
+        lines.push(Line::from(heading));
+        for s in &section.settings {
+            let style = if s.set {
+                Style::new()
+            } else {
+                Style::new().fg(MUTED)
+            };
+            let content = vec![
+                Span::raw("     "),
+                Span::styled(pad(s.name(), name_w) + "  ", style),
+                Span::styled(
+                    pad(&s.value, value_w) + "  ",
+                    if s.set {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    },
+                ),
+                Span::styled(s.doc.clone(), Style::new().fg(FAINT)),
+            ];
+            let content = fit(width.saturating_sub(1), content, Vec::new());
+            rows.push(lines.len());
+            lines.push(framed(content, i == app.setting_row, width));
+            i += 1;
+        }
+    }
+    // The selected setting in view, its heading too when there's room.
+    let height = table.height as usize;
+    let at = rows.get(app.setting_row).copied().unwrap_or(0);
+    let first = at.saturating_sub(height.saturating_sub(2));
+    let first = first.min(lines.len().saturating_sub(height));
+    let shown: Vec<Line> = lines.into_iter().skip(first).take(height).collect();
+    f.render_widget(Paragraph::new(shown), table);
+
+    if let Some(s) = app.selected_setting() {
+        let from = if s.set {
+            format!("in {}", crate::util::short_path(&app.config_file))
+        } else {
+            "the default: config.toml doesn't set it".to_string()
+        };
+        let text = vec![
+            Line::from(vec![Span::raw(" "), s.dotted().bold()]),
+            Line::styled(format!(" {}", from), Style::new().fg(MUTED)),
+        ];
+        f.render_widget(Paragraph::new(text), details);
+    }
+}

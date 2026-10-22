@@ -41,12 +41,16 @@ pub struct Roster {
     /// The panes `refresh` last listed, by tmux session, for what follows it
     /// (fitting screens, showing one) without listing them again.
     panes: Option<HashMap<String, Pane>>,
+    /// The text `config` came from, to notice the file changing.
+    pub(crate) config_text: String,
+    /// A text of the file refused as invalid, not to refuse it again each tick.
+    pub(crate) config_refused: Option<String>,
 }
 
 impl Roster {
     pub fn open() -> Result<Roster> {
         let paths = Paths::from_env()?;
-        let config = Config::load(&paths.config_file())?;
+        let (config, config_text) = Config::load_text(&paths.config_file())?;
         fs::create_dir_all(&paths.state_dir)
             .with_context(|| format!("can't create {}", paths.state_dir.display()))?;
         let db = Db::open(&paths.db())?;
@@ -69,6 +73,8 @@ impl Roster {
             exe,
             resized: HashMap::new(),
             panes: None,
+            config_text,
+            config_refused: None,
         })
     }
 

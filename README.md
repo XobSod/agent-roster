@@ -58,7 +58,7 @@ Everything else is in three menus, which pop up their keys:
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
-| `v` view | `g` group by project · `p` all projects · `t` tmux server and database |
+| `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings |
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
@@ -104,6 +104,10 @@ roster archive api && roster restore api   # archived sessions keep their conver
 roster rm api                           # delete an archived session for good (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
+roster config                           # every setting: its value, yours or the default, what it does
+roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
+roster config unset fit_preview         # back to its default
+roster config --defaults                # a config.toml with every setting, commented out
 ```
 
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`
@@ -113,7 +117,13 @@ lists every command.
 
 All files are optional and live in `~/.config/agent-roster/`:
 
-- `config.toml`:
+- `config.toml`: the settings view (`v s`) shows every setting with its value and
+  what it does, and changes them: Enter (on/off, the next choice, a value typed, or
+  for a key the next one pressed), `←→`, `a` adds a key, `d` puts the default back,
+  `n` adds an agent, `x` takes an agent's settings out, `e` opens the file in
+  `$EDITOR`. A change keeps the rest of the file as it is, comments included, and
+  goes through a symlink (a config kept in dotfiles stays there). Roster also reads
+  the file again when it changes, after an editor or a `git pull`, say. The settings:
   - `default_agent`: the agent new sessions get unless their project names one
     (default `claude`; `"pi"`, or any agent under `[agents]`).
   - `shell`: what sources the env files (default `$SHELL` if POSIX-like).
@@ -177,6 +187,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     group = "g"               # by project, or by shelf
     projects = "p"            # the projects view
     server = "t"              # the tmux server and the database
+    settings = "s"            # every setting, to see and change
     ```
 
   - `[agents.claude]` and `[agents.pi]`: `command`, `args` (added to every start;

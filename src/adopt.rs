@@ -66,30 +66,7 @@ impl Roster {
     /// as the agent tells: Claude does) is refused unless `force`: two would
     /// write the same conversation.
     pub fn adopt(&mut self, req: Adopt) -> Result<Session> {
-        let wanted = |id: &str| {
-            id == req.conversation
-                || (req.conversation.len() >= 4 && id.starts_with(&req.conversation))
-        };
-        let candidates = self.adoptable_where(true, wanted)?;
-        let matches: Vec<&Adoptable> = candidates.iter().collect();
-        let found = match matches[..] {
-            [one] => one.clone(),
-            [] => bail!(
-                "no conversation {:?} to adopt (`roster adopt --list --all` shows them)",
-                req.conversation
-            ),
-            _ => bail!(
-                "{:?} matches several conversations; give more of the id",
-                req.conversation
-            ),
-        };
-        if let Some(s) = &found.archived {
-            bail!(
-                "that conversation is the archived session {}; restore it instead (`roster restore {}`)",
-                s.label(),
-                s.id
-            );
-        }
+        let found = self.to_adopt(&req.conversation)?;
         let c = &found.conversation;
         if let Some(pid) = c.open_in
             && !req.fork
@@ -163,6 +140,38 @@ impl Roster {
                 s.running_model = c.model.clone();
             }
         })
+    }
+
+    /// Where the conversation `req` adopts is open, as far as its agent tells
+    /// (Claude does): its agent and pid, for asking first. None for a copy,
+    /// which leaves it alone. An error if it can't be adopted (`to_adopt`).
+    pub fn open_elsewhere(&self, req: &Adopt) -> Result<Option<(String, i32)>> {
+        let c = self.to_adopt(&req.conversation)?.conversation;
+        Ok(c.open_in.filter(|_| !req.fork).map(|pid| (c.agent, pid)))
+    }
+
+    /// The conversation `conversation` (its id, or a prefix of 4+ characters)
+    /// names; an error if there's none, several, or it's an archived session's.
+    fn to_adopt(&self, conversation: &str) -> Result<Adoptable> {
+        let wanted = |id: &str| {
+            id == conversation || (conversation.len() >= 4 && id.starts_with(conversation))
+        };
+        let candidates = self.adoptable_where(true, wanted)?;
+        let found = match &candidates[..] {
+            [one] => one.clone(),
+            [] => bail!(
+                "no conversation {conversation:?} to adopt (`roster adopt --list --all` shows them)"
+            ),
+            _ => bail!("{conversation:?} matches several conversations; give more of the id"),
+        };
+        if let Some(s) = &found.archived {
+            bail!(
+                "that conversation is the archived session {}; restore it instead (`roster restore {}`)",
+                s.label(),
+                s.id
+            );
+        }
+        Ok(found)
     }
 }
 

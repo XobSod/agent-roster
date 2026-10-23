@@ -1279,10 +1279,17 @@ fn conversations_started_elsewhere_can_be_adopted() {
         "{all}"
     );
 
-    // Open in Claude: refused, unless it's a copy.
+    // Open in Claude: it asks, so without a terminal it's refused, unless
+    // it's a copy.
     let out = t.run(&["adopt", "3333"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("open in Claude"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        err.contains("open in Claude (pid")
+            && err.contains("--fork adopts a copy")
+            && err.contains("Pass --yes to confirm."),
+        "{err}"
+    );
     let out = t.ok(&["adopt", "3333", "--fork", "--name", "copy"]);
     assert!(out.starts_with("Adopted demo/copy as a copy"), "{out}");
     // On what it last ran on.
@@ -1293,6 +1300,14 @@ fn conversations_started_elsewhere_can_be_adopted() {
     });
     let copy = t.session("copy", false).unwrap();
     assert_ne!(copy["conversation_id"], "33333333-cccc");
+    // The refusal left nothing behind, and --yes moves it anyway.
+    assert!(t.ok(&["adopt", "--list"]).contains("33333333"));
+    let out = t.ok(&["adopt", "3333", "--yes", "--name", "moved"]);
+    assert!(out.starts_with("Adopted demo/moved ("), "{out}");
+    assert_eq!(
+        t.session("moved", false).unwrap()["conversation_id"],
+        "33333333-cccc"
+    );
     claude.kill().unwrap();
     claude.wait().unwrap();
 

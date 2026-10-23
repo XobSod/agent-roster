@@ -92,7 +92,7 @@ enum Cmd {
         /// Adopt a copy and leave the original alone
         #[arg(long)]
         fork: bool,
-        /// Adopt it even if it's open in its agent (Claude tells; pi doesn't)
+        /// Move it without asking even if it's open in its agent (Claude tells; pi doesn't)
         #[arg(short, long)]
         yes: bool,
         /// Attach to it right away
@@ -650,7 +650,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             attach,
             ..
         } => {
-            let s = r.adopt(Adopt {
+            let mut req = Adopt {
                 conversation,
                 project,
                 name,
@@ -663,7 +663,18 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 effort: setting(effort),
                 fork,
                 force: yes,
-            })?;
+            };
+            if let Some((agent, pid)) = r.open_elsewhere(&req)? {
+                let question = format!(
+                    "It's open in {} (pid {pid}): two would write one conversation; --fork adopts a copy. Adopt it anyway?",
+                    util::capitalize(&agent)
+                );
+                if !confirm(&question, yes)? {
+                    return Ok(());
+                }
+                req.force = true;
+            }
+            let s = r.adopt(req)?;
             let copy = if fork { " as a copy" } else { "" };
             println!("Adopted {}{copy} ({})", s.label(), s.id);
             if attach {

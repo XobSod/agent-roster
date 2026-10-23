@@ -595,8 +595,11 @@ impl Db {
                 s.apply(e, &report);
                 let mut learned = Vec::new();
                 // What the model asked for (or the default) turned out to be, as
-                // the agent started; switched to later, it isn't what was asked.
-                if let Some(model) = report.model.clone().filter(|_| e.kind == "session") {
+                // the agent started; switched to later inside it, it isn't what
+                // was asked, and a conversation cleared, compacted or resumed in
+                // it reports the one it runs.
+                let started = e.kind == "session" && report.started;
+                if let Some(model) = report.model.clone().filter(|_| started) {
                     let asked = s.model.as_deref().unwrap_or("default");
                     let key = crate::agent::learned_key(&s.agent, asked);
                     learned.push((format!("model:{key}"), model));
@@ -712,27 +715,6 @@ impl Db {
             &format!("UPDATE sessions SET running_model = ({newest}) WHERE running_model IS NULL AND ({newest}) IS NOT NULL"),
             [],
         )?)
-    }
-
-    /// Learns what each alias (or the default) turned out to be from sessions
-    /// that know both, per agent (the rule of `agent::learned_key`); the most
-    /// recent session wins. Only from a model the agent reported on starting:
-    /// a resumed conversation keeps its own, and a model switched to later
-    /// isn't what was asked.
-    pub fn learn_model_names(&self) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value)
-             SELECT 'model:' || CASE WHEN agent = ?1 THEN '' ELSE agent || ':' END
-                    || coalesce(model, 'default'), running_model FROM sessions s
-             WHERE running_model IS NOT NULL
-               AND EXISTS (
-                 SELECT 1 FROM events e WHERE e.session_id = s.id AND e.kind = 'session'
-                   AND json_valid(e.payload)
-                   AND json_extract(e.payload, '$.model') = s.running_model)
-             ORDER BY coalesce(state_since, created_at)",
-            [crate::agent::CLAUDE],
-        )?;
-        Ok(())
     }
 
     /// Claims the making of `id`'s automatic title for its `conversation`:
@@ -1244,7 +1226,8 @@ mod tests {
         let mut opus = db.session(&s.id).unwrap();
         opus.model = Some("opus".into());
         db.save_session(&opus).unwrap();
-        db.insert_event(&s.id, "session", 10, Some(r#"{"model":"claude-opus-5-5"}"#))
+        let started = r#"{"model":"claude-opus-5-5","source":"startup"}"#;
+        db.insert_event(&s.id, "session", 10, Some(started))
             .unwrap();
         db.fold_events(100).unwrap();
         assert_eq!(db.model_names().unwrap()["opus"], "Opus 5.5");
@@ -1261,14 +1244,14 @@ mod tests {
         pi.project_id = claude.project_id;
         pi.agent = "pi".into();
         db.insert_session(&pi).unwrap();
-        let started = r#"{"model":"claude-opus-4-8","context_window":1000000}"#;
+        let started = r#"{"model":"claude-opus-4-8","context_window":1000000,"started":true}"#;
         db.insert_event(&pi.id, "session", 10, Some(started))
             .unwrap();
         db.insert_event(
             &claude.id,
             "session",
             10,
-            Some(r#"{"model":"claude-opus-5-5"}"#),
+            Some(r#"{"model":"claude-opus-5-5","source":"startup"}"#),
         )
         .unwrap();
         // A model switched to later is what it runs, not what "default" means.
@@ -1289,12 +1272,6 @@ mod tests {
             Some(1_000_000)
         );
         assert_eq!(db.learned_window("claude-haiku-4-5").unwrap(), None);
-        db.learn_model_names().unwrap();
-        let names = db.model_names().unwrap();
-        assert_eq!(
-            (names["default"].as_str(), names["pi:default"].as_str()),
-            ("Opus 5.5", "Opus 4.8")
-        );
     }
 
     #[test]
@@ -1304,32 +1281,62 @@ mod tests {
             &s.id,
             "session",
             10,
-            Some(r#"{"model":"claude-opus-5-5[1m]"}"#),
+            Some(r#"{"model":"claude-opus-5-5[1m]","source":"startup"}"#),
         )
         .unwrap();
         db.fold_events(100).unwrap();
+        assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
         // As if an older roster processed it: the model wasn't kept.
         let mut lost = db.session(&s.id).unwrap();
         lost.running_model = None;
         db.save_session(&lost).unwrap();
-        db.conn
-            .execute("DELETE FROM meta WHERE key LIKE 'model:%'", [])
-            .unwrap();
         assert_eq!(db.backfill_models_from_events().unwrap(), 1);
-        db.learn_model_names().unwrap();
         assert_eq!(
             db.session(&s.id).unwrap().running_model.as_deref(),
             Some("claude-opus-5-5[1m]")
         );
-        assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
-        // A model only read from a conversation (say, an adopted one) isn't the default.
-        let mut adopted = session("b");
-        adopted.project_id = s.project_id;
-        adopted.running_model = Some("claude-haiku-5-5".into());
-        adopted.state_since = Some(i64::MAX);
-        db.insert_session(&adopted).unwrap();
-        db.learn_model_names().unwrap();
-        assert_eq!(db.model_names().unwrap()["default"], "Opus 5.5 (1M)");
+    }
+
+    #[test]
+    fn models_are_learned_from_starts_with_what_they_asked_for() {
+        let (mut db, mut s) = db_with_session();
+        s.model = Some("opus".into());
+        db.save_session(&s).unwrap();
+        let report = |db: &mut Db, kind: &str, at: i64, payload: &str| {
+            db.insert_event(&s.id, kind, at, Some(payload)).unwrap();
+            db.fold_events(at + 1).unwrap();
+        };
+        report(
+            &mut db,
+            "session",
+            10,
+            r#"{"model":"claude-opus-5-5","source":"startup"}"#,
+        );
+        assert_eq!(db.model_names().unwrap()["opus"], "Opus 5.5");
+        // Edited since, what it reports later isn't what the new one means.
+        let mut edited = db.session(&s.id).unwrap();
+        edited.model = Some("haiku".into());
+        db.save_session(&edited).unwrap();
+        report(&mut db, "idle", 20, r#"{"model":"claude-opus-5-5"}"#);
+        // Nor what a conversation cleared or compacted in the agent reports
+        // (after a switch inside it, say).
+        for (at, source) in [(30, "clear"), (31, "compact")] {
+            let payload = format!(r#"{{"model":"claude-sonnet-5-5","source":"{source}"}}"#);
+            report(&mut db, "session", at, &payload);
+        }
+        assert!(!db.model_names().unwrap().contains_key("haiku"));
+        // Its next start does.
+        report(
+            &mut db,
+            "session",
+            40,
+            r#"{"model":"claude-haiku-5-5","source":"startup"}"#,
+        );
+        let names = db.model_names().unwrap();
+        assert_eq!(
+            (names["haiku"].as_str(), names["opus"].as_str()),
+            ("Haiku 5.5", "Opus 5.5")
+        );
     }
 
     #[test]

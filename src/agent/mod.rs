@@ -263,6 +263,9 @@ pub struct Report {
     pub transcript_path: Option<String>,
     /// The conversation was cleared: a new task.
     pub cleared: bool,
+    /// The agent itself just started (not resumed, cleared or compacted in
+    /// it), so the model it runs is the one its start asked for.
+    pub started: bool,
     /// The model and effort it's running.
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -345,8 +348,7 @@ pub(crate) fn offered(name: &str, config: &Config) -> bool {
 
 /// The key under which what a model asked of `agent` (or "default") turned
 /// out to be is learned: Claude's as it is, as before there were other
-/// agents; another's after its name ("pi:default"). `Db::learn_model_names`
-/// has the same rule in SQL.
+/// agents; another's after its name ("pi:default").
 pub fn learned_key(agent: &str, asked: &str) -> String {
     if agent == CLAUDE {
         asked.to_string()

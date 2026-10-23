@@ -633,6 +633,16 @@ impl Roster {
         if launch.conversation_id.is_some() {
             s.conversation_id = launch.conversation_id;
         }
+        // What it runs with now, until its agent says: what this start asked
+        // for, a model as it was learned to be, else as asked (not unknown,
+        // which the models of its old reports would fill in). With no model
+        // asked for, a resumed conversation keeps its own, so the one it
+        // reported stays; a new one reports its own as it starts.
+        if let Some(model) = &s.model {
+            let learned = format!("model:{}", agent::learned_key(&s.agent, model));
+            s.running_model = Some(self.db.meta(&learned)?.unwrap_or_else(|| model.clone()));
+        }
+        s.running_effort = s.effort.clone();
         s.set_state(State::Working, now);
         s.unread = false;
         s.exit_status = None;
@@ -1119,8 +1129,9 @@ impl Roster {
 }
 
 /// Fills in the models of sessions that predate recording them: from recent hook
-/// events, else from the end of their Claude transcript. Then learns what each
-/// alias turned out to be.
+/// events, else from the end of their Claude transcript. (What each alias
+/// turned out to be is learned as start reports are folded, with what the
+/// start asked for: the session's model now may have been edited since.)
 fn backfill_models(db: &Db) -> Result<()> {
     db.backfill_models_from_events()?;
     for mut s in db.sessions(true)? {
@@ -1137,7 +1148,7 @@ fn backfill_models(db: &Db) -> Result<()> {
             db.save_changes(&before, &s)?;
         }
     }
-    db.learn_model_names()
+    Ok(())
 }
 
 /// Default agent, model and effort for a project's new sessions.

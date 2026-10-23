@@ -121,7 +121,8 @@ pub struct Session {
     pub state_since: Option<i64>,
     /// A first prompt to type into the agent once it's ready.
     pub pending_prompt: Option<String>,
-    /// The model and effort the agent reports using.
+    /// The model and effort the agent runs with: what it reported, else
+    /// what its start asked for (`Roster::start`).
     pub running_model: Option<String>,
     pub running_effort: Option<String>,
     /// A title the user set (or had generated); wins over the agent's.
@@ -276,9 +277,9 @@ impl Session {
             .or_else(|| self.model.clone())
     }
 
-    /// The effort to show: what was asked for, else what the agent reports.
+    /// The effort to show: what the agent runs with, else what was asked for.
     pub fn effort_label(&self) -> Option<String> {
-        self.effort.clone().or_else(|| self.running_effort.clone())
+        self.running_effort.clone().or_else(|| self.effort.clone())
     }
 
     /// The title: yours if you set one, else the agent's.
@@ -621,6 +622,11 @@ pub mod tests {
             ..Report::default()
         };
         s.apply(&event("idle", 20), &effort);
+        assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
+        assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
+        // Edited, it runs on as it was until its next start.
+        s.model = Some("haiku".into());
+        s.effort = Some("low".into());
         assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
         assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
     }

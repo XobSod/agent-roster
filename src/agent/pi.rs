@@ -263,7 +263,7 @@ mod tests {
         let report = read_report(
             PI,
             Some(
-                r#"{"conversation_id":"c-1","transcript_path":"/s/c-1.jsonl","cleared":false,"model":"claude-opus-4-8","effort":"medium","title":null,"context_window":1000000}"#,
+                r#"{"conversation_id":"c-1","transcript_path":"/s/c-1.jsonl","cleared":false,"started":true,"model":"claude-opus-4-8","effort":"medium","title":null,"context_window":1000000}"#,
             ),
         );
         assert_eq!(
@@ -272,6 +272,7 @@ mod tests {
                 conversation_id: Some("c-1".into()),
                 transcript_path: Some("/s/c-1.jsonl".into()),
                 cleared: false,
+                started: true,
                 model: Some("claude-opus-4-8".into()),
                 effort: Some("medium".into()),
                 title: Some(None),

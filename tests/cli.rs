@@ -367,7 +367,7 @@ echo "fake pi: $*"
 [ -f "$extension" ] && echo "with the extension"
 file="$PWD/.pi-$id.jsonl"
 report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
-report session "{\"conversation_id\":\"$id\",\"transcript_path\":\"$file\",\"model\":\"fake-model-1\",\"effort\":\"high\",\"title\":null,\"context_window\":200000}"
+report session "{\"conversation_id\":\"$id\",\"transcript_path\":\"$file\",\"model\":\"fake-model-1\",\"effort\":\"high\",\"title\":null,\"context_window\":200000,\"started\":true}"
 while read -r line; do
   report prompt '{}'
   echo "got: $line"
@@ -994,6 +994,61 @@ fn ls_shows_titles_models_and_filters() {
     t.ok(&["edit", "one", "--title", "Chosen review title"]);
     let chosen = t.ok(&["ls", "Chosen"]);
     assert!(chosen.contains("Chosen review title"), "{chosen}");
+}
+
+#[test]
+fn a_session_shows_the_model_and_effort_its_agent_runs_with() {
+    let Some(t) = TestEnv::new("running") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&[
+        "new", "demo", "--name", "one", "--model", "opus", "--effort", "high",
+    ]);
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let agent = |t: &TestEnv| {
+        let info = t.ok(&["info", "one"]);
+        let line = info.lines().find(|l| l.contains("claude"));
+        line.unwrap_or_default().to_string()
+    };
+    // Until its agent says, what its start asked for.
+    assert!(agent(&t).contains("claude · opus · high"), "{}", agent(&t));
+    t.report(
+        &id,
+        "session",
+        r#"{"session_id":"c","model":"claude-opus-5-5","source":"startup"}"#,
+    );
+    t.report(
+        &id,
+        "idle",
+        r#"{"session_id":"c","effort":{"level":"high"}}"#,
+    );
+    assert!(
+        agent(&t).contains("claude · Opus 5.5 · high"),
+        "{}",
+        agent(&t)
+    );
+
+    // Edited, it runs on as it was until its next start, which asks for the
+    // new ones: a model as it was learned to be, else as asked.
+    t.ok(&["edit", "one", "--model", "haiku", "--effort", "low"]);
+    assert!(
+        agent(&t).contains("claude · Opus 5.5 · high"),
+        "{}",
+        agent(&t)
+    );
+    t.ok(&["restart", "--yes", "one"]);
+    assert!(agent(&t).contains("claude · haiku · low"), "{}", agent(&t));
+    t.ok(&["edit", "one", "--model", "opus", "--effort", "default"]);
+    t.ok(&["restart", "--yes", "one"]);
+    let line = agent(&t);
+    assert!(
+        line.contains("claude · Opus 5.5") && !line.contains("low"),
+        "{line}"
+    );
 }
 
 #[test]

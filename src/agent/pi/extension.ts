@@ -33,10 +33,12 @@ export default function (pi: any) {
 
   // The conversation (it changes with /new, /resume and /fork), where it's
   // kept, and what it runs on.
-  const session = (ctx: any, cleared: boolean) => ({
+  const session = (ctx: any, reason?: string) => ({
     conversation_id: ctx.sessionManager.getSessionId(),
     transcript_path: ctx.sessionManager.getSessionFile() ?? null,
-    cleared,
+    cleared: reason === "new",
+    // pi itself started, not a resume, fork or reload inside it.
+    started: reason === "startup",
     model: ctx.model?.id ?? null,
     effort: ctx.thinkingLevel ?? null,
     title: ctx.sessionManager.getSessionName() ?? null,
@@ -45,7 +47,7 @@ export default function (pi: any) {
 
   // Waiting for a prompt.
   pi.on("session_start", (event: any, ctx: any) =>
-    report("session", session(ctx, event.reason === "new")),
+    report("session", session(ctx, event.reason)),
   );
   // You gave it a task; then it works until it has settled (agent_end can be
   // followed by retries and queued messages).

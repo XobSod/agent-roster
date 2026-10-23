@@ -139,6 +139,7 @@ impl Adapter for Claude {
             conversation_id: text(payload.get("session_id")),
             transcript_path: text(payload.get("transcript_path")),
             cleared: payload.get("source").and_then(Value::as_str) == Some("clear"),
+            started: payload.get("source").and_then(Value::as_str) == Some("startup"),
             model: text(payload.get("model")),
             effort: text(payload.pointer("/effort/level")),
             ..Report::default()
@@ -353,12 +354,13 @@ mod tests {
                 conversation_id: Some("c-1".into()),
                 transcript_path: Some("/t/c-1.jsonl".into()),
                 cleared: false,
+                started: true,
                 model: Some("claude-opus-5-5[1m]".into()),
                 ..Report::default()
             }
         );
         let report = read_report(CLAUDE, Some(r#"{"session_id":"c-2","source":"clear"}"#));
-        assert!(report.cleared);
+        assert!(report.cleared && !report.started);
         let report = read_report(CLAUDE, Some(r#"{"effort":{"level":"xhigh"}}"#));
         assert_eq!(report.effort.as_deref(), Some("xhigh"));
         assert_eq!(read_report(CLAUDE, Some("not json")), Report::default());

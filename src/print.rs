@@ -181,6 +181,9 @@ pub fn list_projects(r: &Roster) -> Result<()> {
         .iter()
         .map(|p| {
             let mut defaults = p.defaults_label(r.config.default_agent(), &models);
+            if p.origin.join(crate::paths::PROJECT_ENV).exists() {
+                defaults.push_str(" · env file");
+            }
             if chats == Some(p.id) {
                 defaults.push_str(" · built-in, for chats");
             }

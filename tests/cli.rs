@@ -1081,7 +1081,16 @@ fn ls_shows_titles_models_and_filters() {
     ]);
     fs::create_dir_all(t.path("other")).unwrap();
     t.ok(&["project", "add", "b", t.path("other").to_str().unwrap()]);
-    assert!(t.ok(&["project", "ls"]).contains("claude · opus · high"));
+    fs::write(t.path("other/.agent-roster.env"), "X=1\n").unwrap();
+    let projects = t.ok(&["project", "ls"]);
+    let line = |name: &str| {
+        let row = projects
+            .lines()
+            .find(|l| l.starts_with(&format!("{name} ")));
+        row.unwrap_or_default().to_string()
+    };
+    assert!(line("a").ends_with("claude · opus · high"), "{projects}");
+    assert!(line("b").ends_with("· env file"), "{projects}");
     t.ok(&["new", "a", "--name", "one"]);
     t.ok(&["new", "b", "--name", "two"]);
     let id = t.session("two", false).unwrap()["id"]

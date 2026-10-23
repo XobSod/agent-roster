@@ -55,6 +55,9 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
+    for notice in roster.take_notices() {
+        app.fail(notice);
+    }
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
@@ -315,6 +318,12 @@ fn reload(roster: &mut Roster, app: &mut App) {
     if app.mode == Mode::Sessions {
         fit(roster, app);
         update_preview(roster, app);
+    }
+    // Notices (roster's tmux not taking its config as a start started it),
+    // last: after any error showing (the start's own, say), not under one.
+    let notices = roster.take_notices();
+    if !notices.is_empty() {
+        app.fail_too(notices.join("; "));
     }
 }
 

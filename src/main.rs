@@ -375,15 +375,31 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let mut r = Roster::open()?;
+    // Roster's own, in the background: what they'd say goes nowhere.
+    let helper = matches!(
+        cli.command,
+        Some(Cmd::Deliver { .. } | Cmd::Retitle { auto: true, .. })
+    );
+    let mut r = if helper {
+        Roster::open_quietly()?
+    } else {
+        Roster::open()?
+    };
     let Some(command) = cli.command else {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            say_notices(&mut r);
             bail!("the TUI needs a terminal; see `roster --help` for the CLI");
         }
-        return tui::run(&mut r);
+        let done = tui::run(&mut r);
+        // What a TUI that didn't get going (another one open, say) didn't say.
+        say_notices(&mut r);
+        return done;
     };
+    say_notices(&mut r);
     let done = run_command(&mut r, command);
-    // What a refresh in it couldn't type in, whichever session's.
+    // What came up in it: a config the server it started didn't take, what a
+    // refresh couldn't type in, whichever session's.
+    say_notices(&mut r);
     for u in r.take_undelivered() {
         eprintln!("roster: {}", u.message);
     }
@@ -474,8 +490,17 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Attach { session, yes } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
-            if s.state == State::Stopped && !confirm_new_conversation(r, &s, yes)? {
-                return Ok(());
+            if s.state == State::Stopped {
+                if !confirm_new_conversation(r, &s, yes)? {
+                    return Ok(());
+                }
+                // Here, so what starting says comes before tmux takes the
+                // terminal; unless another roster started it while asking.
+                r.refresh()?;
+                if r.db.session(&s.id)?.state == State::Stopped {
+                    r.start(&s.id)?;
+                    say_notices(r);
+                }
             }
             r.attach(&s.id)?;
         }
@@ -642,6 +667,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             let copy = if fork { " as a copy" } else { "" };
             println!("Adopted {}{copy} ({})", s.label(), s.id);
             if attach {
+                say_notices(r);
                 r.attach(&s.id)?;
             }
         }
@@ -769,6 +795,7 @@ fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()
     let waits = prompted && !attach;
     let s = r.new_session(request)?;
     println!("Started {} ({})", s.label(), s.id);
+    say_notices(r);
     if waits {
         if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
             println!("Sent the first prompt");
@@ -805,6 +832,13 @@ fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> 
         s.agent
     );
     confirm(&question, yes)
+}
+
+/// Says on stderr what came up that isn't worth failing for (`take_notices`).
+fn say_notices(r: &mut Roster) {
+    for notice in r.take_notices() {
+        eprintln!("roster: {notice}");
+    }
 }
 
 fn confirm(question: &str, yes: bool) -> Result<bool> {

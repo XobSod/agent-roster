@@ -160,17 +160,23 @@ impl crate::engine::Roster {
         }
     }
 
-    /// Puts `config` in use, then in roster's tmux too (its back key, its
-    /// line): an error is about that, `config` is in use.
+    /// Puts `config` in use, then in roster's tmux too if its back key or
+    /// line changed: an error is about that, `config` is in use. Only then:
+    /// that reads the whole config again, the user's tmux.conf with it, so a
+    /// mistake there is said again, and what it adds is added again.
     fn use_config(&mut self, config: Config, text: String) -> Result<()> {
+        let tmux_changed = config.keys.detach != self.config.keys.detach
+            || config.status_line() != self.config.status_line();
         self.config = config;
         self.config_text = text;
-        if self.tmux.write_config(
-            &self.config.keys.detach,
-            &self.paths.user_tmux_conf(),
-            self.config.status_line(),
-        )? {
-            self.tmux.reload_config()?;
+        if tmux_changed
+            && let Some(e) = self.tmux.apply_config(
+                &self.config.keys.detach,
+                &self.paths.user_tmux_conf(),
+                self.config.status_line(),
+            )?
+        {
+            return Err(e);
         }
         Ok(())
     }

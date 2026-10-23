@@ -732,6 +732,131 @@ fn config_changes_reach_a_running_server() {
     .unwrap();
     t.ok(&["ls"]);
     assert!(root_keys().contains("F9"));
+
+    // One with an error is said once, and roster goes on: it isn't read
+    // again until it changes, since that would run what it holds again.
+    let user_conf = t.config_dir().join("tmux.conf");
+    fs::write(
+        &user_conf,
+        "bind -n F10 display-message hi\nno-such-command\n",
+    )
+    .unwrap();
+    let out = t.run(&["ls"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success()
+            && err.contains("tmux.conf:2: unknown command: no-such-command")
+            && err.contains("roster's tmux goes on without it"),
+        "{err}"
+    );
+    let out = t.run(&["ls"]);
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    // A line tmux skips: the rest is run once, not at every roster command.
+    fs::write(
+        &user_conf,
+        "set -ag @roster_test x\nset -g no-such-option 1\n",
+    )
+    .unwrap();
+    let out = t.run(&["ls"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid option: no-such-option"),
+        "{out:?}"
+    );
+    let out = t.run(&["ls"]);
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let option = Command::new("tmux")
+        .args(["-L", &t.socket, "show", "-gv", "@roster_test"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&option.stdout).trim(), "x");
+    // Said by the next roster you run: not taken by one of roster's own in
+    // the background, whose output goes nowhere, nor lost by a TUI that
+    // can't start.
+    fs::write(&user_conf, "no-such-command\n").unwrap();
+    let out = t.run(&["deliver", "claude-1"]);
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    let out = t.run(&[]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("unknown command: no-such-command")
+            && err.contains("the TUI needs a terminal"),
+        "{err}"
+    );
+    // Changing a setting meanwhile doesn't say it again.
+    t.ok(&["config", "set", "agents.claude.title_model", "haiku"]);
+    fs::write(&user_conf, "bind -n F11 display-message hi\n").unwrap();
+    let out = t.run(&["ls"]);
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert!(root_keys().contains("F11"));
+    let out = t.run(&["ls"]);
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+#[test]
+fn a_tmux_conf_with_an_error_is_said_when_the_server_starts_too() {
+    let Some(t) = TestEnv::new("coldconf") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    let user_conf = t.config_dir().join("tmux.conf");
+    let tmux = |args: &[&str]| {
+        let out = Command::new("tmux")
+            .args(["-L", &t.socket])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let option = || tmux(&["show", "-gv", "@roster_test"]);
+    // A good one: nothing said, and run once, not again to check it.
+    fs::write(&user_conf, "set -ag @roster_test x\n").unwrap();
+    let out = t.run(&["new", "demo", "--name", "one"]);
+    assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
+    assert_eq!(option(), "x");
+
+    // A line tmux skips: said once as the server starts (it says nothing
+    // itself), the rest of the file run once, and the session runs anyway.
+    tmux(&["kill-server"]);
+    fs::write(
+        &user_conf,
+        "set -ag @roster_test x\nset -g no-such-option 1\n",
+    )
+    .unwrap();
+    let out = t.run(&["new", "demo", "--name", "two"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success()
+            && err
+                .matches("tmux.conf:2: invalid option: no-such-option")
+                .count()
+                == 1
+            && err.contains("roster's tmux goes on without it"),
+        "{err}"
+    );
+    assert_eq!(t.session("two", false).unwrap()["state"], "working");
+    let out = t.run(&["ls"]);
+    assert!(out.stderr.is_empty(), "{out:?}");
+    assert_eq!(option(), "x");
+
+    // One tmux can't read at all: said too.
+    tmux(&["kill-server"]);
+    fs::write(&user_conf, "no-such-command\n").unwrap();
+    let out = t.run(&["start", "one"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success()
+            && err
+                .matches("tmux.conf:1: unknown command: no-such-command")
+                .count()
+                == 1,
+        "{err}"
+    );
+    // Fixed, it's read at the next roster command.
+    fs::write(&user_conf, "set -g @roster_test fixed\n").unwrap();
+    let out = t.run(&["ls"]);
+    assert!(out.stderr.is_empty(), "{out:?}");
+    assert_eq!(option(), "fixed");
 }
 
 #[test]

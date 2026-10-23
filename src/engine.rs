@@ -32,6 +32,12 @@ fn new_note(text: &str, pin: Option<usize>) -> Option<Note> {
     })
 }
 
+/// What's said of a config roster's tmux didn't take: what tmux said first
+/// (a long message is cut at its end), and that roster goes on.
+fn config_notice(e: &anyhow::Error) -> String {
+    format!("{e} (roster's tmux goes on without it)")
+}
+
 /// Window size for new sessions when roster isn't run from a terminal.
 const DEFAULT_SIZE: (u16, u16) = (160, 48);
 /// How long `stop` waits after SIGTERM before SIGKILL.
@@ -67,6 +73,9 @@ pub struct Roster {
     /// Why first prompts weren't typed in, to say (`take_undelivered`): not
     /// errors of the refresh, which goes on for the other sessions.
     undelivered: Vec<Undelivered>,
+    /// What went wrong that isn't worth failing for: roster's tmux not
+    /// taking its config, on opening or as a start starts the server.
+    notices: Vec<String>,
 }
 
 /// A first prompt `refresh` couldn't type into session `id`, and why;
@@ -83,6 +92,18 @@ const PROMPT_TRIES: u32 = 3;
 
 impl Roster {
     pub fn open() -> Result<Roster> {
+        Roster::open_with(true)
+    }
+
+    /// For roster's own helpers in the background (typing a first prompt in,
+    /// an automatic title), whose output goes nowhere: roster's tmux config
+    /// is left to the next roster you run, which says what's wrong with it,
+    /// since a mistake is said only once.
+    pub fn open_quietly() -> Result<Roster> {
+        Roster::open_with(false)
+    }
+
+    fn open_with(apply_tmux_config: bool) -> Result<Roster> {
         let paths = Paths::from_env()?;
         let (config, config_text) = Config::load_text(&paths.config_file())?;
         fs::create_dir_all(&paths.state_dir)
@@ -90,13 +111,17 @@ impl Roster {
         let db = Db::open(&paths.db())?;
         backfill_models(&db)?;
         let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
-        // A changed detach key or user tmux.conf also applies to a running server.
-        if tmux.write_config(
-            &config.keys.detach,
-            &paths.user_tmux_conf(),
-            config.status_line(),
-        )? {
-            tmux.reload_config()?;
+        // A changed detach key or user tmux.conf also applies to a running
+        // server. One it doesn't take is said, and roster goes on.
+        let mut notices = Vec::new();
+        if apply_tmux_config
+            && let Some(e) = tmux.apply_config(
+                &config.keys.detach,
+                &paths.user_tmux_conf(),
+                config.status_line(),
+            )?
+        {
+            notices.push(config_notice(&e));
         }
         let exe = std::env::current_exe().context("can't find roster's own path")?;
         Ok(Roster {
@@ -108,6 +133,7 @@ impl Roster {
             resized: HashMap::new(),
             prompt_tries: HashMap::new(),
             undelivered: Vec::new(),
+            notices,
             panes: None,
             config_text,
             config_refused: None,
@@ -240,6 +266,11 @@ impl Roster {
     /// First prompts `refresh` couldn't type in since this was last asked.
     pub fn take_undelivered(&mut self) -> Vec<Undelivered> {
         std::mem::take(&mut self.undelivered)
+    }
+
+    /// What went wrong that isn't worth failing for (`notices`), to be said.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
     }
 
     /// Makes `id`'s automatic title in a roster process of its own: it takes
@@ -620,7 +651,13 @@ impl Roster {
             ("ROSTER_EXE", self.exe.to_string_lossy().into_owned()),
         ];
         let name = s.tmux_name();
-        if self.panes()?.contains_key(&name) {
+        // No panes, no server: tmux exits with its last session (unless the
+        // user's tmux.conf turns exit-empty off; checking then finds nothing).
+        let (has_pane, no_server) = {
+            let panes = self.panes()?;
+            (panes.contains_key(&name), panes.is_empty())
+        };
+        if has_pane {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)?;
         } else {
             let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
@@ -628,6 +665,10 @@ impl Roster {
             let size = (w, h - u16::from(self.config.status_line() && h > 1));
             self.tmux
                 .new_session(&name, &s.workdir, size, &env, &argv)?;
+            // The session runs either way, so what this finds is only said.
+            if no_server && let Some(e) = self.tmux.check_config() {
+                self.notices.push(config_notice(&e));
+            }
         }
         let now = now_ms();
         if launch.conversation_id.is_some() {

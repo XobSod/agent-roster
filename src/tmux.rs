@@ -92,25 +92,63 @@ impl Tmux {
         Tmux { socket, conf }
     }
 
-    /// Writes the generated config, which tmux reads when the server starts.
-    /// Returns true if it changed (including edits to the user's tmux.conf).
-    pub fn write_config(
+    /// Writes the generated config, which tmux reads when the server starts,
+    /// and has a running server read it, when it changed (including edits to
+    /// the user's tmux.conf). Some(error) if the server didn't take it (the
+    /// user's tmux.conf has a mistake, say), what tmux said on one line. Said
+    /// once, not tried again: that would run the user's file again, adding
+    /// twice what it adds; a fix changes the file, which is reloaded then. An
+    /// error writing it is an error.
+    pub fn apply_config(
         &self,
         detach_key: &str,
         user_conf: &Path,
         status_line: bool,
-    ) -> Result<bool> {
+    ) -> Result<Option<anyhow::Error>> {
         let text = config_text(detach_key, user_conf, status_line);
         if fs::read_to_string(&self.conf).ok().as_deref() == Some(text.as_str()) {
-            return Ok(false);
+            return Ok(None);
         }
-        fs::write(&self.conf, text)
-            .with_context(|| format!("can't write {}", self.conf.display()))?;
-        Ok(true)
+        self.write_config(&text)?;
+        Ok(self
+            .reload_config()
+            .err()
+            .map(|e| anyhow::anyhow!(crate::util::one_line(&format!("{e:#}")))))
+    }
+
+    /// For a server that just started: what tmux found wrong in the config it
+    /// started with (the user's tmux.conf, or a file that sources). It says
+    /// nothing then, but keeps it, and the next `source-file` prints it, so
+    /// sourcing nothing (`-n /dev/null`) asks without running the user's file
+    /// again, which would add twice what it adds. Said once, as
+    /// `apply_config`'s.
+    pub fn check_config(&self) -> Option<anyhow::Error> {
+        let flushed = self.run([
+            OsStr::new("source-file"),
+            OsStr::new("-n"),
+            OsStr::new("/dev/null"),
+        ]);
+        match flushed {
+            Ok(said) if said.trim().is_empty() => None,
+            Ok(said) => Some(anyhow::anyhow!("tmux: {}", crate::util::one_line(&said))),
+            Err(e) if is_missing(&e) => None,
+            Err(e) => Some(e),
+        }
+    }
+
+    /// Writes `text` as the generated config, whole, so a server starting
+    /// meanwhile never reads half of it.
+    fn write_config(&self, text: &str) -> Result<()> {
+        let part = self
+            .conf
+            .with_extension(format!("{}.part", std::process::id()));
+        fs::write(&part, text)
+            .and_then(|()| fs::rename(&part, &self.conf))
+            .with_context(|| format!("can't write {}", self.conf.display()))
     }
 
     /// Makes a running server re-read the generated config.
-    pub fn reload_config(&self) -> Result<()> {
+    fn reload_config(&self) -> Result<()> {
         match self.run([OsStr::new("source-file"), self.conf.as_os_str()]) {
             Err(e) if is_missing(&e) => Ok(()),
             other => other.map(drop),
@@ -149,7 +187,12 @@ impl Tmux {
         cmd.args(args);
         let out = cmd.output().context("can't run tmux (is it installed?)")?;
         if !out.status.success() {
-            bail!("tmux: {}", String::from_utf8_lossy(&out.stderr).trim());
+            // A config file's mistakes come on stdout (`source-file`).
+            let said = match String::from_utf8_lossy(&out.stderr).trim() {
+                "" => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                err => err.to_string(),
+            };
+            bail!("tmux: {said}");
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
@@ -541,11 +584,18 @@ fn pane_target(name: &str) -> String {
     format!("={name}:")
 }
 
+/// Whether tmux said there's no such server or session: at the start of what
+/// it said, so a config file's mistake that mentions one isn't taken for it.
 fn is_missing(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
-    msg.contains("can't find session")
-        || msg.contains("no server running")
-        || msg.contains("error connecting")
+    let said = msg.strip_prefix("tmux: ").unwrap_or(&msg);
+    [
+        "can't find session",
+        "no server running",
+        "error connecting",
+    ]
+    .iter()
+    .any(|m| said.starts_with(m))
 }
 
 fn config_text(detach_key: &str, user_conf: &Path, status_line: bool) -> String {
@@ -610,6 +660,20 @@ source-file -q \"{user_conf}\"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_server_or_session_counts_as_missing() {
+        let missing = |said: &str| is_missing(&anyhow::anyhow!("tmux: {said}"));
+        assert!(missing("no server running on /tmp/tmux-1000/agent-roster"));
+        assert!(missing(
+            "error connecting to /tmp/tmux-1000/agent-roster (No such file or directory)"
+        ));
+        assert!(missing("can't find session: r-1234"));
+        // A config file's mistake that mentions one (tmux says those on stdout).
+        assert!(!missing(
+            "/home/u/.config/agent-roster/tmux.conf:3: can't find session: x"
+        ));
+    }
 
     #[test]
     fn config_binds_only_the_detach_key_and_sources_user_file() {

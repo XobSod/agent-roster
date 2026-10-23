@@ -135,6 +135,10 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         if let Some(offered) = app.listing.as_ref().and_then(|r| r.try_recv().ok()) {
             app.models.offered = offered;
             app.listing = None;
+            // Into a form opened before they came, too.
+            if let Some(app::Dialog::Form(form)) = &mut app.dialog {
+                form.set_models(&app.models);
+            }
         }
         // Titles asked for (`s t`) that have come, kept and said.
         if titles_arrived(roster, app) {

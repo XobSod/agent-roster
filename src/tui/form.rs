@@ -450,9 +450,15 @@ impl Form {
     /// an alias as it turned out (learned from sessions; "latest" until
     /// known), any other by what its agent says of it.
     pub fn with_models(mut self, models: &Models) -> Form {
+        self.set_models(models);
+        self
+    }
+
+    /// What's known of the agents' models now, as more arrive (see
+    /// `tui::list_models`); what's in the form stays.
+    pub fn set_models(&mut self, models: &Models) {
         self.models = models.clone();
         self.update();
-        self
     }
 
     /// Enter's verb, for the hint.
@@ -1218,6 +1224,31 @@ mod tests {
             form.field(Id::RunOn).unwrap().notes["defaults"],
             "Claude's default model · its default effort"
         );
+    }
+
+    #[test]
+    fn models_arriving_later_reach_an_open_form() {
+        let projects = [project("api", None)];
+        let agents = vec!["claude".to_string(), "pi".to_string()];
+        let mut form = Form::new_session(&projects, None, &agents).with_models(&Models::known());
+        form.on_key(key(KeyCode::Right)); // pi
+        let model = form.fields.iter().position(|f| f.id == Id::Model).unwrap();
+        form.fields[model].value = "typed-model".into();
+        let mut models = Models::known();
+        models.offered.insert(
+            "pi".into(),
+            vec![agent::Model {
+                id: "fake-model-1".into(),
+                note: None,
+            }],
+        );
+        form.set_models(&models);
+        let Kind::Combo(options) = &form.fields[model].kind else {
+            panic!("not a combo");
+        };
+        assert!(options.contains(&"fake-model-1".to_string()), "{options:?}");
+        // What was typed stays.
+        assert_eq!(form.fields[model].value, "typed-model");
     }
 
     #[test]

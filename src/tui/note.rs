@@ -8,8 +8,11 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use edtui::actions::delete::{DeleteToEndOfLine, DeleteWordBackward, ReplaceChar};
-use edtui::actions::{Chainable, MoveForward, MoveToFirst, MoveToStartOfLine, SwitchMode};
+use edtui::actions::delete::{DeleteToEndOfLine, DeleteWordBackward, RemoveChar, ReplaceChar};
+use edtui::actions::{
+    Chainable, CopySelection, MoveBackward, MoveForward, MoveToFirst, MoveToStartOfLine, Paste,
+    SwitchMode,
+};
 use edtui::events::{KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Index2, Lines};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,6 +27,13 @@ pub const TAB_WIDTH: usize = 4;
 /// What `r` replaces with as edtui's own keys (so `.` repeats it): ASCII, and
 /// Latin-1 and Latin Extended-A (Polish, Czech, German, French letters, …).
 const REPLACEABLE: [std::ops::RangeInclusive<char>; 2] = [' '..='~', '\u{a0}'..='\u{17f}'];
+
+/// The mark's key: a change of roster's own (`x`, `X`) is given to edtui as
+/// this, which it keeps as its last for `.` to repeat. No key typed reaches
+/// edtui as it (`shifted`).
+fn mark() -> KeyInput {
+    KeyInput::shift('.')
+}
 
 /// Keys that leave insert mode typed quickly (`jk`), and how soon each must
 /// follow the one before.
@@ -45,6 +55,8 @@ pub struct NoteEditor {
     lines: Vec<String>,
     /// `Z` or `m`, waiting for its second key.
     pending: Option<char>,
+    /// The change of roster's own (`x` or `X`) the mark stands for.
+    repeat: Option<char>,
     /// The key (`f`, `t` or `r`) after which the next is a character for it,
     /// not a command.
     char_arg: Option<char>,
@@ -97,6 +109,7 @@ impl NoteEditor {
             base: s.note.clone(),
             lines,
             pending: None,
+            repeat: None,
             char_arg: None,
             command: None,
             escape,
@@ -290,6 +303,23 @@ impl NoteEditor {
                 }
                 return Outcome::None;
             }
+            // `x` (Delete too) and `X` are roster's (`take_char`), and `.`
+            // repeats them by way of the mark.
+            if matches!(e.code, KeyCode::Char('x' | 'X') | KeyCode::Delete) && plain {
+                let change = if e.code == KeyCode::Char('X') {
+                    'X'
+                } else {
+                    'x'
+                };
+                // Unless it ends a sequence edtui was in (`dx`), which then
+                // takes nothing, as in vim.
+                self.keys.on_key_event(mark(), &mut self.state.borrow_mut());
+                if self.unmarked() {
+                    self.repeat = Some(change);
+                    self.take_char(change);
+                }
+                return Outcome::None;
+            }
         }
         // Ctrl+C is Esc, as in vim.
         let e = if ctrl && e.code == KeyCode::Char('c') {
@@ -316,6 +346,15 @@ impl NoteEditor {
                 self.follow(rows);
             }
             _ => self.feed(e),
+        }
+        // `.` that replayed the mark: roster's change again. However edtui
+        // took it as `.`: Alt+`.` too, and after `yf`, which it doesn't know.
+        if e.code == KeyCode::Char('.')
+            && mode == EditorMode::Normal
+            && self.unmarked()
+            && let Some(change) = self.repeat
+        {
+            self.take_char(change);
         }
         // Keys that take the next character: f and t (df, ct, …), and r.
         self.char_arg = match e.code {
@@ -400,6 +439,44 @@ impl NoteEditor {
         self.pin = (self.pin != Some(row)).then_some(row);
     }
 
+    /// `x`, or `X`: the character under the cursor, or before it, yanked and
+    /// taken out. As in vim, nothing on an empty line, nor for `X` at a
+    /// line's start (where the cursor shows: `feed`).
+    fn take_char(&mut self, change: char) {
+        let rows = {
+            let mut state = self.state.borrow_mut();
+            let len = state.lines.len_col(state.cursor.row).unwrap_or(0);
+            let col = state.cursor.col.min(len.saturating_sub(1));
+            if len == 0 || (change == 'X' && col == 0) {
+                return;
+            }
+            state.cursor.col = col;
+            if change == 'X' {
+                state.execute(MoveBackward(1));
+            }
+            // Selected, it's copied first.
+            state.execute(
+                SwitchMode(EditorMode::Visual)
+                    .chain(CopySelection)
+                    .chain(SwitchMode(EditorMode::Normal))
+                    .chain(RemoveChar(1)),
+            );
+            rows(&state)
+        };
+        self.follow(rows);
+    }
+
+    /// Back in normal mode if edtui just ran the mark, given it or by `.`:
+    /// whether it did.
+    fn unmarked(&mut self) -> bool {
+        let mut state = self.state.borrow_mut();
+        let marked = state.mode == EditorMode::Search;
+        if marked {
+            state.mode = EditorMode::Normal;
+        }
+        marked
+    }
+
     /// A key for edtui; the pin follows its line through what it did.
     fn feed(&mut self, e: KeyEvent) {
         let rows = {
@@ -465,8 +542,9 @@ impl NoteEditor {
     }
 }
 
-/// edtui's vim keys, and some it lacks: `C`, `cc` and `S`, `^`, `r`, and
-/// Ctrl+W in insert mode (as in roster's other text fields).
+/// edtui's vim keys, `p` as vim's (below the last line too), some it lacks
+/// (`C`, `cc` and `S`, `^`, `r`, and Ctrl+W in insert mode, as in roster's
+/// other text fields), and the mark. (`x` and `X` are roster's: `on_key_at`.)
 fn vim_keys() -> EditorEventHandler {
     let mut keys = EditorEventHandler::vim_mode();
     let k = &mut keys.key_handler;
@@ -500,6 +578,33 @@ fn vim_keys() -> EditorEventHandler {
             insert().chain(MoveToStartOfLine()).chain(DeleteToEndOfLine),
         );
     }
+    // edtui's `x` and Delete, which don't yank, out: those are roster's. (A
+    // key roster gives edtui as f's character after a `yf`, which edtui
+    // doesn't know, would reach them.)
+    for key in [KeyInput::new('x'), KeyInput::new(KeyCode::Delete)] {
+        k.remove(&KeyEventRegister::n(vec![key]));
+    }
+    // The mark: does nothing but leave edtui in search mode, which no change
+    // of edtui's does. Insert mode on the way, by way of search mode (no
+    // undo point), makes it a change edtui keeps for `.`.
+    k.insert(
+        KeyEventRegister::n(vec![mark()]),
+        SwitchMode(EditorMode::Search)
+            .chain(SwitchMode(EditorMode::Insert))
+            .chain(SwitchMode(EditorMode::Search)),
+    );
+    // `p` puts a line below the cursor's, the last one's too: edtui puts it
+    // above the last line, except in insert mode. Into it by way of search
+    // mode, which takes no undo point (so one `u` undoes it), and out the
+    // same way, which leaves the cursor where the paste left it.
+    k.insert(
+        KeyEventRegister::n(vec![KeyInput::new('p')]),
+        SwitchMode(EditorMode::Search)
+            .chain(SwitchMode(EditorMode::Insert))
+            .chain(Paste)
+            .chain(SwitchMode(EditorMode::Search))
+            .chain(SwitchMode(EditorMode::Normal)),
+    );
     k.insert(KeyEventRegister::n(vec![KeyInput::new('^')]), MoveToFirst());
     k.insert(KeyEventRegister::v(vec![KeyInput::new('^')]), MoveToFirst());
     k.insert(
@@ -684,6 +789,93 @@ mod tests {
         e.on_key(ctrl_w);
         keys(&mut e, "\x1b");
         assert_eq!(e.text(), "  irst\nsecond\ny and ");
+    }
+
+    #[test]
+    fn x_and_shift_x_yank_and_p_puts_after_as_in_vim() {
+        // xp swaps two characters; X takes the one before the cursor.
+        let mut e = editor(Some("ab\ncd"), None);
+        keys(&mut e, "xp");
+        assert_eq!(e.text(), "ba\ncd");
+        // One u undoes each.
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "b\ncd");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "ab\ncd");
+        keys(&mut e, "j$Xp");
+        assert_eq!(e.text(), "ab\ndc");
+        // P puts before the cursor; . repeats x, yanking too.
+        keys(&mut e, "0xP");
+        assert_eq!(e.text(), "ab\ndc");
+        keys(&mut e, "k0x.p");
+        assert_eq!(e.text(), "b\ndc");
+        // X at a line's start, and x on an empty line, take nothing, and
+        // leave what was yanked.
+        keys(&mut e, "0Xo\x1bxp");
+        assert_eq!(e.text(), "b\nb\ndc");
+    }
+
+    #[test]
+    fn dot_repeats_x_and_shift_x_as_vim_does() {
+        // X.. takes back to the line's start, and no further.
+        let mut e = editor(Some("abc"), None);
+        keys(&mut e, "$X..p");
+        assert_eq!(e.text(), "ca");
+        // On an empty line, it takes nothing and leaves what was yanked.
+        let mut e = editor(Some("ab\n\ncd"), None);
+        keys(&mut e, "xj.p");
+        assert_eq!(e.text(), "b\na\ncd");
+        // An x that took nothing is still what . repeats, not the dd before.
+        let mut e = editor(Some("a\nb\n\nc"), None);
+        keys(&mut e, "ddjx.");
+        assert_eq!(e.text(), "b\n\nc");
+        keys(&mut e, "j.");
+        assert_eq!(e.text(), "b\n\n");
+        // A change after it is what . repeats then.
+        let mut e = editor(Some("ab"), None);
+        keys(&mut e, "xiz\x1b.");
+        assert_eq!(e.text(), "zzb");
+        // Ending a sequence (dx), x takes nothing; Delete is x.
+        let mut e = editor(Some("ab"), None);
+        keys(&mut e, "dx");
+        assert_eq!(e.text(), "ab");
+        e.on_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        keys(&mut e, "p");
+        assert_eq!(e.text(), "ba");
+        // One u undoes X; an X that took nothing left nothing to undo.
+        keys(&mut e, "$X0Xu");
+        assert_eq!(e.text(), "ba");
+        // A `.` edtui takes another way repeats it too, and the editor stays
+        // in normal mode: Alt+`.`, and `.` after `yf`, which edtui doesn't
+        // know. Nor does a key after `yf` reach an x of edtui's.
+        let mut e = editor(Some("abcd"), None);
+        keys(&mut e, "x");
+        e.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+        assert_eq!((e.text().as_str(), e.mode()), ("cd", EditorMode::Normal));
+        keys(&mut e, "yf.");
+        assert_eq!((e.text().as_str(), e.mode()), ("d", EditorMode::Normal));
+        keys(&mut e, "yfxp");
+        assert_eq!(e.text(), "dc");
+    }
+
+    #[test]
+    fn ddp_swaps_a_line_with_the_next_the_last_but_one_too() {
+        let mut e = editor(Some("one\ntwo"), None);
+        keys(&mut e, "ddp");
+        assert_eq!(e.text(), "two\none");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "two");
+        keys(&mut e, "u");
+        assert_eq!(e.text(), "one\ntwo");
+        // On the last line, p puts below it; . puts again.
+        let mut e = editor(Some("one\ntwo\nsix"), None);
+        keys(&mut e, "Gyyp");
+        assert_eq!(e.text(), "one\ntwo\nsix\nsix");
+        keys(&mut e, "ggddGp.");
+        assert_eq!(e.text(), "two\nsix\nsix\none\none");
+        // P puts above the line.
+        keys(&mut e, "ggP");
+        assert_eq!(e.text(), "one\ntwo\nsix\nsix\none\none");
     }
 
     #[test]

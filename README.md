@@ -92,7 +92,7 @@ Roster can tell when one is open in Claude, but not in pi.
 Each session can have a note, what's left to do in it, say. `s o` opens it under the
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
 insert and visual mode, motions, `C`, `r` (`rx` ticks a box, `.` the next), `ciw` and
-the like, `/` search, `u`, `.` (no counts). `:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
+the like, `xp` and `ddp`, `/` search, `u`, `.` (no counts). `:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
 unsaved changes, which `:q!` and `ZQ` leave. A note saved meanwhile by something else
 (`roster note`, an agent using it) isn't saved over: `:w!` (`:wq!`, `:x!`) does that;
 in `$EDITOR`, what you wrote is kept in its file instead, and roster says where. `Esc` doesn't close it, so pressing it once

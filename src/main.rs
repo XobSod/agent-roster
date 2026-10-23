@@ -147,8 +147,12 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Stop a session's agent, keeping the session
-    Stop { session: String },
+    /// Stop a session's agent, keeping the session (asks first if it's working)
+    Stop {
+        session: String,
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Stop and start a session, resuming its conversation
     Restart {
         session: String,
@@ -485,8 +489,14 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             r.start(&s.id)?;
             println!("Started {}", s.label());
         }
-        Cmd::Stop { session } => {
+        Cmd::Stop { session, yes } => {
+            r.refresh()?;
             let s = r.resolve(&session, false)?;
+            if s.state == State::Working
+                && !confirm(&format!("{} is working. Stop it?", s.label()), yes)?
+            {
+                return Ok(());
+            }
             if r.stop(&s.id)? {
                 println!("Stopped {}", s.label());
             } else {

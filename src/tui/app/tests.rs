@@ -250,7 +250,7 @@ fn menus_open_with_their_key_and_reuse_letters() {
 }
 
 #[test]
-fn archive_and_working_restart_ask_first() {
+fn archive_and_working_stop_or_restart_ask_first() {
     let mut app = app();
     select(&mut app, "s1");
     assert_eq!(keys(&mut app, "sd"), None);
@@ -263,6 +263,14 @@ fn archive_and_working_restart_ask_first() {
     select(&mut app, "s4");
     assert_eq!(keys(&mut app, "sr"), None);
     assert_eq!(keys(&mut app, "y"), Some(Op::Restart("s4".into())));
+    assert_eq!(keys(&mut app, "sx"), None);
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Confirm { question, .. }) if question.contains("is working. Stop it?"))
+    );
+    assert_eq!(keys(&mut app, "n"), None);
+    assert!(app.dialog.is_none());
+    assert_eq!(keys(&mut app, "sx"), None);
+    assert_eq!(keys(&mut app, "y"), Some(Op::Stop("s4".into())));
 }
 
 #[test]

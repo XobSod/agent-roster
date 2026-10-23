@@ -73,7 +73,9 @@ fn tui_walkthrough() {
     term.wait_for("the agent's echo in the preview", "typed while attached");
     t.ok(&["edit", "one", "--title", ""]);
 
-    // Stop it: it moves to the Stopped shelf, still selected.
+    // Stop it once its turn is over (a working one asks first): it moves
+    // to the Stopped shelf, still selected.
+    term.wait_for("its turn over", "· idle");
     term.keys(&["s", "x"]);
     term.wait_for("the stop", "Stopped demo/one");
     term.wait_for("the Stopped shelf", "Stopped (1)");

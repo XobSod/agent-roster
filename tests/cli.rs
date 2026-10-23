@@ -339,7 +339,14 @@ fn generic_agents_are_tracked_by_their_screen() {
         "{err}"
     );
     t.ok(&["restart", "--yes", "g"]);
-    t.ok(&["stop", "g"]);
+    // Just started, it's working: stopping it asks, as restarting does.
+    let out = t.run(&["stop", "g"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("is working. Stop it?") && err.contains("--yes"),
+        "{err}"
+    );
+    t.ok(&["stop", "--yes", "g"]);
     assert!(!t.run(&["start", "g"]).status.success());
     assert!(!t.run(&["attach", "g"]).status.success());
     t.ok(&["start", "--yes", "g"]);
@@ -891,7 +898,7 @@ fn doctor_finds_orphans_and_fixes_them() {
     t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
     t.ok(&["new", "demo", "--name", "api"]);
     t.ok(&["new", "demo", "--name", "old"]);
-    t.ok(&["stop", "old"]);
+    t.ok(&["stop", "--yes", "old"]);
     let report = t.ok(&["doctor"]);
     assert!(report.contains("✓ back key    C-q, bound"), "{report}");
     assert!(report.contains("✓ environment clean"), "{report}");

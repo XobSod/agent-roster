@@ -245,6 +245,15 @@ impl App {
                 None
             }
             Action::Start => Some(Op::Start(s.id)),
+            // Stopping a working session cuts its turn short, as restarting
+            // one does: both ask.
+            Action::Stop if s.state == State::Working => {
+                self.confirm(
+                    format!("{} is working. Stop it?", s.label()),
+                    Op::Stop(s.id),
+                );
+                None
+            }
             Action::Stop => Some(Op::Stop(s.id)),
             Action::Restart if s.state == State::Working => {
                 self.confirm(

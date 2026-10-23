@@ -596,6 +596,18 @@ impl Form {
             f.kind = Kind::Combo(options(DEFAULT, &offered));
             f.notes = notes;
         }
+        // Codex takes its first prompt on its command line (`takes_prompt`).
+        let given = agent::adapter(self.agent()).takes_prompt();
+        if let Some(Field {
+            kind: Kind::Text { placeholder, .. },
+            ..
+        }) = self.field_mut(Id::Prompt)
+        {
+            *placeholder = match given {
+                true => "optional: it starts with it".into(),
+                false => "optional: typed in once the agent is ready".into(),
+            };
+        }
         let chosen_effort = self.chosen().1;
         if let Some(f) = self.field_mut(Id::Effort) {
             f.hidden = choices.is_none();
@@ -1249,6 +1261,23 @@ mod tests {
         assert!(options.contains(&"fake-model-1".to_string()), "{options:?}");
         // What was typed stays.
         assert_eq!(form.fields[model].value, "typed-model");
+    }
+
+    #[test]
+    fn the_first_prompt_says_how_the_agent_gets_it() {
+        let projects = [project("api", None)];
+        let agents = vec!["claude".to_string(), "codex".to_string()];
+        let mut form = Form::new_session(&projects, None, &agents);
+        let placeholder = |form: &Form| match &form.field(Id::Prompt).unwrap().kind {
+            Kind::Text { placeholder, .. } => placeholder.clone(),
+            _ => panic!("not text"),
+        };
+        assert_eq!(
+            placeholder(&form),
+            "optional: typed in once the agent is ready"
+        );
+        form.on_key(key(KeyCode::Right)); // codex
+        assert_eq!(placeholder(&form), "optional: it starts with it");
     }
 
     #[test]

@@ -2,14 +2,14 @@
 //! `codex resume` continues a conversation and `codex fork` copies one, and its
 //! rollout file gives the statistics. Codex names neither its conversation nor
 //! the task it's on, so its id arrives with the first report and roster makes
-//! its title (`[agents.codex] auto_title`).
+//! its title (`[agents.codex] auto_title`). Its hooks say nothing before its
+//! first turn, so a first prompt goes on its command line: typed in, it would
+//! land in whatever codex shows first (a folder to trust, an update to run).
 
 pub mod conversations;
 mod transcript;
 
-use std::path::Path;
-
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde_json::Value;
 
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
@@ -20,8 +20,11 @@ use transcript::CodexTranscript;
 
 pub const CODEX: &str = "codex";
 
-/// Codex's reasoning efforts, as its own model catalog names them.
-const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+/// Codex's reasoning efforts (`model_reasoning_effort`); which of them a model
+/// takes, its catalog says (shown with each model, see `catalog_models`).
+const EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 /// The hook events roster listens to, and the kind of state each one is.
 /// `Interrupt` and `SessionEnd` are left alone: an interrupted turn reports
@@ -41,10 +44,10 @@ impl Adapter for Codex {
         true
     }
 
-    /// Codex's TUI runs no `SessionStart` hook: the conversation and its file
-    /// are named by the reports of the first turn instead.
-    fn reports_its_start(&self) -> bool {
-        false
+    /// Its hooks run from its first turn on, `SessionStart` too: a first
+    /// prompt starts that turn, from its command line.
+    fn takes_prompt(&self) -> bool {
+        true
     }
 
     fn resumes(&self) -> bool {
@@ -72,8 +75,9 @@ impl Adapter for Codex {
         Some(Choices { efforts: EFFORTS })
     }
 
-    /// The models codex knows about, as `codex debug models` lists them (its
-    /// catalog comes from the server, so roster asks rather than naming any).
+    /// The models codex lists, as `codex debug models` gives them (its
+    /// catalog comes from its server, cached, so roster asks rather than
+    /// naming any).
     fn models(&self, config: &Config, ask: &Ask<'_>) -> Vec<Model> {
         let command = config
             .agent(CODEX)
@@ -84,13 +88,30 @@ impl Adapter for Codex {
     }
 
     /// A new conversation, or `resume` on the one it has; an adopted copy
-    /// starts as a `fork` of the original until it has a file of its own.
-    /// Codex takes no id at the start, so the conversation comes back with the
-    /// first `SessionStart` report rather than from here.
-    fn launch(&self, s: &Session, mut argv: Vec<String>, cx: &Context) -> Result<Launch> {
-        // Model and effort as config overrides, the way codex spells them: a
-        // flag of the top level wouldn't reach `resume` and `fork`. Anything
-        // that isn't valid TOML codex takes as a literal, so they're quoted.
+    /// starts as a `fork` of the original until codex has reported the copy's
+    /// own. Codex takes no id at the start, so the conversation comes back with
+    /// the first `SessionStart` report rather than from here.
+    fn launch(&self, s: &Session, given: Vec<String>, cx: &Context) -> Result<Launch> {
+        let (command, args) = given.split_first().context("no command to run codex")?;
+        let mut argv = vec![command.clone()];
+        // By id, whether or not roster knows its file: codex finds it, and
+        // says so if it can't, where starting afresh would lose it unasked.
+        match (&s.fork_from, &s.conversation_id) {
+            (Some(from), _) => argv.extend(["fork".into(), from.clone()]),
+            (None, Some(id)) => argv.extend(["resume".into(), id.clone()]),
+            (None, None) => {}
+        }
+        // The rest after that, `[agents.codex] args` too: given both before
+        // and after a subcommand, codex before 0.164 keeps only the `-c`s
+        // after it.
+        argv.extend(args.iter().cloned());
+        // Its own server
+        // rather than the shared one, so its tools get the session's
+        // environment, the env files' included.
+        argv.push("--no-daemon".into());
+        // Model and effort as config overrides, which `resume` and `fork` take
+        // as a new conversation does. Anything that isn't valid TOML codex
+        // takes as a literal, so they're quoted.
         if let Some(model) = &s.model {
             argv.extend(["-c".into(), format!("model={}", toml_str(model))]);
         }
@@ -100,18 +121,12 @@ impl Adapter for Codex {
                 format!("model_reasoning_effort={}", toml_str(effort)),
             ]);
         }
-        // Codex writes its rollout as it starts a conversation; until there is
-        // one, there's nothing to resume.
-        let has_file = s
-            .transcript_path
-            .as_deref()
-            .is_some_and(|p| Path::new(p).exists());
-        match (&s.conversation_id, &s.fork_from, has_file) {
-            (_, Some(from), false) => argv.extend(["fork".into(), from.clone()]),
-            (Some(id), _, true) => argv.extend(["resume".into(), id.clone()]),
-            _ => {}
-        }
         argv.extend(hooks(&cx.roster.to_string_lossy()));
+        // A first prompt as codex's own (after `--`, so one starting with a
+        // dash isn't taken for an option): its first turn starts with it.
+        if let Some(prompt) = &s.pending_prompt {
+            argv.extend(["--".into(), prompt.clone()]);
+        }
         Ok(Launch {
             argv,
             conversation_id: None,
@@ -131,26 +146,23 @@ impl Adapter for Codex {
         }
     }
 
-    fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
+    fn transcript(&self, path: &std::path::Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(CodexTranscript::new(path)))
     }
 
-    /// `codex exec`: nothing kept (`--ephemeral`), nothing asked (a read-only
-    /// sandbox, no approvals), and the answer alone on stdout. The model
-    /// `title_model` (or `model`) picks, else codex's own default.
+    /// `codex exec`: nothing kept (`--ephemeral`), nothing changed (a read-only
+    /// sandbox; exec asks for no approvals), and the answer alone on stdout.
+    /// The model `title_model` (or `model`) picks, else codex's own default.
     fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
         let agent = config.agent(CODEX);
-        let mut argv: Vec<String> = [
+        let mut argv: Vec<String> = vec![
             agent.command.clone().unwrap_or_else(|| CODEX.to_string()),
             "exec".into(),
             "--skip-git-repo-check".into(),
             "--ephemeral".into(),
             "-s".into(),
             "read-only".into(),
-            "-c".into(),
-            r#"approval_policy="never""#.into(),
-        ]
-        .to_vec();
+        ];
         if let Some(model) = agent.titles_by() {
             argv.extend(["-c".into(), format!("model={}", toml_str(&model))]);
         }
@@ -161,12 +173,13 @@ impl Adapter for Codex {
 /// The `-c` arguments giving a run its hooks: each event runs
 /// `roster report <kind>` with the payload on its stdin.
 ///
-/// Codex keeps its hooks in a config file of its own, trusted once by hand, so
-/// they come as inline TOML instead, and the run says it needn't be asked to
-/// trust them (`--dangerously-bypass-hook-trust`), which codex itself calls
-/// out as a warning when it starts.
+/// Codex runs a hook only once it's trusted, so it asks to review these the
+/// first time (and again if roster moves: the command is part of what's
+/// trusted). They're the same every run, so trusting them once does. Skipping
+/// the review instead (`--dangerously-bypass-hook-trust`) would skip it for
+/// every hook, the project's and your own too.
 fn hooks(exe: &str) -> Vec<String> {
-    let mut argv = vec!["--dangerously-bypass-hook-trust".to_string()];
+    let mut argv = Vec::new();
     for (event, kind) in HOOKS {
         let command = format!("{exe} report {kind}");
         argv.extend([
@@ -186,8 +199,10 @@ fn toml_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', r"\\").replace('"', r#"\""#))
 }
 
-/// The slugs and display names in `codex debug models`' JSON. A catalog it
-/// can't fetch is an empty one; anything unreadable is left out.
+/// The models `codex debug models` lists for choosing (its catalog has hidden
+/// ones too), each noted with its name and the efforts it takes, first to
+/// last. A catalog it can't fetch is an empty one; anything unreadable is left
+/// out.
 fn catalog_models(json: &str) -> Vec<Model> {
     let Ok(list) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
@@ -197,11 +212,26 @@ fn catalog_models(json: &str) -> Vec<Model> {
         .map(|models| {
             models
                 .iter()
+                .filter(|m| m["visibility"].as_str().is_none_or(|v| v == "list"))
                 .filter_map(|m| {
                     let slug = m["slug"].as_str()?;
+                    let efforts: Vec<&str> = m["supported_reasoning_levels"]
+                        .as_array()
+                        .map(|levels| levels.iter().filter_map(|l| l["effort"].as_str()).collect())
+                        .unwrap_or_default();
+                    let efforts = match efforts[..] {
+                        [] => None,
+                        [one] => Some(one.to_string()),
+                        [first, .., last] => Some(format!("{first}…{last}")),
+                    };
+                    let note = match (m["display_name"].as_str(), efforts) {
+                        (Some(name), Some(efforts)) => Some(format!("{name} · {efforts}")),
+                        (Some(name), None) => Some(name.to_string()),
+                        (None, efforts) => efforts,
+                    };
                     Some(Model {
                         id: slug.to_string(),
-                        note: m["display_name"].as_str().map(str::to_string),
+                        note,
                     })
                 })
                 .collect()
@@ -215,7 +245,7 @@ mod tests {
     use crate::agent::tests::config_with;
     use crate::config::AgentConfig;
     use crate::model::tests::session;
-    use std::fs;
+    use std::path::Path;
 
     fn codex_session() -> Session {
         let mut s = session("a");
@@ -227,77 +257,86 @@ mod tests {
         config_with(CODEX, AgentConfig::default())
     }
 
-    #[test]
-    fn starts_cold_and_reports_through_its_hooks() {
+    fn argv(s: &Session) -> Vec<String> {
         let cx = crate::agent::Context {
             roster: Path::new("/roster with spaces"),
             state_dir: Path::new("/state"),
         };
-        let launch = Codex
-            .launch(&codex_session(), vec!["codex".into()], &cx)
-            .unwrap();
-        let argv = launch.argv.join(" ");
+        Codex.launch(s, vec!["codex".into()], &cx).unwrap().argv
+    }
+
+    #[test]
+    fn starts_cold_and_reports_through_its_hooks() {
+        let s = codex_session();
+        let cx = crate::agent::Context {
+            roster: Path::new("/roster"),
+            state_dir: Path::new("/state"),
+        };
         // No id to give it: codex names its own conversation.
+        let launch = Codex.launch(&s, vec!["codex".into()], &cx).unwrap();
         assert!(launch.conversation_id.is_none());
-        assert!(!argv.contains("resume"), "{argv}");
-        assert!(argv.contains("--dangerously-bypass-hook-trust"));
+        let argv = argv(&s).join(" ");
+        assert!(!argv.contains("resume") && !argv.contains("fork"), "{argv}");
         assert!(argv.contains(r#"hooks.SessionStart=[{hooks=[{type="command",command="/roster with spaces report session"}]}]"#));
         assert!(argv.contains(
             r#"hooks.Stop=[{hooks=[{type="command",command="/roster with spaces report idle"}]}]"#
         ));
+        // Its own server, so its tools get the session's environment; and its
+        // review of hooks isn't skipped (for every hook, that would be).
+        assert!(argv.contains("--no-daemon"), "{argv}");
+        assert!(!argv.contains("dangerously"), "{argv}");
         // Quoted for the shell once, for TOML inside the value: no double work.
         assert!(!argv.contains("'\"'"), "{argv}");
     }
 
     #[test]
-    fn resumes_what_it_has_a_file_for_and_forks_what_it_hasnt() {
-        let cx = crate::agent::Context {
-            roster: Path::new("/roster"),
-            state_dir: Path::new("/state"),
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("rollout-x.jsonl");
-        fs::write(&file, "{}\n").unwrap();
-
+    fn resumes_by_id_and_forks_a_copy_until_it_has_its_own() {
+        // Its file or not: codex finds it, or says it can't. Never a fresh one.
         let mut s = codex_session();
         s.conversation_id = Some("01a1".into());
-        s.transcript_path = Some(file.to_string_lossy().into_owned());
-        let argv = Codex.launch(&s, vec!["codex".into()], &cx).unwrap().argv;
-        let at = argv.iter().position(|a| a == "resume").unwrap();
-        assert_eq!(
-            (argv[at].as_str(), argv[at + 1].as_str()),
-            ("resume", "01a1")
-        );
-
-        // An adopted copy forks the original until it has a file of its own.
+        s.transcript_path = Some("/gone/rollout-x.jsonl".into());
+        assert_eq!(argv(&s)[1..3], ["resume", "01a1"]);
+        // An adopted copy forks the original (its id is roster's until codex
+        // reports the copy's own).
         let mut copy = codex_session();
+        copy.conversation_id = Some("made-by-roster".into());
         copy.fork_from = Some("01a2".into());
-        let argv = Codex.launch(&copy, vec!["codex".into()], &cx).unwrap().argv;
-        let at = argv.iter().position(|a| a == "fork").unwrap();
-        assert_eq!((argv[at].as_str(), argv[at + 1].as_str()), ("fork", "01a2"));
-
-        // A conversation whose file is gone: started again, as a new one.
-        std::fs::remove_file(&file).unwrap();
-        let argv = Codex.launch(&s, vec!["codex".into()], &cx).unwrap().argv;
-        assert!(!argv.iter().any(|a| a == "resume" || a == "fork"));
+        assert_eq!(argv(&copy)[1..3], ["fork", "01a2"]);
     }
 
     #[test]
-    fn its_model_and_effort_come_as_config_overrides() {
+    fn everything_comes_after_the_subcommand() {
+        let mut s = codex_session();
+        s.conversation_id = Some("01a1".into());
+        s.model = Some("gpt-6.1-sol".into());
+        s.effort = Some("xhigh".into());
         let cx = crate::agent::Context {
             roster: Path::new("/roster"),
             state_dir: Path::new("/state"),
         };
-        let mut s = codex_session();
-        s.model = Some("gpt-6.1-sol".into());
-        s.effort = Some("xhigh".into());
-        let argv = Codex.launch(&s, vec!["codex".into()], &cx).unwrap().argv;
-        let at = argv.iter().position(|a| a == "-c").unwrap();
-        assert_eq!(argv[at + 1], r#"model="gpt-6.1-sol""#);
+        // Its own arguments from config.toml too.
+        let given = vec!["codex".into(), "-c".into(), "tui.theme=\"x\"".into()];
+        let argv = Codex.launch(&s, given, &cx).unwrap().argv;
+        assert_eq!(argv[1..5], ["resume", "01a1", "-c", "tui.theme=\"x\""]);
         assert!(
             argv.windows(2)
-                .any(|w| w[1] == r#"model_reasoning_effort="xhigh""#)
+                .any(|w| w == ["-c", r#"model="gpt-6.1-sol""#])
         );
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["-c", r#"model_reasoning_effort="xhigh""#])
+        );
+        assert!(argv.iter().position(|a| a == "--no-daemon").unwrap() > 2);
+    }
+
+    #[test]
+    fn a_first_prompt_goes_on_its_command_line() {
+        let mut s = codex_session();
+        s.pending_prompt = Some("-v is broken".into());
+        let argv = argv(&s);
+        // Last, after `--`, so a dash doesn't make it an option.
+        assert_eq!(argv[argv.len() - 2..], ["--", "-v is broken"]);
+        assert!(Codex.takes_prompt());
     }
 
     #[test]
@@ -327,15 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn lists_the_models_codex_has() {
-        let json = r#"{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol"},
-            {"slug":"gpt-reserve"},{"nope":true}]}"#;
+    fn lists_the_models_codex_offers_with_their_efforts() {
+        let json = r#"{"models":[
+            {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list",
+             "supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"xhigh"}]},
+            {"slug":"gpt-reserve"},
+            {"slug":"gpt-internal","visibility":"hide"},
+            {"nope":true}]}"#;
         assert_eq!(
             catalog_models(json),
             vec![
                 Model {
                     id: "gpt-6.1-sol".into(),
-                    note: Some("GPT-6.1-Sol".into())
+                    note: Some("GPT-6.1-Sol · low…xhigh".into())
                 },
                 Model {
                     id: "gpt-reserve".into(),
@@ -374,8 +417,9 @@ mod tests {
     #[test]
     fn its_efforts_are_its_own() {
         use crate::agent::check_effort;
-        assert!(check_effort(CODEX, "ultra").is_ok());
-        // Claude's set, which codex doesn't take.
-        assert!(check_effort(CODEX, "minimal").is_err());
+        for effort in ["none", "minimal", "xhigh", "ultra"] {
+            assert!(check_effort(CODEX, effort).is_ok(), "{effort}");
+        }
+        assert!(check_effort(CODEX, "extreme").is_err());
     }
 }

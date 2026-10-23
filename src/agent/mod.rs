@@ -15,8 +15,8 @@
 //! - `session`: it (re)started or cleared its conversation, and waits for a
 //!   prompt. Its payload names the transcript: until then, a first prompt
 //!   isn't typed in (the agent may still be asking something else, such as
-//!   whether to trust the directory). An agent whose hooks never say it (codex,
-//!   in its terminal) is ready once it has been up and quiet a while.
+//!   whether to trust the directory). An agent handed its first prompt on its
+//!   command line instead (`Adapter::takes_prompt`) has nothing typed in.
 //! - `prompt`: you gave it a task; it's working.
 //! - `working`: it's still at it (after a tool, or a question answered).
 //! - `needs-input`: it's waiting for you in the middle of a turn.
@@ -56,11 +56,12 @@ pub trait Adapter: Sync {
         false
     }
 
-    /// Whether its reports include the start of a conversation (`session`),
-    /// which is where roster learns its transcript. Codex's hooks never say it
-    /// in its terminal, so roster has to go on its being up and idle instead.
-    fn reports_its_start(&self) -> bool {
-        true
+    /// Whether a session's first prompt goes on its command line (`launch`
+    /// reads `Session::pending_prompt`), rather than being typed in once it has
+    /// reported its start: for an agent that reports nothing before its first
+    /// turn (codex), typing would land in whatever it shows first.
+    fn takes_prompt(&self) -> bool {
+        false
     }
 
     /// Whether starting it again resumes its conversation.
@@ -475,8 +476,13 @@ mod tests {
         let mut config = Config::default();
         config.agents.insert("pi".into(), AgentConfig::default());
         assert!(known("pi", &config).unwrap().reports());
-        // Configured, so offered whether or not it's installed here.
-        assert!(available(&config).contains(&"pi".to_string()));
+        // Configured, so offered whether or not it's installed here; codex
+        // only if it is.
+        let mut expected = vec![CLAUDE, PI];
+        if crate::util::on_path(CODEX) {
+            expected.push(CODEX);
+        }
+        assert_eq!(available(&config), expected);
         assert!(known("claude", &Config::default()).is_ok());
     }
 

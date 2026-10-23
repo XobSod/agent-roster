@@ -111,7 +111,7 @@ enum Cmd {
         /// Model for Claude, pi or codex ("default" for the agent's in config.toml, else its own)
         #[arg(long)]
         model: Option<String>,
-        /// Effort for Claude, thinking level for pi ("default" for the agent's in config.toml, else its own)
+        /// Effort for Claude or codex, thinking level for pi ("default" for the agent's in config.toml, else its own)
         #[arg(long)]
         effort: Option<String>,
     },
@@ -289,16 +289,16 @@ struct SessionArgs {
     /// The agent's name in the project, a role say (default: <agent>-1, <agent>-2, …)
     #[arg(short, long)]
     name: Option<String>,
-    /// claude, pi, or an agent from [agents] in config.toml (default: the project's, else default_agent)
+    /// claude, pi, codex, or an agent from [agents] in config.toml (default: the project's, else default_agent)
     #[arg(long)]
     agent: Option<String>,
     /// Model for Claude, pi or codex (default: the project's, else the agent's in config.toml, else its own)
     #[arg(long)]
     model: Option<String>,
-    /// Effort for Claude, thinking level for pi (default: the project's, else the agent's in config.toml, else its own)
+    /// Effort for Claude or codex, thinking level for pi (default: the project's, else the agent's in config.toml, else its own)
     #[arg(long)]
     effort: Option<String>,
-    /// A first prompt, typed into the agent once it's ready
+    /// A first prompt, typed into the agent once it's ready (codex gets it on its command line)
     #[arg(long)]
     prompt: Option<String>,
     /// Attach to it right away

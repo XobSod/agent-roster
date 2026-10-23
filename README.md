@@ -77,7 +77,7 @@ New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits)
 carry a default agent, model and effort for their sessions, and each agent its own
 (`model` and `effort` in its settings), used when neither the session nor its project
 picks one; "default" leaves it to that. A new session can also get a first prompt,
-typed into the agent once it's ready. `s c` starts a chat, a
+typed into the agent once it's ready (Codex gets it on its command line). `s c` starts a chat, a
 session that needs no project: chats share one directory in a built-in project.
 
 A Claude, pi or Codex conversation started outside roster (plain `claude`, `pi` or
@@ -121,7 +121,7 @@ roster info api                         # created, prompts, time worked, context
 roster note api                         # print its note; --edit opens it in $EDITOR
 roster note api --append "- [ ] check the fork path"   # --set replaces it ("-": from stdin), --clear removes it
 roster note api --pin 3                 # the line the preview shows, with the one below; --unpin
-roster adopt --list                     # Claude and pi conversations started elsewhere (--all: not only in your projects)
+roster adopt --list                     # Claude, pi and Codex conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen, ✎ those with a note
@@ -276,24 +276,29 @@ with the context window pi reports for the model. Its conversations started else
 can be adopted, from `~/.pi/agent/sessions` (or where `PI_CODING_AGENT_DIR` or
 `PI_CODING_AGENT_SESSION_DIR` say); a copy is forked with `--fork`.
 
-## codex
+## Codex
 
 Roster starts [Codex](https://github.com/openai/codex) with hooks of its own, given to
 each run as `-c hooks.<Event>=[…]` arguments, for its sessions only; your `~/.codex`
-config and `hooks.json` stay as they are. Codex only runs hooks you have trusted once
-by hand, so each start also says not to ask (`--dangerously-bypass-hook-trust`), which
-Codex itself points out as a warning when it starts. The hooks report its state: the
-tools it calls say working, a question it asks (`PermissionRequest`) needs input, the
-end of a turn idle.
+config and hooks stay as they are. Codex runs a hook only once it's trusted, so the
+first time, it asks you to review roster's (and again if roster moves, since the
+command is part of what's trusted): trust them, or roster can't follow it. They report
+its state: the tools it calls say working, a question it asks (`PermissionRequest`)
+needs input, the end of a turn idle. Each run also gets `--no-daemon`, so its tools
+run in the session's environment, your env files' included, rather than a shared
+Codex server's.
 
-Codex names its conversation itself, so roster learns it, and the file it's kept in,
-from the first thing the hooks say; starting a session again resumes that conversation
-(`codex resume <id>`). A session's model is anything Codex takes as `-c model=` (forms
-offer the slugs of `codex debug models`, its catalog as it comes from its server), its
-effort the reasoning level as `-c model_reasoning_effort=` (`low` … `ultra`). Codex
-names no task itself, so roster has it make a title after a conversation's first turn
-(`title_model`, made by `codex exec`, which keeps nothing); `auto_title = false` turns
-that off.
+Codex says nothing through its hooks before its first turn, so a session's first
+prompt goes on its command line, as Codex's own, instead of being typed in: whatever
+Codex shows first (a folder to trust, an update to install) is yours to answer. It
+names its conversation itself, so roster learns it, and the file it's kept in, from the
+first turn's reports; starting a session again resumes it by id (`codex resume <id>`),
+and if Codex can't find it, it says so rather than starting another. A session's model
+is anything Codex takes as `-c model=` (forms offer what `codex debug models` lists,
+each with the efforts it takes), its effort the reasoning level as
+`-c model_reasoning_effort=` (`none` … `ultra`). Codex names no task itself, so roster
+has it make a title after a conversation's first turn (`title_model`, made by
+`codex exec`, which keeps nothing); `auto_title = false` turns that off.
 
 The statistics come from its rollout, under `~/.codex/sessions` (or wherever
 `CODEX_HOME` says): prompts, tokens, and the context window Codex counts. What a

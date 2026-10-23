@@ -572,15 +572,18 @@ fn pi_conversations_can_be_adopted() {
     );
 }
 
-/// Stand-in for codex: reports to roster the way its hooks do, and keeps a
-/// rollout file like codex's. Given a `clear` line, it starts a new
-/// conversation, the way `/clear` does.
+/// Stand-in for codex, as codex's source says it behaves: its hooks report
+/// nothing before its first turn, which reports `SessionStart` first; a
+/// prompt after `--` starts that turn at once; `resume` keeps the id given,
+/// `fork` and a new conversation get one of their own; a `clear` line starts
+/// a new conversation, reported with its first turn. It keeps a rollout like
+/// codex's.
 const FAKE_CODEX: &str = r#"#!/bin/sh
-# What roster asked of it: its conversation, its model and effort, its hooks.
-id=; sub=; prev=; model=; effort=; hooks=no
+id=; sub=; prev=; model=; effort=; prompt=; rest=no; n=0
 for a in "$@"; do
+  if [ "$rest" = yes ]; then prompt=$a; continue; fi
   case "$a" in
-    hooks.SessionStart=*) hooks=yes ;;
+    --) rest=yes ;;
     model=*) model=$(printf '%s' "${a#model=}" | tr -d '"') ;;
     model_reasoning_effort=*) effort=$(printf '%s' "${a#model_reasoning_effort=}" | tr -d '"') ;;
     resume|fork) sub=$a ;;
@@ -588,39 +591,44 @@ for a in "$@"; do
   case "$prev" in resume|fork) [ -z "$id" ] && id=$a ;; esac
   prev=$a
 done
-[ "$sub" = fork ] && id=$(cat /proc/sys/kernel/random/uuid)
-[ -n "$id" ] || id=$(cat /proc/sys/kernel/random/uuid)
+new_id() { n=$((n + 1)); printf '%08x-0000-4000-8000-%012x' "$$" "$n"; }
+source=startup
+case "$sub" in
+  resume) source=resume ;;
+  fork) source=fork; id=$(new_id) ;;
+  *) id=$(new_id) ;;
+esac
+started=no
 echo "fake codex: $*"
-[ "$hooks" = yes ] && echo "with the hooks"
-file="$PWD/.codex-$id.jsonl"
-pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model-fake-model-1}\"}"
 report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
-report session "$pay"
-while read -r line; do
-  case "$line" in
-    clear) id=$(cat /proc/sys/kernel/random/uuid); file="$PWD/.codex-$id.jsonl"
-           pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model-fake-model-1}\"}"
-           report session "$pay"; continue ;;
-  esac
-  echo "got: $line"
+turn() {
+  file="$PWD/.codex-$id.jsonl"
+  pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model:-fake-model-1}\",\"source\":\"$source\"}"
+  if [ "$started" = no ]; then report session "$pay"; started=yes; fi
+  echo "turn: $1"
   report prompt "$pay"
   printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$PWD" >> "$file"
-  printf '{"type":"turn_context","payload":{"model":"%s","effort":"%s"}}\n' "${model-fake-model-1}" "${effort-medium}" >> "$file"
-  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$line" >> "$file"
+  printf '{"type":"turn_context","payload":{"model":"%s","effort":"%s"}}\n' "${model:-fake-model-1}" "${effort:-medium}" >> "$file"
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$1" >> "$file"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$file"
   printf '{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":115}}}\n' >> "$file"
   printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"output_tokens":5,"total_tokens":115},"last_token_usage":{"total_tokens":115},"model_context_window":400000}}}\n' >> "$file"
   report working "$pay"
   report idle "$pay"
+}
+[ -n "$prompt" ] && turn "$prompt"
+while read -r line; do
+  case "$line" in
+    clear) id=$(new_id); source=clear; started=no; echo "cleared"; continue ;;
+  esac
+  echo "got: $line"
+  turn "$line"
 done
 "#;
 
-#[test]
-fn codex_reports_through_the_hooks_it_is_given() {
+/// A codex stand-in in `t`, as `[agents.codex]`'s command, its agent the default.
+fn with_fake_codex(t: &TestEnv) {
     use std::os::unix::fs::PermissionsExt;
-    let Some(t) = TestEnv::new("codex") else {
-        return;
-    };
     let codex = t.path("fake-codex");
     fs::write(&codex, FAKE_CODEX).unwrap();
     fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
@@ -634,6 +642,30 @@ fn codex_reports_through_the_hooks_it_is_given() {
         ),
     )
     .unwrap();
+}
+
+/// Types `text` into session `name`'s agent and presses Enter, as you would.
+fn type_into(t: &TestEnv, name: &str, text: &str) {
+    let id = t.session(name, false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let target = format!("=r-{id}:");
+    for keys in [vec!["-l", text], vec!["Enter"]] {
+        Command::new("tmux")
+            .args(["-L", &t.socket, "send-keys", "-t", &target])
+            .args(keys)
+            .output()
+            .unwrap();
+    }
+}
+
+#[test]
+fn codex_reports_through_the_hooks_it_is_given() {
+    let Some(t) = TestEnv::new("codex") else {
+        return;
+    };
+    with_fake_codex(&t);
     t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
     // An effort codex has no word for.
     assert!(
@@ -642,6 +674,7 @@ fn codex_reports_through_the_hooks_it_is_given() {
             .success()
     );
 
+    // The first prompt goes on its command line, never typed in.
     t.ok(&[
         "new",
         "demo",
@@ -659,17 +692,22 @@ fn codex_reports_through_the_hooks_it_is_given() {
         s["state"] == "idle" && s["unread"] == true
     });
     let s = t.session("c", false).unwrap();
+    assert_eq!(s["pending_prompt"], false);
     let conversation = s["conversation_id"].as_str().unwrap().to_string();
     // Codex is told no id: it names its conversation and reports it back.
     assert_eq!(conversation.len(), 36, "{conversation}");
     let screen = t.ok(&["show", "c"]);
     assert!(
-        screen.contains(r#"-c model="fake-model-1""#)
+        screen.contains("--no-daemon")
+            && screen.contains(r#"-c model="fake-model-1""#)
             && screen.contains(r#"-c model_reasoning_effort="ultra""#)
-            && screen.contains("--dangerously-bypass-hook-trust")
             && screen.contains("hooks.SessionStart=")
-            && screen.contains("with the hooks")
-            && screen.contains("got: fix the tests"),
+            && screen.contains("-- fix the tests")
+            && screen.contains("turn: fix the tests"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("got: fix the tests") && !screen.contains("dangerously"),
         "{screen}"
     );
     assert_eq!(
@@ -695,61 +733,51 @@ fn codex_reports_through_the_hooks_it_is_given() {
             .is_some_and(|title| title.starts_with("fake codex: exec"))
     });
 
-    // It resumes: a restart opens the same conversation, without asking.
-    t.ok(&["restart", "c"]);
+    // It resumes: a restart opens the same conversation, without asking, and
+    // by its id even when its file isn't where it was (codex finds it, or
+    // says it can't): never a new conversation instead.
+    t.ok(&["restart", "--yes", "c"]);
     t.wait_for("the restart", |t| {
-        let screen = t.ok(&["show", "c"]);
-        screen.contains("fake codex:") && !screen.contains("got:")
+        t.ok(&["show", "c"])
+            .contains(&format!("resume {conversation}"))
     });
-    assert!(
-        t.ok(&["show", "c"])
-            .contains(&format!("resume {conversation}")),
-        "{}",
-        t.ok(&["show", "c"])
-    );
-    assert_eq!(
-        t.session("c", false).unwrap()["conversation_id"],
-        conversation.as_str()
-    );
+    fs::remove_file(s["transcript_path"].as_str().unwrap()).unwrap();
+    t.ok(&["restart", "--yes", "c"]);
+    t.wait_for("the restart without its file", |t| {
+        let screen = t.ok(&["show", "c"]);
+        screen.contains(&format!("resume {conversation}")) && !screen.contains("turn:")
+    });
 
-    // Clearing it, codex starts a conversation of its own: the session follows.
-    let target = format!("=r-{}:", s["id"].as_str().unwrap());
-    for key in ["-l", "Enter"] {
-        Command::new("tmux")
-            .args(["-L", &t.socket, "send-keys", "-t", &target, key])
-            .output()
-            .unwrap();
-    }
-    Command::new("tmux")
-        .args(["-L", &t.socket, "send-keys", "-t", &target, "-l", "clear"])
-        .output()
-        .unwrap();
-    Command::new("tmux")
-        .args(["-L", &t.socket, "send-keys", "-t", &target, "Enter"])
-        .output()
-        .unwrap();
+    // Cleared, codex starts a conversation of its own, reported with its
+    // first turn: the session follows.
+    type_into(&t, "c", "clear");
+    type_into(&t, "c", "after clearing");
     t.wait_for("the new conversation", |t| {
         let s = t.session("c", false).unwrap();
         s["conversation_id"] != conversation.as_str() && s["state"] == "idle"
+    });
+
+    // Without a first prompt: nothing typed in, nothing known until you give
+    // it one; it settles to idle from its screen.
+    t.ok(&["new", "demo", "--name", "quiet"]);
+    t.wait_for("idle, untouched", |t| {
+        t.session("quiet", false).unwrap()["state"] == "idle"
+    });
+    let s = t.session("quiet", false).unwrap();
+    assert_eq!(s["conversation_id"], Value::Null);
+    assert!(!t.ok(&["show", "quiet"]).contains("turn:"));
+    type_into(&t, "quiet", "now a task");
+    t.wait_for("its conversation, from its first turn", |t| {
+        t.session("quiet", false).unwrap()["conversation_id"].is_string()
     });
 }
 
 #[test]
 fn codex_conversations_can_be_adopted() {
-    use std::os::unix::fs::PermissionsExt;
     let Some(t) = TestEnv::new("codex-adopt") else {
         return;
     };
-    let codex = t.path("fake-codex");
-    fs::write(&codex, FAKE_CODEX).unwrap();
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
-    let config = t.config_dir().join("config.toml");
-    let mut text = fs::read_to_string(&config).unwrap();
-    text.push_str(&format!(
-        "[agents.codex]\ncommand = \"{}\"\n",
-        codex.display()
-    ));
-    fs::write(&config, text).unwrap();
+    with_fake_codex(&t);
     t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
 
     // Two conversations codex kept, started outside roster in the project's
@@ -802,29 +830,39 @@ fn codex_conversations_can_be_adopted() {
         (&Value::from("codex"), &Value::from(one))
     );
     t.wait_for("codex started", |t| {
-        t.ok(&["show", "a"]).contains("fake codex:")
+        t.ok(&["show", "a"]).contains(&format!("resume {one}"))
     });
-    let screen = t.ok(&["show", "a"]);
-    assert!(
-        screen.contains(&format!("resume {one}")) && !screen.contains("fork"),
-        "{screen}"
-    );
+    assert!(!t.ok(&["show", "a"]).contains("fork"));
     assert!(!t.ok(&["adopt", "--list"]).contains(&one[..8]));
 
-    // A copy forks the original into a conversation of its own, which codex
-    // names and reports back.
+    // A copy forks the original, and does again until codex has reported the
+    // copy's own conversation, which it resumes from then on.
     t.ok(&["adopt", two, "--fork", "--name", "b"]);
-    t.wait_for("the copy's conversation", |t| {
-        let s = t.session("b", false).unwrap();
-        s["conversation_id"].as_str().is_some_and(|id| id != two)
+    // Roster's own id for it, until codex reports the copy's.
+    let made_up = t.session("b", false).unwrap()["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    t.wait_for("the fork", |t| {
+        t.ok(&["show", "b"]).contains(&format!("fork {two}"))
+    });
+    t.ok(&["restart", "--yes", "b"]);
+    t.wait_for("the fork again", |t| {
+        t.ok(&["show", "b"]).contains(&format!("fork {two}"))
+    });
+    type_into(&t, "b", "carry on");
+    t.wait_for("the copy's own conversation", |t| {
+        t.session("b", false).unwrap()["conversation_id"] != made_up.as_str()
     });
     let copy = t.session("b", false).unwrap()["conversation_id"]
         .as_str()
         .unwrap()
         .to_string();
-    let screen = t.ok(&["show", "b"]);
-    assert!(screen.contains(&format!("fork {two}")), "{screen}");
-    assert_ne!(copy, two);
+    assert!(copy != two && copy != made_up, "{copy}");
+    t.ok(&["restart", "--yes", "b"]);
+    t.wait_for("the copy resumed", |t| {
+        t.ok(&["show", "b"]).contains(&format!("resume {copy}"))
+    });
 }
 
 #[test]

@@ -69,8 +69,10 @@ impl Picker {
                     return Picked::Pick(Box::new((*a).clone()));
                 }
             }
-            (_, Some(false)) => self.selected = self.selected.saturating_sub(1),
-            (_, Some(true)) => self.selected += 1,
+            // Around, as every list does.
+            (_, Some(down)) => {
+                self.selected = super::app::wrap(self.selected, self.shown().len(), down);
+            }
             (KeyCode::Tab | KeyCode::BackTab, _) => {
                 self.all = !self.all;
                 self.selected = 0;
@@ -81,7 +83,6 @@ impl Picker {
                 }
             }
         }
-        self.selected = self.selected.min(self.shown().len().saturating_sub(1));
         Picked::Continue
     }
 }
@@ -166,13 +167,19 @@ pub mod tests {
         assert_eq!(ids(&p), ["c3"]);
         p.on_key(key(KeyCode::Char('x')));
         assert!(ids(&p).is_empty());
+        p.on_key(key(KeyCode::Down));
+        assert_eq!(p.selected, 0);
         assert!(matches!(p.on_key(key(KeyCode::Enter)), Picked::Continue));
         p.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         p.on_key(key(KeyCode::Tab));
         assert_eq!(ids(&p), ["c1", "c2", "c3"]);
         p.on_key(key(KeyCode::Down));
         p.on_key(key(KeyCode::Down));
+        assert_eq!(p.selected, 2);
+        // Past the end back to the start, and the other way round.
         p.on_key(key(KeyCode::Down));
+        assert_eq!(p.selected, 0);
+        p.on_key(key(KeyCode::Up));
         assert_eq!(p.selected, 2);
         let Picked::Pick(a) = p.on_key(key(KeyCode::Enter)) else {
             panic!("nothing picked")

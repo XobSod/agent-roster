@@ -584,7 +584,7 @@ impl App {
 
 /// The next (or previous) of `len` rows after `row`, past the end back to the
 /// start and the other way round.
-fn wrap(row: usize, len: usize, down: bool) -> usize {
+pub(super) fn wrap(row: usize, len: usize, down: bool) -> usize {
     match (len, down) {
         (0, _) => 0,
         (_, true) => (row + 1) % len,

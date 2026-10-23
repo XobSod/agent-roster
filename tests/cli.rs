@@ -1356,3 +1356,100 @@ fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
     assert_eq!(t.session("gone", false).unwrap()["exit_status"], 137);
     assert!(t.ok(&["show", "gone"]).contains("dying"));
 }
+
+#[test]
+fn a_title_made_while_its_session_changed_isnt_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("retitlechanged") else {
+        return;
+    };
+    // Claude's stand-in, making its title once the test lets it.
+    let slow = t.path("slow-claude");
+    let dir = t.path("titles");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = -p ]; then\n\
+               touch '{dir}/started'\n\
+               while [ ! -e '{dir}/release' ]; do sleep 0.05; done\n\
+               echo 'Slow title'; exit 0\n\
+             fi\n\
+             exec '{agent}' \"$@\"\n",
+            dir = dir.display(),
+            agent = t.path("fake-agent").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        t.config_dir().join("config.toml"),
+        format!(
+            "shell = \"/bin/sh\"\n[agents.claude]\ncommand = \"{}\"\n",
+            slow.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let transcript = t.path("one.jsonl");
+    fs::write(
+        &transcript,
+        "{\"type\":\"user\",\"message\":{\"content\":\"a task\"}}\n",
+    )
+    .unwrap();
+    let payload = format!(
+        r#"{{"session_id":"c","transcript_path":"{}"}}"#,
+        transcript.display()
+    );
+    t.report(&id, "session", &payload);
+
+    // A title of yours given while it's made: yours stays, `retitle` says so.
+    let retitle = t
+        .command(&["retitle", "one"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    t.wait_for("the title's run", |_| dir.join("started").exists());
+    t.ok(&["edit", "one", "--title", "Mine"]);
+    fs::write(dir.join("release"), "").unwrap();
+    let out = retitle.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("its title changed meanwhile"),
+        "{stderr}"
+    );
+    assert_eq!(t.session("one", false).unwrap()["title_override"], "Mine");
+
+    // On another conversation by the time it's made (a /clear): not kept.
+    fs::remove_file(dir.join("release")).unwrap();
+    fs::remove_file(dir.join("started")).unwrap();
+    t.ok(&["edit", "one", "--title", ""]);
+    let retitle = t
+        .command(&["retitle", "one"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    t.wait_for("the title's run again", |_| dir.join("started").exists());
+    let moved = format!(
+        r#"{{"session_id":"c-later","transcript_path":"{}"}}"#,
+        transcript.display()
+    );
+    t.report(&id, "session", &moved);
+    fs::write(dir.join("release"), "").unwrap();
+    let out = retitle.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("on another conversation now"),
+        "{stderr}"
+    );
+    assert_eq!(
+        t.session("one", false).unwrap()["title_override"],
+        Value::Null
+    );
+}

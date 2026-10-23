@@ -110,7 +110,11 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     );
     // The session's statistics: what roster counts and what the agent can tell.
     if let Some(s) = app.selected_session() {
-        let parts = crate::stats::summary(s, app.preview.stats.as_ref(), now);
+        let mut parts = crate::stats::summary(s, app.preview.stats.as_ref(), now);
+        // First, where it shows whatever the width.
+        if app.titling.iter().any(|t| t.id == s.id) {
+            parts.insert(0, "making a title…".into());
+        }
         let line = truncate(&parts.join(" · "), stats.width as usize);
         f.render_widget(
             Paragraph::new(Line::styled(line, Style::new().fg(MUTED))),

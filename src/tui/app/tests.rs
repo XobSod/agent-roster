@@ -922,3 +922,21 @@ fn a_dead_panes_tail_is_its_last_rows_wrapped() {
     assert!(screen_tail("\n\n\nPane is dead\n", 8, 40).is_empty());
     assert!(screen_tail("", 8, 40).is_empty());
 }
+
+#[test]
+fn news_that_comes_on_its_own_doesnt_hide_an_error() {
+    let mut app = app();
+    app.fail("the first");
+    app.notice("a title came");
+    assert_eq!(app.message().unwrap().text, "the first · a title came");
+    // Another error comes after it, not over it.
+    app.fail_too("a title failed");
+    assert_eq!(
+        app.message().unwrap().text,
+        "the first · a title came · a title failed"
+    );
+    // With no error showing, news shows.
+    app.on_key(key(KeyCode::Down));
+    app.notice("a title came");
+    assert_eq!(app.message().unwrap().text, "a title came");
+}

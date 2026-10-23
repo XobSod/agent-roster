@@ -489,6 +489,27 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// Sets a session's title of your own to `title`, if it's still `before`
+    /// on conversation `conversation`: whether it was; None if there's no
+    /// such session.
+    pub fn set_title_if(
+        &self,
+        id: &str,
+        title: &str,
+        before: Option<&str>,
+        conversation: Option<&str>,
+    ) -> Result<Option<bool>> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET title_override = ?2
+             WHERE id = ?1 AND title_override IS ?3 AND conversation_id IS ?4",
+            params![id, title, before, conversation],
+        )?;
+        if n == 1 {
+            return Ok(Some(true));
+        }
+        Ok(load_session(&self.conn, id)?.map(|_| false))
+    }
+
     /// Takes a session's pending first prompt, so that only one process types it.
     pub fn take_pending_prompt(&mut self, id: &str) -> Result<Option<String>> {
         let tx = self
@@ -1074,6 +1095,36 @@ mod tests {
         after.fork_from = Some("f".into());
         db.save_changes(&before, &after).unwrap();
         assert_eq!(db.session(&s.id).unwrap(), after);
+    }
+
+    #[test]
+    fn a_title_made_is_kept_only_if_nothing_changed_meanwhile() {
+        let (db, mut s) = db_with_session();
+        s.conversation_id = Some("c1".into());
+        db.save_session(&s).unwrap();
+        assert_eq!(
+            db.set_title_if(&s.id, "Made", None, Some("c1")).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            db.session(&s.id).unwrap().title_override.as_deref(),
+            Some("Made")
+        );
+        // Given a title, or on another conversation, since: not kept.
+        assert_eq!(
+            db.set_title_if(&s.id, "Again", None, Some("c1")).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.set_title_if(&s.id, "Again", Some("Made"), Some("c2"))
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            db.session(&s.id).unwrap().title_override.as_deref(),
+            Some("Made")
+        );
+        assert_eq!(db.set_title_if("nobody", "x", None, None).unwrap(), None);
     }
 
     #[test]

@@ -67,6 +67,14 @@ pub struct Preview {
     pub fitted_size: Option<(u16, u16)>,
 }
 
+/// A title being made for session `id` (`s t`): its agent's answer to come,
+/// and what the session was when asked.
+pub struct Titling {
+    pub id: String,
+    pub title: std::sync::mpsc::Receiver<anyhow::Result<String>>,
+    pub asked_of: crate::title::AskedOf,
+}
+
 pub struct App {
     pub keymap: Keymap,
     pub mode: Mode,
@@ -133,6 +141,9 @@ pub struct App {
     pub order: crate::config::Order,
     /// A session's note, open to read and write; keys go to it.
     pub note: Option<NoteEditor>,
+    /// Titles being made (`s t`), by session: each its agent's answer to
+    /// come, on a thread of its own.
+    pub titling: Vec<Titling>,
     /// Where notes open, and the editor's keys (config.toml).
     pub notes: crate::config::Notes,
 }
@@ -179,6 +190,7 @@ impl App {
             capturing: None,
             order: Default::default(),
             note: None,
+            titling: Vec::new(),
             notes: Default::default(),
         }
     }
@@ -350,6 +362,29 @@ impl App {
         self.report = diagnosis.lines;
         self.orphans = diagnosis.orphans.len();
         self.problems = diagnosis.problems;
+    }
+
+    /// `fail`, after an error you haven't seen yet if one is showing, rather
+    /// than over it: for errors that come on their own (a title not made).
+    pub fn fail_too(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        match self.message.as_ref().filter(|m| m.error) {
+            Some(m) => {
+                let both = format!("{} · {text}", m.text);
+                self.fail(both);
+            }
+            None => self.fail(text),
+        }
+    }
+
+    /// `flash`, but after an error you haven't seen yet if one is showing,
+    /// rather than over it: for news that comes on its own (a title made),
+    /// not in answer to a key.
+    pub fn notice(&mut self, text: impl Into<String>) {
+        match self.message.as_ref().is_some_and(|m| m.error) {
+            true => self.fail_too(text),
+            false => self.flash(text),
+        }
     }
 
     pub fn flash(&mut self, text: impl Into<String>) {

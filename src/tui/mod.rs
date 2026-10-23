@@ -136,6 +136,11 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             app.models.offered = offered;
             app.listing = None;
         }
+        // Titles asked for (`s t`) that have come, kept and said.
+        if titles_arrived(roster, app) {
+            reload(roster, app);
+            last_reload = Instant::now();
+        }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
         if let Some(editor) = app.note.as_mut() {
@@ -151,6 +156,10 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         };
         if let Some(deadline) = app.note.as_ref().and_then(|e| e.deadline()) {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+        }
+        // A title coming is looked for more often than a tick.
+        if !app.titling.is_empty() {
+            wait = wait.min(Duration::from_millis(200));
         }
         if event::poll(wait)?
             && let Event::Key(key) = event::read()?
@@ -177,6 +186,66 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             last_reload = Instant::now();
         }
     }
+}
+
+/// Keeps the titles that came from their threads (`Op::RetitleSession`) and
+/// says so, or why not (all that came together, errors first); whether any
+/// came.
+fn titles_arrived(roster: &mut Roster, app: &mut App) -> bool {
+    let mut arrived = Vec::new();
+    app.titling.retain(|t| match t.title.try_recv() {
+        Ok(made) => {
+            arrived.push((t.id.clone(), t.asked_of.clone(), made));
+            false
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => true,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            let gone = anyhow::anyhow!("no title came: its run ended without an answer");
+            arrived.push((t.id.clone(), t.asked_of.clone(), Err(gone)));
+            false
+        }
+    });
+    let any = !arrived.is_empty();
+    let (mut errors, mut news) = (Vec::new(), Vec::new());
+    for (id, asked_of, made) in arrived {
+        let label = app.session_label(&id);
+        let kept = made.and_then(|title| {
+            roster
+                .keep_title(&id, &title, &asked_of)
+                .map(|kept| (title, kept))
+        });
+        use crate::title::Kept;
+        match kept {
+            Ok((title, Kept::Yes)) => news.push(format!("New title for {label}: {title}")),
+            Ok((_, Kept::Retitled)) => news.push(format!(
+                "{label}'s title changed meanwhile, so the new one isn't kept"
+            )),
+            Ok((_, Kept::Moved)) => news.push(format!(
+                "{label} is on another conversation now, so the new title isn't kept"
+            )),
+            // Deleted meanwhile: there's no one to tell.
+            Ok((_, Kept::Gone)) => {}
+            Err(e) => errors.push((label, format!("{e:#}"))),
+        }
+    }
+    match (title_failures(&errors), news.is_empty()) {
+        (Some(failed), _) => app.fail_too([vec![failed], news].concat().join(" · ")),
+        (None, false) => app.notice(news.join(" · ")),
+        (None, true) => {}
+    }
+    any
+}
+
+/// What to say of titles that failed (each a session and why), in the
+/// footer's one line: the first in full, then which others failed too.
+fn title_failures(errors: &[(String, String)]) -> Option<String> {
+    let ((label, why), others) = errors.split_first()?;
+    let first = format!("{label}: {why}");
+    if others.is_empty() {
+        return Some(first);
+    }
+    let others: Vec<&str> = others.iter().map(|(l, _)| l.as_str()).collect();
+    Some(format!("{first} · not {} either", others.join(", ")))
 }
 
 /// Folds hook events, checks the agents, and reloads the data from the database
@@ -512,13 +581,23 @@ fn perform(
                 app.select_project(&p.name);
                 format!("Saved project {}", p.name)
             }),
-        Op::RetitleSession(id) => {
-            let label = app.session_label(&id);
-            busy(terminal, app, format!("Asking for a title for {label}…"))?;
-            roster
-                .generate_title(&id)
-                .map(|title| format!("New title: {title}"))
-        }
+        // Asked on a thread: the model takes a while, and the TUI goes on.
+        Op::RetitleSession(id) if app.titling.iter().any(|t| t.id == id) => Err(anyhow::anyhow!(
+            "Already asking for a title for {}",
+            app.session_label(&id)
+        )),
+        Op::RetitleSession(id) => roster.title_job(&id).map(|job| {
+            let agent = crate::util::capitalize(&job.agent);
+            let asked_of = job.asked_of.clone();
+            let (send, title) = std::sync::mpsc::channel();
+            std::thread::spawn(move || send.send(job.run()));
+            app.titling.push(app::Titling {
+                id: id.clone(),
+                title,
+                asked_of,
+            });
+            format!("Asking {agent} for a title for {}…", app.session_label(&id))
+        }),
         Op::SaveNote {
             id,
             text,
@@ -706,4 +785,34 @@ fn attach(
     terminal.hide_cursor()?;
     terminal.draw(|f| ui::draw(f, app))?;
     Ok(attached.and_then(|since| roster.detached(id, since)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn titles_that_failed_say_which_and_why() {
+        let failed = |e: &[(&str, &str)]| {
+            let e: Vec<(String, String)> = e
+                .iter()
+                .map(|(l, w)| (l.to_string(), w.to_string()))
+                .collect();
+            title_failures(&e)
+        };
+        assert_eq!(failed(&[]), None);
+        assert_eq!(
+            failed(&[("demo/one", "no prompts to title yet")]),
+            Some("demo/one: no prompts to title yet".into())
+        );
+        // The first in full, the others by name: their causes may differ.
+        assert_eq!(
+            failed(&[
+                ("demo/one", "timed out"),
+                ("demo/two", "x"),
+                ("demo/three", "y")
+            ]),
+            Some("demo/one: timed out · not demo/two, demo/three either".into())
+        );
+    }
 }

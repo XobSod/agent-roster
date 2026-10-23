@@ -12,14 +12,42 @@ use crate::{agent, launch};
 impl Roster {
     /// Asks the session's agent (`Adapter::oneoff`) for a title from its
     /// recent prompts and keeps it as the session's title (the agent's own
-    /// stays the same otherwise).
+    /// stays the same otherwise), unless the session changed meanwhile
+    /// (`keep_title`), which is an error.
     pub fn generate_title(&mut self, id: &str) -> Result<String> {
-        let title = self.make_title(id)?;
-        let mut s = self.db.session(id)?;
-        let before = s.clone();
-        s.title_override = Some(title.clone());
-        self.db.save_changes(&before, &s)?;
-        Ok(title)
+        let job = self.title_job(id)?;
+        let asked_of = job.asked_of.clone();
+        let label = job.label.clone();
+        let title = job.run().with_context(|| label)?;
+        match self.keep_title(id, &title, &asked_of)? {
+            Kept::Yes => Ok(title),
+            Kept::Retitled => bail!("its title changed meanwhile, so the new one isn't kept"),
+            Kept::Moved => bail!("it's on another conversation now, so the new title isn't kept"),
+            Kept::Gone => bail!("no session with id {id}"),
+        }
+    }
+
+    /// Keeps `title`, made by a `TitleJob`, as session `id`'s title, unless
+    /// the session changed since it was asked (`asked_of`): a title given (or
+    /// taken off) meanwhile stays as it is, and one for a conversation it's
+    /// no longer on isn't kept.
+    pub fn keep_title(&mut self, id: &str, title: &str, asked_of: &AskedOf) -> Result<Kept> {
+        // What its agent reported meanwhile (a `/clear`) counts.
+        self.db.fold_events(crate::util::now_ms())?;
+        let kept = self.db.set_title_if(
+            id,
+            title,
+            asked_of.title.as_deref(),
+            asked_of.conversation.as_deref(),
+        )?;
+        Ok(match kept {
+            Some(true) => Kept::Yes,
+            Some(false) if self.db.session(id)?.conversation_id != asked_of.conversation => {
+                Kept::Moved
+            }
+            Some(false) => Kept::Retitled,
+            None => Kept::Gone,
+        })
     }
 
     /// `generate_title` for an agent that doesn't name its task itself,
@@ -27,8 +55,11 @@ impl Roster {
     /// the agent (pi's `/name`) replaces it; unless it got one meanwhile or
     /// is on another conversation by then (the model takes a while).
     pub fn auto_title(&mut self, id: &str) -> Result<String> {
-        let conversation = self.db.session(id)?.conversation_id;
-        let title = self.make_title(id)?;
+        // The conversation it's made of, as the job found it.
+        let job = self.title_job(id)?;
+        let conversation = job.asked_of.conversation.clone();
+        let label = job.label.clone();
+        let title = job.run().with_context(|| label)?;
         let made = serde_json::json!({ "conversation_id": conversation, "title": title });
         self.db.insert_event(
             id,
@@ -57,8 +88,12 @@ impl Roster {
             && self.config.agent(&s.agent).auto_title != Some(false)
     }
 
-    /// The title `id`'s agent makes of its recent prompts.
-    fn make_title(&mut self, id: &str) -> Result<String> {
+    /// What asks `id`'s agent for a title, ready to run anywhere (a thread:
+    /// the TUI doesn't wait for the model, nor for its transcript to be
+    /// read, which takes a while when it's big).
+    pub fn title_job(&mut self, id: &str) -> Result<TitleJob> {
+        // Its conversation as it is now, events reported so far applied.
+        self.db.fold_events(crate::util::now_ms())?;
         let s = self.db.session(id)?;
         let adapter = agent::adapter(&s.agent);
         // (Asked without a path: whether it has a transcript roster reads at all.)
@@ -71,29 +106,83 @@ impl Roster {
         let path = s.transcript_path.clone().filter(|p| Path::new(p).exists());
         let path =
             path.with_context(|| format!("{} has no conversation to title yet", s.label()))?;
-        let mut transcript = adapter
+        let transcript = adapter
             .transcript(Path::new(&path))
             .context("no transcript")?;
-        transcript.update()?;
-        let prompts = transcript.recent_prompts();
-        if prompts.is_empty() {
-            bail!("{} has no prompts to title yet", s.label());
-        }
-        let Some(mut argv) = adapter.oneoff(&self.config) else {
+        let Some(oneoff) = adapter.oneoff(&self.config) else {
             bail!("{} can't make a title; set one with edit", s.agent);
         };
-        argv.push(title_request(&prompts, s.display_title()));
-        let argv = self.wrapped(&s, &argv)?;
+        Ok(TitleJob {
+            transcript,
+            argv: self.wrapped(&s, &oneoff)?,
+            workdir: s.workdir.clone(),
+            current: s.display_title().to_string(),
+            label: s.label(),
+            agent: s.agent,
+            asked_of: AskedOf {
+                title: s.title_override,
+                conversation: s.conversation_id,
+            },
+        })
+    }
+}
+
+/// A title being asked for: what's needed to ask the session's agent (its
+/// transcript, read when it runs; its one-off command, through the env
+/// files), which agent it is, and what the session was when asked.
+pub struct TitleJob {
+    transcript: Box<dyn crate::stats::Transcript>,
+    /// Its one-off command run by roster's shell, the request to come last.
+    argv: Vec<String>,
+    workdir: std::path::PathBuf,
+    /// Its title so far, for the model to improve on.
+    current: String,
+    pub label: String,
+    pub agent: String,
+    pub asked_of: AskedOf,
+}
+
+/// What a session was when its title was asked for: its title of your own
+/// and its conversation, which a title made for it expects still.
+#[derive(Clone, Debug)]
+pub struct AskedOf {
+    title: Option<String>,
+    conversation: Option<String>,
+}
+
+/// Whether a title made was kept (`Roster::keep_title`).
+#[derive(Debug, PartialEq)]
+pub enum Kept {
+    Yes,
+    /// Its title of your own was given, changed or taken off meanwhile.
+    Retitled,
+    /// It's on another conversation now (a `/clear`, say).
+    Moved,
+    /// It's been deleted.
+    Gone,
+}
+
+impl TitleJob {
+    /// Reads its transcript's recent prompts and runs the agent on them, to
+    /// the title (the run at most `TITLE_TIMEOUT`).
+    pub fn run(mut self) -> Result<String> {
+        self.transcript.update()?;
+        let prompts = self.transcript.recent_prompts();
+        if prompts.is_empty() {
+            bail!("no prompts to title yet");
+        }
+        let mut argv = std::mem::take(&mut self.argv);
+        argv.push(title_request(&prompts, &self.current));
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
-            .current_dir(&s.workdir)
+            .current_dir(&self.workdir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         for var in crate::tmux::LEAKY_ENV {
             cmd.env_remove(var);
         }
-        let agent = &s.agent;
+        let agent = &self.agent;
         let output = launch::run_with_timeout(cmd, agent, TITLE_TIMEOUT)?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);

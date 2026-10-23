@@ -472,3 +472,215 @@ fn a_pending_first_prompt_is_typed_in_whichever_way_you_attach() {
     t.report(&id, "session", &payload);
     term.wait_for("the prompt, typed in while attached", "pending task");
 }
+
+#[test]
+fn a_title_is_made_while_the_tui_goes_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("asyncretitle") else {
+        return;
+    };
+    // Claude's stand-in, making a title (`claude -p`) once the test lets it:
+    // it says it started, then waits for its release.
+    let slow = t.path("slow-claude");
+    let dir = t.path("titles");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = -p ]; then\n\
+               case \"$*\" in *'first task'*) w=first ;; *'second task'*) w=second ;; *) w=third ;; esac\n\
+               touch '{dir}/started-'$w\n\
+               while [ ! -e '{dir}/release-'$w ]; do sleep 0.05; done\n\
+               echo 'Slow title'; exit 0\n\
+             fi\n\
+             exec '{agent}' \"$@\"\n",
+            dir = dir.display(),
+            agent = t.path("fake-agent").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "shell = \"/bin/sh\"\n[agents.claude]\ncommand = \"{}\"\n",
+            slow.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // Three sessions with a prompt each, to title.
+    let mut ids = std::collections::HashMap::new();
+    for (name, task) in [
+        ("one", "first task"),
+        ("two", "second task"),
+        ("three", "third task"),
+    ] {
+        t.ok(&["new", "demo", "--name", name]);
+        let id = t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let transcript = t.path(&format!("{name}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{task}\"}}}}\n"),
+        )
+        .unwrap();
+        let payload = format!(
+            r#"{{"session_id":"{name}","transcript_path":"{}"}}"#,
+            transcript.display()
+        );
+        t.report(&id, "session", &payload);
+        t.report(&id, "idle", "{}");
+        ids.insert(name, id);
+    }
+    let started = |w: &str| dir.join(format!("started-{w}")).exists();
+
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    term.keys(&["s", "t"]);
+    term.wait_for(
+        "the question asked",
+        "Asking Claude for a title for demo/one",
+    );
+    term.wait_for("the header saying so", "making a title…");
+    t.wait_for("the first title's run", |_| started("first"));
+    // Meanwhile the TUI takes keys: a menu opens; the same session again is
+    // already being asked; the other one is asked too, both runs going at once.
+    term.keys(&["v"]);
+    term.wait_for("the view menu", "group by project");
+    term.keys(&["Escape", "s", "t"]);
+    term.wait_for(
+        "the same asked again",
+        "Already asking for a title for demo/one",
+    );
+    term.keys(&["j", "s", "t"]);
+    term.wait_for("the other asked", "Asking Claude for a title for demo/two");
+    term.keys(&["j", "s", "t"]);
+    term.wait_for(
+        "the third asked",
+        "Asking Claude for a title for demo/three",
+    );
+    t.wait_for("all three runs at once", |_| {
+        ["first", "second", "third"].iter().all(|w| started(w))
+    });
+    assert!(!term.screen().contains("New title"), "{}", term.screen());
+
+    // The first comes, and is kept.
+    std::fs::write(dir.join("release-first"), "").unwrap();
+    term.wait_for("the first title", "New title for demo/one: Slow title");
+    assert_eq!(
+        t.session("one", false).unwrap()["title_override"],
+        "Slow title"
+    );
+    // The second's session got a title of yours meanwhile, which stays.
+    t.ok(&["edit", "two", "--title", "Mine"]);
+    std::fs::write(dir.join("release-second"), "").unwrap();
+    term.wait_for(
+        "yours kept",
+        "demo/two's title changed meanwhile, so the new one isn't kept",
+    );
+    assert_eq!(t.session("two", false).unwrap()["title_override"], "Mine");
+    // The third's moved to another conversation meanwhile (a /clear): the
+    // title made of the one before isn't kept.
+    let moved = format!(
+        r#"{{"session_id":"three-later","transcript_path":"{}"}}"#,
+        t.path("three.jsonl").display()
+    );
+    t.report(&ids["three"], "session", &moved);
+    std::fs::write(dir.join("release-third"), "").unwrap();
+    term.wait_for(
+        "not kept for another conversation",
+        "demo/three is on another conversation now, so the new title isn't kept",
+    );
+    assert_eq!(
+        t.session("three", false).unwrap()["title_override"],
+        serde_json::Value::Null
+    );
+    // Nothing left being made, for any of them.
+    for up in [false, true, true] {
+        if up {
+            term.keys(&["k"]);
+        }
+        term.wait_for_gone("nothing left being made", "making a title…");
+    }
+}
+
+#[test]
+fn a_title_for_a_session_deleted_meanwhile_is_let_go() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("titlegone") else {
+        return;
+    };
+    let slow = t.path("slow-claude");
+    let dir = t.path("titles");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = -p ]; then\n\
+               touch '{dir}/started'\n\
+               while [ ! -e '{dir}/release' ]; do sleep 0.05; done\n\
+               echo 'Slow title'; touch '{dir}/answered'; exit 0\n\
+             fi\n\
+             exec '{agent}' \"$@\"\n",
+            dir = dir.display(),
+            agent = t.path("fake-agent").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        t.config_dir().join("config.toml"),
+        format!(
+            "shell = \"/bin/sh\"\n[agents.claude]\ncommand = \"{}\"\n",
+            slow.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "gone"]);
+    let id = t.session("gone", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let transcript = t.path("gone.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"user\",\"message\":{\"content\":\"a task\"}}\n",
+    )
+    .unwrap();
+    let payload = format!(
+        r#"{{"session_id":"g","transcript_path":"{}"}}"#,
+        transcript.display()
+    );
+    t.report(&id, "session", &payload);
+    t.report(&id, "idle", "{}");
+
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    term.keys(&["s", "t"]);
+    t.wait_for("the title's run", |_| dir.join("started").exists());
+    // Archived and deleted for good while it's made: nothing to keep it on,
+    // and nothing to say.
+    t.ok(&["archive", "--yes", "gone"]);
+    t.ok(&["rm", "--yes", "gone"]);
+    std::fs::write(dir.join("release"), "").unwrap();
+    t.wait_for("its answer", |_| dir.join("answered").exists());
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let screen = term.screen();
+    // (Its "Asking…" may still show; no word about it after.)
+    assert!(
+        !screen.contains("demo/gone:")
+            && !screen.contains("no session with id")
+            && !screen.contains("isn't kept"),
+        "{screen}"
+    );
+    // The TUI goes on.
+    term.keys(&["v"]);
+    term.wait_for("the view menu", "group by project");
+}

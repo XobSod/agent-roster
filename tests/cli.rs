@@ -740,9 +740,11 @@ fn first_prompts_are_typed_in_once_the_agent_is_ready() {
     );
     let id = s["id"].as_str().unwrap().to_string();
     // (Once the stand-in has printed its arguments: on a busy machine that
-    // comes a moment after the session.)
+    // comes a moment after the session, whose row is saved before its window
+    // is made, so `show` fails until then.)
     t.wait_for("the agent's arguments", |t| {
-        t.ok(&["show", "c"]).contains("fake agent:")
+        let out = t.run(&["show", "c"]);
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("fake agent:")
     });
     let screen = t.ok(&["show", "c"]);
     assert!(screen.contains("--model opus --effort high"), "{screen}");

@@ -248,7 +248,10 @@ All files are optional and live in `~/.config/agent-roster/`:
     Such agents are tracked by their screen and can't resume, so roster asks before
     starting one again.
 - `env`: sourced before every agent start, so `TOKEN="$(token-cmd)"` gets a fresh
-  value each time. A `.agent-roster.env` in a project's directory is sourced after it.
+  value each time. A command that fails stops the start, its error left on the
+  session's screen. Leave out `export`: every value is exported anyway, and
+  `export TOKEN="$(token-cmd)"` hides the command's failure, so the agent starts
+  with `TOKEN` empty. A `.agent-roster.env` in a project's directory is sourced after it.
 - `tmux.conf`: additions to roster's tmux, such as the scrolling setup below. By
   default every key except Ctrl+Q goes to the agent.
 

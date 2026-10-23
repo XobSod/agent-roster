@@ -644,6 +644,23 @@ fn settings_change_config_toml_in_place() {
             && !changed.contains("regular"),
         "{changed}"
     );
+    // A whole agent's settings ask first, so without a terminal: refused.
+    let out = t.run(&["config", "unset", "agents.pi"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("Take pi's settings out of config.toml")
+            && err.contains("Pass --yes to confirm."),
+        "{err}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    let out = t.ok(&["config", "unset", "agents.pi", "--yes"]);
+    assert_eq!(out, "Took [agents.pi] out of config.toml\n");
+    let changed = fs::read_to_string(&file).unwrap();
+    assert!(!changed.contains("[agents.pi]"), "{changed}");
+    // A table the file doesn't have: nothing to ask about, and nothing done.
+    t.ok(&["config", "unset", "notes"]);
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
     // A back key tmux doesn't know, or that takes a key from the agents: not written.
     for key in ["Backspace", "q", "C-c"] {
         let out = t.run(&["config", "set", "keys.detach", key]);

@@ -58,13 +58,7 @@ impl App {
             }
             KeyCode::Char('x') => {
                 let name = self.selected_agent()?;
-                let question = if crate::agent::BUILT_IN.contains(&name.as_str()) {
-                    format!("Take {name}'s settings out of config.toml, back to its defaults?")
-                } else {
-                    format!(
-                        "Remove the agent {name} from config.toml? Its sessions are then watched by their screen."
-                    )
-                };
+                let question = crate::settings::agent_removal_question(&name);
                 let setting = format!("agents.{name}");
                 self.confirm(
                     question,

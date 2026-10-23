@@ -330,8 +330,14 @@ enum ConfigCmd {
     /// Change a setting in config.toml (keeping the rest of it): `set agents.pi.title_model
     /// claude-haiku-4-5`, `set keys.up "k Up"`
     Set { setting: String, value: String },
-    /// Take a setting out of config.toml, so its default holds again
-    Unset { setting: String },
+    /// Take a setting out of config.toml, so its default holds again; a whole
+    /// table of them (`unset agents.aider`) asks first
+    Unset {
+        setting: String,
+        /// Take a whole table out without asking
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 /// A project's defaults for new sessions; "default" clears one.
@@ -757,9 +763,18 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 r.change_setting(&setting, Some(&value))?;
                 println!("Set {setting}");
             }
-            Some(ConfigCmd::Unset { setting }) => {
+            Some(ConfigCmd::Unset { setting, yes }) => {
+                let question = r.unset_question(&setting);
+                if let Some(question) = &question
+                    && !confirm(question, yes)?
+                {
+                    return Ok(());
+                }
                 r.change_setting(&setting, None)?;
-                println!("{setting} is back to its default");
+                match question {
+                    Some(_) => println!("Took [{setting}] out of config.toml"),
+                    None => println!("{setting} is back to its default"),
+                }
             }
             None if defaults => print!("{}", settings::template(&r.settings())),
             None => print::settings(r),

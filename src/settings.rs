@@ -36,6 +36,13 @@ impl crate::engine::Roster {
         sections(&self.config, &self.config_text, &env)
     }
 
+    /// What taking out the setting at `dotted` asks first (`removal_question`),
+    /// as config.toml is now.
+    pub fn unset_question(&self, dotted: &str) -> Option<String> {
+        let text = crate::config::read_text(&self.paths.config_file()).ok()?;
+        removal_question(&self.settings(), &text, dotted)
+    }
+
     /// Changes the setting at `dotted` (`agents.pi.title_model`) to `input`,
     /// as typed; None (or empty text) for its default, which takes it out of
     /// config.toml. A whole table (`agents.aider`) can only be taken out.
@@ -266,6 +273,43 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
 
 fn is_table(sections: &[Section], path: &[String]) -> bool {
     sections.iter().any(|s| s.table.as_deref() == Some(path))
+}
+
+/// What taking the setting at `dotted` out of config.toml (`text`) asks
+/// first: a whole table of them in the file, an agent's (as the settings view
+/// asks, `agent_removal_question`) or another (`[keys]`), since its settings
+/// all go; not a single value, nor a table the file doesn't have.
+fn removal_question(sections: &[Section], text: &str, dotted: &str) -> Option<String> {
+    let path: Vec<String> = dotted.split('.').map(String::from).collect();
+    if !is_table(sections, &path) {
+        return None;
+    }
+    let doc: DocumentMut = text.parse().ok()?;
+    let mut item = doc.as_item();
+    for key in &path {
+        item = item.get(key)?;
+    }
+    if !item.is_table_like() {
+        return None;
+    }
+    Some(match &path[..] {
+        [agents, name] if agents == "agents" => agent_removal_question(name),
+        _ => {
+            format!("Take [{dotted}] out of config.toml, each of its settings back to its default?")
+        }
+    })
+}
+
+/// What taking agent `name`'s settings out of config.toml asks first, in the
+/// settings view and `roster config unset`.
+pub fn agent_removal_question(name: &str) -> String {
+    if crate::agent::BUILT_IN.contains(&name) {
+        format!("Take {name}'s settings out of config.toml, back to its defaults?")
+    } else {
+        format!(
+            "Remove the agent {name} from config.toml? Its sessions are then watched by their screen."
+        )
+    }
 }
 
 /// What a setting takes.
@@ -1247,6 +1291,41 @@ mod tests {
             .flat_map(|s| &s.settings)
             .find(|s| s.dotted() == dotted)
             .unwrap_or_else(|| panic!("no {dotted}"))
+    }
+
+    #[test]
+    fn taking_out_a_whole_table_in_the_file_asks_first() {
+        let text = "status_line = false\n[agents.pi]\nargs = [\"x\"]\n[agents.aider]\ncommand = \"aider\"\n[keys.session]\nstop = \"y\"\n";
+        let config = Config::parse(text).unwrap();
+        let sections = sections(&config, text, &cx());
+        let ask = |dotted| removal_question(&sections, text, dotted);
+        assert_eq!(
+            ask("agents.pi").as_deref(),
+            Some("Take pi's settings out of config.toml, back to its defaults?")
+        );
+        assert!(
+            ask("agents.aider")
+                .unwrap()
+                .starts_with("Remove the agent aider ")
+        );
+        assert!(
+            ask("keys.session")
+                .unwrap()
+                .starts_with("Take [keys.session] out")
+        );
+        assert!(ask("keys").unwrap().starts_with("Take [keys] out"));
+        // A single value, a table the file doesn't have, or no setting at all.
+        for dotted in [
+            "status_line",
+            "agents.pi.args",
+            "agents.claude",
+            "notes",
+            "agents",
+            "agents.",
+            "nope",
+        ] {
+            assert_eq!(ask(dotted), None, "{dotted}");
+        }
     }
 
     #[test]

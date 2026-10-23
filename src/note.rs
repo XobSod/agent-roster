@@ -96,35 +96,27 @@ pub fn follow_pin(old: &[&str], new: &[&str], pin: Option<usize>) -> Option<usiz
     Some(at.min(last))
 }
 
-/// Has `$VISUAL` or `$EDITOR` edit `text` in `file`, then `keep` what it
-/// saved; None if the editor failed (as vim's `:cq` makes it). The file goes
-/// once the text is kept; if it can't be, it stays, and the error says where.
+/// Has `$VISUAL` or `$EDITOR` edit `text` in a file of its own next to
+/// `base` (`base` with this process's id, so no other editor of it or of
+/// another note shares it), then `keep` what it saved; None if the editor
+/// failed (as vim's `:cq` makes it). The file goes once the text is kept; if
+/// it can't be, it stays, and the error says where.
 pub fn edit_externally<T>(
-    file: &Path,
+    base: &Path,
     text: &str,
     keep: impl FnOnce(String) -> Result<T>,
 ) -> Result<Option<T>> {
-    if let Some(dir) = file.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
-    }
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(file)
-        .and_then(|mut f| {
-            let end = if text.is_empty() { "" } else { "\n" };
-            write!(f, "{text}{end}")
-        });
-    written.with_context(|| format!("can't write {}", file.display()))?;
-    if !crate::util::run_editor(file).inspect_err(|_| {
-        let _ = fs::remove_file(file);
+    let (file, mut handle) = create_own(base)?;
+    let end = if text.is_empty() { "" } else { "\n" };
+    write!(handle, "{text}{end}").with_context(|| format!("can't write {}", file.display()))?;
+    drop(handle);
+    if !crate::util::run_editor(&file).inspect_err(|_| {
+        let _ = fs::remove_file(&file);
     })? {
-        let _ = fs::remove_file(file);
+        let _ = fs::remove_file(&file);
         return Ok(None);
     }
-    let kept = fs::read_to_string(file)
+    let kept = fs::read_to_string(&file)
         .map_err(anyhow::Error::from)
         .and_then(|back| {
             // Without the newline editors end a file with (and it was given).
@@ -132,8 +124,36 @@ pub fn edit_externally<T>(
             keep(back.strip_suffix('\r').unwrap_or(back).to_string())
         })
         .with_context(|| format!("what you wrote is kept in {}", file.display()))?;
-    let _ = fs::remove_file(file);
+    let _ = fs::remove_file(&file);
     Ok(Some(kept))
+}
+
+/// A new file for this process next to `base` (`notes/demo-one-1a2b3c4d.md`
+/// gives `notes/demo-one-1a2b3c4d.4242.md`), made here and only here: one
+/// left by an editor before (kept after a failed save) gets another number.
+fn create_own(base: &Path) -> Result<(std::path::PathBuf, fs::File)> {
+    let dir = base.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("note");
+    let pid = std::process::id();
+    for n in 0..100 {
+        let name = match n {
+            0 => format!("{stem}.{pid}.md"),
+            n => format!("{stem}.{pid}-{n}.md"),
+        };
+        let file = dir.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file)
+        {
+            Ok(handle) => return Ok((file, handle)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("can't write {}", file.display())),
+        }
+    }
+    anyhow::bail!("no file of its own for a note next to {}", base.display())
 }
 
 #[cfg(test)]
@@ -176,6 +196,22 @@ mod tests {
         assert_eq!(tidy("one\r\ntwo  \n\n\n"), "one\ntwo");
         assert_eq!(tidy(" \n\n"), "");
         assert_eq!(tidy("\n  indented"), "\n  indented");
+    }
+
+    #[test]
+    fn each_editing_gets_a_file_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("notes/demo-one-1a2b3c4d.md");
+        let (first, _) = create_own(&base).unwrap();
+        let (second, _) = create_own(&base).unwrap();
+        assert_ne!(first, second);
+        let pid = std::process::id().to_string();
+        assert!(
+            first
+                .to_str()
+                .unwrap()
+                .ends_with(&format!("demo-one-1a2b3c4d.{pid}.md"))
+        );
     }
 
     #[test]

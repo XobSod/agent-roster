@@ -18,6 +18,20 @@ use crate::tmux::{Pane, Tmux};
 use crate::util::{self, now_ms};
 use crate::{agent, launch};
 
+/// A note of `text`, its pin on a line it has (`note::tidy` may take lines
+/// off its end); None if there's nothing but blanks.
+fn new_note(text: &str, pin: Option<usize>) -> Option<Note> {
+    let text = note::tidy(text);
+    (!text.is_empty()).then(|| {
+        let last = text.lines().count().saturating_sub(1);
+        Note {
+            pin: pin.map(|p| p.min(last)),
+            text,
+            at: now_ms(),
+        }
+    })
+}
+
 /// Window size for new sessions when roster isn't run from a terminal.
 const DEFAULT_SIZE: (u16, u16) = (160, 48);
 /// How long `stop` waits after SIGTERM before SIGKILL.
@@ -47,7 +61,25 @@ pub struct Roster {
     /// What roster last refused to use, so it says so once, not each tick:
     /// the file's text, invalid, or why it couldn't be read.
     pub(crate) config_refused: Option<String>,
+    /// First prompts that couldn't be typed in, by session, and how often
+    /// this process tried each.
+    prompt_tries: HashMap<String, u32>,
+    /// Why first prompts weren't typed in, to say (`take_undelivered`): not
+    /// errors of the refresh, which goes on for the other sessions.
+    undelivered: Vec<Undelivered>,
 }
+
+/// A first prompt `refresh` couldn't type into session `id`, and why;
+/// `again`: this roster tries it again.
+pub struct Undelivered {
+    pub id: String,
+    pub message: String,
+    pub again: bool,
+}
+
+/// How often one roster tries a first prompt that never got into its agent;
+/// after that it stays, for another roster or the agent's next start.
+const PROMPT_TRIES: u32 = 3;
 
 impl Roster {
     pub fn open() -> Result<Roster> {
@@ -74,6 +106,8 @@ impl Roster {
             tmux,
             exe,
             resized: HashMap::new(),
+            prompt_tries: HashMap::new(),
+            undelivered: Vec::new(),
             panes: None,
             config_text,
             config_refused: None,
@@ -89,9 +123,9 @@ impl Roster {
         self.db.fold_events(now)?;
         let panes = self.tmux.panes()?;
         self.resized.retain(|_, until| *until > now);
-        // Typed once every session is saved: typing takes a moment, and rows
-        // loaded before it could overwrite what another roster saved meanwhile.
-        let mut prompts = Vec::new();
+        // Typed once every session is saved, each claimed just before it's
+        // typed: a refresh that stops before then takes none of them.
+        let mut ready = Vec::new();
         let mut titles = Vec::new();
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
@@ -139,11 +173,7 @@ impl Roster {
                         }
                     }
                     if s.pending_prompt.is_some() && self.ready_for_prompt(&s, now) {
-                        // Claimed in the database first, so only one process types it.
-                        if let Some(prompt) = self.db.take_pending_prompt(&s.id)? {
-                            prompts.push((s.tmux_name(), prompt));
-                        }
-                        s.pending_prompt = None;
+                        ready.push((s.id.clone(), s.tmux_name()));
                     }
                 }
             }
@@ -154,25 +184,82 @@ impl Roster {
                 titles.push(s.id.clone());
             }
             if s != before {
-                self.db.save_session(&s)?;
+                // Only what changed: what another roster saved meanwhile stays.
+                self.db.save_changes(&before, &s)?;
             }
         }
         self.panes = Some(panes);
         for id in titles {
             self.auto_title_in_background(&id);
         }
-        for (name, prompt) in prompts {
-            self.tmux.type_line(&name, &prompt)?;
+        for (id, name) in ready {
+            if self
+                .prompt_tries
+                .get(&id)
+                .is_some_and(|&n| n >= PROMPT_TRIES)
+            {
+                continue;
+            }
+            // Claimed in the database first, so only one roster types it.
+            let Some(prompt) = self.db.take_pending_prompt(&id)? else {
+                continue;
+            };
+            if let Err(untyped) = self.tmux.type_line(&name, &prompt) {
+                self.untyped(&id, &prompt, untyped);
+            }
         }
         Ok(())
+    }
+
+    /// A first prompt that couldn't be typed into session `id`: one that never
+    /// got into its agent stays (this roster tries it a few times, then
+    /// leaves it to another roster or the agent's next start); one that did
+    /// (only its Enter missing) doesn't, so it isn't typed twice.
+    fn untyped(&mut self, id: &str, prompt: &str, untyped: crate::tmux::Untyped) {
+        let tries = self.prompt_tries.entry(id.to_string()).or_default();
+        *tries += 1;
+        let kept = !untyped.pasted && self.db.restore_pending_prompt(id, prompt).is_ok();
+        let again = kept && *tries < PROMPT_TRIES;
+        let label = self.db.session(id).map_or(id.to_string(), |s| s.label());
+        let what = match (untyped.pasted, kept, again) {
+            (true, ..) => "it's in, but Enter didn't get to it",
+            (false, _, true) => "trying again",
+            (false, true, false) => "it stays, for its next start",
+            (false, false, _) => "and it's lost",
+        };
+        self.undelivered.push(Undelivered {
+            id: id.to_string(),
+            message: format!(
+                "couldn't type the first prompt into {label} ({what}): {:#}",
+                untyped.error
+            ),
+            again,
+        });
+    }
+
+    /// First prompts `refresh` couldn't type in since this was last asked.
+    pub fn take_undelivered(&mut self) -> Vec<Undelivered> {
+        std::mem::take(&mut self.undelivered)
     }
 
     /// Makes `id`'s automatic title in a roster process of its own: it takes
     /// a model call, which nothing should wait for. A failure only means no
     /// title (`s t` asks again, and says why).
     fn auto_title_in_background(&self, id: &str) {
+        self.in_background(&["retitle", "--auto", id]);
+    }
+
+    /// Types session `id`'s first prompt in once its agent is ready, in a
+    /// roster process of its own (`roster deliver`): for while you're
+    /// attached, when nothing else refreshes.
+    pub fn deliver_in_background(&self, id: &str) {
+        self.in_background(&["deliver", id]);
+    }
+
+    /// Runs roster with `args` in the background, its output nowhere.
+    fn in_background(&self, args: &[&str]) {
         let child = std::process::Command::new(&self.exe)
-            .args(["retitle", "--auto", id])
+            .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -501,8 +588,11 @@ impl Roster {
     /// Starts a stopped session: sources the env files and launches its agent,
     /// resuming the conversation if it has one.
     pub fn start(&mut self, id: &str) -> Result<()> {
+        // A first prompt this roster gave up on is tried again once started.
+        self.prompt_tries.remove(id);
         self.refresh()?;
         let mut s = self.live_session(id)?;
+        let before = s.clone();
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
         }
@@ -544,7 +634,7 @@ impl Roster {
             s.last_event_at = None;
             s.baseline_at = Some(now + BOOT_GRACE_MS);
         }
-        self.db.save_session(&s)
+        self.db.save_changes(&before, &s)
     }
 
     /// What lists each agent's models (`Adapter::models`), to run anywhere,
@@ -630,8 +720,9 @@ impl Roster {
         // The exit code of a stop the user asked for (143 after SIGTERM) means nothing.
         let mut s = self.db.session(id)?;
         if s.state == State::Stopped && s.exit_status.is_some() {
+            let before = s.clone();
             s.exit_status = None;
-            self.db.save_session(&s)?;
+            self.db.save_changes(&before, &s)?;
         }
         Ok(true)
     }
@@ -646,10 +737,11 @@ impl Roster {
     pub fn archive(&mut self, id: &str) -> Result<()> {
         self.stop(id)?;
         let mut s = self.db.session(id)?;
+        let before = s.clone();
         self.tmux.kill_session(&s.tmux_name())?;
         s.deleted_at = Some(now_ms());
         s.set_state(State::Stopped, now_ms());
-        self.db.save_session(&s)
+        self.db.save_changes(&before, &s)
     }
 
     /// Deletes an archived session for good: roster forgets it and its events.
@@ -670,6 +762,7 @@ impl Roster {
     pub fn restore(&mut self, id: &str, new_name: Option<&str>) -> Result<Session> {
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
+        let before = s.clone();
         if s.deleted_at.is_none() {
             bail!("{} isn't archived", s.label());
         }
@@ -687,7 +780,7 @@ impl Roster {
         s.deleted_at = None;
         s.set_state(State::Stopped, now_ms());
         s.unread = false;
-        self.db.save_session(&s)?;
+        self.db.save_changes(&before, &s)?;
         Ok(s)
     }
 
@@ -707,6 +800,11 @@ impl Roster {
         let s = self.live_session(id)?;
         if s.state == State::Stopped {
             self.start(id)?;
+        }
+        // A first prompt still to go in: nothing refreshes while you're
+        // attached, so a roster of its own types it in once the agent is ready.
+        if self.db.session(id)?.pending_prompt.is_some() {
+            self.deliver_in_background(id);
         }
         // The status line says where you are, drawn like the TUI's header. Only
         // a nicety: if tmux won't take it, attach anyway.
@@ -730,34 +828,43 @@ impl Roster {
         self.db.prompted_since(id, since)
     }
 
-    /// Renames a session or changes its model and effort (None: as they
-    /// are; Some(None): the default, the agent's in config.toml as for a new
-    /// session, else its own); the agent picks those up on its next start.
-    /// `title`: None follows the agent's title.
+    /// Renames a session, sets its title, or changes its model and effort;
+    /// each None stays as it is, so what another roster changed meanwhile
+    /// does too. `title`: Some(None) follows the agent's title again. Model
+    /// and effort: Some(None) is the default, the agent's in config.toml as
+    /// for a new session, else its own; the agent picks those up on its next
+    /// start.
     pub fn update_session(
         &mut self,
         id: &str,
-        name: &str,
-        title: Option<String>,
+        name: Option<&str>,
+        title: Option<Option<String>>,
         model: Option<Option<String>>,
         effort: Option<Option<String>>,
     ) -> Result<Session> {
-        validate_name("session", name)?;
+        if let Some(name) = name {
+            validate_name("session", name)?;
+        }
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
+        let before = s.clone();
         if let Some(Some(effort)) = &effort {
             agent::check_effort(&s.agent, effort)?;
         }
-        if self.db.name_taken(s.project_id, name, Some(&s.id))? {
-            bail!(
-                "project {:?} already has a session named {name:?}",
-                s.project
-            );
+        if let Some(name) = name {
+            if self.db.name_taken(s.project_id, name, Some(&s.id))? {
+                bail!(
+                    "project {:?} already has a session named {name:?}",
+                    s.project
+                );
+            }
+            s.name = name.to_string();
         }
-        s.name = name.to_string();
-        s.title_override = title
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty());
+        if let Some(title) = title {
+            s.title_override = title
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+        }
         if agent::adapter(&s.agent).choices().is_some() {
             let chosen = self.config.agent(&s.agent);
             if let Some(model) = model {
@@ -767,24 +874,29 @@ impl Roster {
                 s.effort = effort.or(chosen.effort);
             }
         }
-        self.db.save_session(&s)?;
+        self.db.save_changes(&before, &s)?;
         Ok(s)
     }
 
-    /// Saves the note of session `id`, its pin on a line it has (`note::tidy`
-    /// may take lines off its end); nothing but blanks removes it. The note
-    /// as saved.
-    pub fn set_note(&self, id: &str, text: &str, pin: Option<usize>) -> Result<Option<Note>> {
-        let text = note::tidy(text);
-        let note = (!text.is_empty()).then(|| {
-            let last = text.lines().count().saturating_sub(1);
-            Note {
-                pin: pin.map(|p| p.min(last)),
-                text,
-                at: now_ms(),
-            }
-        });
-        self.db.set_note(id, note.as_ref())?;
+    /// Saves the note of session `id` from the TUI's editor, opened on note
+    /// `base` (nothing but blanks removes it): unless `force`d, not over
+    /// another saved meanwhile. The note as saved.
+    pub fn save_note(
+        &self,
+        id: &str,
+        text: &str,
+        pin: Option<usize>,
+        base: Option<&Note>,
+        force: bool,
+    ) -> Result<Option<Note>> {
+        let note = new_note(text, pin);
+        if force {
+            self.db.set_note(id, note.as_ref())?;
+        } else if !self.db.set_note_if(id, base, note.as_ref())? {
+            bail!(
+                "The note changed since you opened it (roster note, say): :w! saves yours over it"
+            );
+        }
         Ok(note)
     }
 
@@ -800,8 +912,16 @@ impl Roster {
         }
         let before: Vec<&str> = old.lines().collect();
         let after: Vec<&str> = text.lines().collect();
-        let pin = note::follow_pin(&before, &after, pin);
-        Ok(match self.set_note(&s.id, text, pin)? {
+        let note = new_note(text, note::follow_pin(&before, &after, pin));
+        // Not over one saved meanwhile (another editor, an agent through
+        // `roster note`), which yours was never made from.
+        if !self.db.set_note_if(&s.id, s.note.as_ref(), note.as_ref())? {
+            bail!(
+                "the note of {} changed meanwhile, so yours isn't saved over it",
+                s.label()
+            );
+        }
+        Ok(match note {
             Some(_) => format!("Saved the note of {}", s.label()),
             None => format!("{} has no note now", s.label()),
         })
@@ -823,7 +943,16 @@ impl Roster {
                 lines.len()
             ),
         };
-        self.set_note(&s.id, &note.text, pin)?;
+        // Over the note it was asked of, not one saved meanwhile.
+        if !self
+            .db
+            .set_note_if(&s.id, Some(note), new_note(&note.text, pin).as_ref())?
+        {
+            bail!(
+                "the note of {} changed meanwhile; nothing pinned",
+                s.label()
+            );
+        }
         Ok(match pin {
             Some(p) => format!(
                 "Pinned line {} of the note of {}: {}",
@@ -835,21 +964,23 @@ impl Roster {
         })
     }
 
-    /// Where `$EDITOR` edits a session's note: a file named after it in the
-    /// state directory, so the editor's title says whose it is.
+    /// Where `$EDITOR` edits a session's note: named after it, so the
+    /// editor's title says whose it is, and its id, which only it has
+    /// (`a-b/c` and `a/b-c` name alike); each editing makes its own file next
+    /// to that (`note::edit_externally`).
     pub fn note_file(&self, s: &Session) -> PathBuf {
         let name: String = s
             .label()
             .chars()
             .map(|c| match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
                 _ => '-',
             })
             .collect();
         self.paths
             .state_dir
             .join("notes")
-            .join(format!("{name}.md"))
+            .join(format!("{name}-{}.md", s.id))
     }
 
     /// What the session's agent can tell about it, from its transcript; None
@@ -879,16 +1010,37 @@ impl Roster {
     }
 
     /// Waits (refreshing) until a session's first prompt has been typed in, for
-    /// one-shot commands. False if the agent wasn't ready within `timeout`.
+    /// one-shot commands. False if the agent wasn't ready within `timeout`, or
+    /// stopped or was archived first; an error if typing it in failed for good,
+    /// or failed and time ran out.
     pub fn wait_for_prompt(&mut self, id: &str, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;
+        let mut last_failure = None;
         loop {
             self.refresh()?;
-            if self.db.session(id)?.pending_prompt.is_none() {
+            // Its own; others' stay for whoever asks.
+            let failed = (self.undelivered.iter())
+                .position(|u| u.id == id)
+                .map(|i| self.undelivered.remove(i));
+            let s = self.db.session(id)?;
+            match failed {
+                // Not typed in, and not to be tried again by this roster.
+                Some(u) if !u.again => bail!("{}", u.message),
+                Some(u) => last_failure = Some(u.message),
+                None => {}
+            }
+            if s.pending_prompt.is_none() {
                 return Ok(true);
             }
-            if Instant::now() > deadline {
+            // Its agent gone (exited, archived): nothing to type it into.
+            if s.state == State::Stopped || s.deleted_at.is_some() {
                 return Ok(false);
+            }
+            if Instant::now() > deadline {
+                return match last_failure {
+                    Some(message) => Err(anyhow::anyhow!(message)),
+                    None => Ok(false),
+                };
             }
             sleep(Duration::from_millis(500));
         }
@@ -900,13 +1052,14 @@ impl Roster {
         // Events reported before this must not be applied after it.
         self.db.fold_events(now_ms())?;
         let mut s = self.db.session(id)?;
+        let before = s.clone();
         if unread {
             s.unread = true;
         } else {
             let hash = self.screen_hash(&s);
             s.mark_seen(hash, now_ms());
         }
-        self.db.save_session(&s)
+        self.db.save_changes(&before, &s)
     }
 
     /// Whether starting `s` again resumes its conversation; if not, the CLI and
@@ -968,8 +1121,9 @@ fn backfill_models(db: &Db) -> Result<()> {
             .as_deref()
             .and_then(|p| agent::claude::last_model_in(Path::new(p)))
         {
+            let before = s.clone();
             s.running_model = Some(model);
-            db.save_session(&s)?;
+            db.save_changes(&before, &s)?;
         }
     }
     db.learn_model_names()

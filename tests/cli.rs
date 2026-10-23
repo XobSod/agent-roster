@@ -791,6 +791,22 @@ fn first_prompts_are_typed_in_once_the_agent_is_ready() {
     });
     // A generic agent takes no model or effort, so its session doesn't keep them.
     assert_eq!(t.session("g", false).unwrap()["model"], Value::Null);
+
+    // Any text is typed in as it is: a lone `;` is no tmux command separator.
+    let out = t.ok(&[
+        "new", "demo", "--agent", "echo", "--name", "semi", "--prompt", ";",
+    ]);
+    assert!(out.contains("Sent the first prompt"), "{out}");
+    t.wait_for("the `;` in the agent", |t| {
+        t.ok(&["show", "semi"]).lines().any(|l| l.trim() == ";")
+    });
+    // And at any length: tmux takes a command line of about 16 KB at most.
+    let long = format!("{}end", "a long prompt ".repeat(1500));
+    let out = t.ok(&[
+        "new", "demo", "--agent", "echo", "--name", "long", "--prompt", &long,
+    ]);
+    assert!(out.contains("Sent the first prompt"), "{out}");
+    assert_eq!(t.session("long", false).unwrap()["pending_prompt"], false);
 }
 
 #[test]
@@ -946,6 +962,10 @@ fn ls_shows_titles_models_and_filters() {
         "{matching}"
     );
     assert!(t.ok(&["ls", "zzz"]).contains("No sessions match \"zzz\""));
+    // A title of your own is the title it shows.
+    t.ok(&["edit", "one", "--title", "Chosen review title"]);
+    let chosen = t.ok(&["ls", "Chosen"]);
+    assert!(chosen.contains("Chosen review title"), "{chosen}");
 }
 
 #[test]
@@ -1257,13 +1277,43 @@ fn notes_are_kept_with_their_session() {
     fs::write(&editor, "#!/bin/sh\nprintf 'x\\377' > \"$1\"\n").unwrap();
     let out = edit(editor.to_str().unwrap());
     assert!(!out.status.success());
-    let kept = t.path("state/agent-roster/notes/demo-one.md");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    // In a file of its own: the session's name and id, and the editing's.
+    let kept_in = |out: &std::process::Output| {
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let at = stderr
+            .find("kept in ")
+            .unwrap_or_else(|| panic!("{stderr}"))
+            + 8;
+        let path: String = stderr[at..].chars().take_while(|c| *c != ':').collect();
+        std::path::PathBuf::from(path)
+    };
+    let kept = kept_in(&out);
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let name = kept.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(name.starts_with(&format!("demo-one-{id}.")), "{name}");
+    assert_eq!(fs::read(&kept).unwrap(), b"x\xff");
+    fs::remove_file(&kept).unwrap();
+
+    // Saved by another meanwhile (an agent, say): yours isn't saved over it,
+    // and is kept.
+    let roster = env!("CARGO_BIN_EXE_roster");
+    fs::write(
+        &editor,
+        format!("#!/bin/sh\n'{roster}' note one --append 'meanwhile'\necho mine >> \"$1\"\n"),
+    )
+    .unwrap();
+    let out = edit(editor.to_str().unwrap());
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
-        stderr.contains(&format!("kept in {}", kept.display())),
+        !out.status.success() && stderr.contains("changed meanwhile"),
         "{stderr}"
     );
-    assert_eq!(fs::read(&kept).unwrap(), b"x\xff");
+    assert!(t.ok(&["note", "one"]).ends_with("meanwhile\n"));
+    let kept = kept_in(&out);
+    assert!(fs::read_to_string(&kept).unwrap().ends_with("mine\n"));
     fs::remove_file(&kept).unwrap();
     // A blank text isn't taken for a note to remove: --clear is.
     let out = t.run(&["note", "one", "--set", " "]);

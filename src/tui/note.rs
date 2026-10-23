@@ -38,6 +38,9 @@ pub struct NoteEditor {
     pub pin: Option<usize>,
     /// The text (tidied) and pin as last saved.
     saved: (String, Option<usize>),
+    /// The note as it was opened, or last saved: what a save expects to
+    /// replace (one saved by another meanwhile isn't, without `:w!`).
+    pub base: Option<Note>,
     /// The lines before the last key, for the pin to follow its line.
     lines: Vec<String>,
     /// `Z` or `m`, waiting for its second key.
@@ -57,9 +60,11 @@ pub struct NoteEditor {
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     None,
-    /// Save the note, then close the editor or stay in it.
+    /// Save the note, then close the editor or stay in it; `force`d, also
+    /// over one saved by another meanwhile.
     Save {
         close: bool,
+        force: bool,
     },
     /// Close without saving.
     Close,
@@ -67,6 +72,8 @@ pub enum Outcome {
     External,
     /// Say why not.
     Fail(String),
+    /// Say this (not an error).
+    Notice(String),
 }
 
 impl NoteEditor {
@@ -87,6 +94,7 @@ impl NoteEditor {
             keys: vim_keys(),
             pin,
             saved: (text, pin),
+            base: s.note.clone(),
             lines,
             pending: None,
             char_arg: None,
@@ -194,6 +202,7 @@ impl NoteEditor {
     pub fn saved(&mut self, note: Option<&Note>) {
         self.saved = note.map_or((String::new(), None), |n| (n.text.clone(), n.pin));
         self.pin = self.saved.1;
+        self.base = note.cloned();
     }
 
     /// The text as `$EDITOR` left it; the pin follows its line.
@@ -259,7 +268,7 @@ impl NoteEditor {
         if self.mode() == EditorMode::Normal && self.char_arg.is_none() {
             if let Some(first) = self.pending.take() {
                 return match (first, e.code) {
-                    ('Z', KeyCode::Char('Z')) if plain => self.write_and_close(),
+                    ('Z', KeyCode::Char('Z')) if plain => self.write_and_close(false),
                     ('Z', KeyCode::Char('Q')) if plain => Outcome::Close,
                     ('m', KeyCode::Char('m')) if plain => {
                         self.toggle_pin();
@@ -342,9 +351,27 @@ impl NoteEditor {
     fn run(&mut self, command: &str) -> Outcome {
         match command {
             "" => Outcome::None,
-            "w" | "w!" => Outcome::Save { close: false },
-            "wq" | "wq!" => Outcome::Save { close: true },
-            "x" | "x!" | "xit" | "exit" => self.write_and_close(),
+            // Nothing of yours to save, so nothing over a note saved meanwhile.
+            "w" | "w!" if !self.dirty() => Outcome::Notice("Nothing new to save".into()),
+            "wq" | "wq!" if !self.dirty() => Outcome::Close,
+            "w" => Outcome::Save {
+                close: false,
+                force: false,
+            },
+            "w!" => Outcome::Save {
+                close: false,
+                force: true,
+            },
+            "wq" => Outcome::Save {
+                close: true,
+                force: false,
+            },
+            "wq!" => Outcome::Save {
+                close: true,
+                force: true,
+            },
+            "x" | "xit" | "exit" => self.write_and_close(false),
+            "x!" | "xit!" | "exit!" => self.write_and_close(true),
             "q" | "quit" if self.dirty() => Outcome::Fail(
                 "The note has unsaved changes: :wq saves them, :q! leaves them".into(),
             ),
@@ -356,9 +383,9 @@ impl NoteEditor {
     }
 
     /// `:x` and `ZZ`: saves if changed, and closes.
-    fn write_and_close(&self) -> Outcome {
+    fn write_and_close(&self, force: bool) -> Outcome {
         if self.dirty() {
-            Outcome::Save { close: true }
+            Outcome::Save { close: true, force }
         } else {
             Outcome::Close
         }
@@ -552,6 +579,9 @@ mod tests {
         let mut e = editor(Some("one"), None);
         assert_eq!(keys(&mut e, ":q\n"), [Outcome::Close]);
         assert_eq!(keys(&mut e, "ZZ"), [Outcome::Close]);
+        // Unchanged: nothing saved, so nothing over a note saved meanwhile.
+        assert_eq!(keys(&mut e, ":wq\n"), [Outcome::Close]);
+        assert!(matches!(keys(&mut e, ":w!\n")[..], [Outcome::Notice(_)]));
         keys(&mut e, "Atwo\x1b");
         assert_eq!(e.text(), "onetwo");
         assert!(e.dirty());
@@ -559,10 +589,15 @@ mod tests {
         assert!(matches!(keys(&mut e, ":q\n")[..], [Outcome::Fail(_)]));
         assert_eq!(keys(&mut e, ":q!\n"), [Outcome::Close]);
         assert_eq!(keys(&mut e, "ZQ"), [Outcome::Close]);
-        assert_eq!(keys(&mut e, ":w\n"), [Outcome::Save { close: false }]);
-        assert_eq!(keys(&mut e, ":wq\n"), [Outcome::Save { close: true }]);
-        assert_eq!(keys(&mut e, "ZZ"), [Outcome::Save { close: true }]);
-        assert_eq!(keys(&mut e, ":x\n"), [Outcome::Save { close: true }]);
+        let save = |close, force| [Outcome::Save { close, force }];
+        assert_eq!(keys(&mut e, ":w\n"), save(false, false));
+        assert_eq!(keys(&mut e, ":wq\n"), save(true, false));
+        assert_eq!(keys(&mut e, "ZZ"), save(true, false));
+        assert_eq!(keys(&mut e, ":x\n"), save(true, false));
+        // With `!`, also over a note saved meanwhile.
+        assert_eq!(keys(&mut e, ":w!\n"), save(false, true));
+        assert_eq!(keys(&mut e, ":wq!\n"), save(true, true));
+        assert_eq!(keys(&mut e, ":x!\n"), save(true, true));
         assert!(matches!(keys(&mut e, ":e\n")[..], [Outcome::Fail(_)]));
         // Saved, it's clean again.
         e.saved(Some(&Note {

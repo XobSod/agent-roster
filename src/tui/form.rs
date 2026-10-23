@@ -838,10 +838,11 @@ impl Form {
             Purpose::EditSession(id) => {
                 // Only what was changed here changes.
                 let changed = |id: Id| self.field(id).is_some_and(|f| f.edited);
+                let name = required(Id::Name, "The agent name")?;
                 Op::EditSession {
                     id: id.clone(),
-                    name: required(Id::Name, "The agent name")?,
-                    title: self.setting(Id::Title),
+                    name: changed(Id::Name).then_some(name),
+                    title: changed(Id::Title).then(|| self.setting(Id::Title)),
                     model: changed(Id::Model).then(model),
                     effort: changed(Id::Effort).then(effort),
                 }
@@ -1231,7 +1232,7 @@ mod tests {
             submit(&mut form),
             Op::EditSession {
                 id: "s1".into(),
-                name: "ap2".into(),
+                name: Some("ap2".into()),
                 title: None,
                 model: None,
                 effort: None

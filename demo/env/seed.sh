@@ -3,6 +3,14 @@
 set -euo pipefail
 env_dir=$(cd "$(dirname "$0")" && pwd)
 
+# What follows deletes $HOME and kills a tmux server: only the demo's own, as
+# setup.sh makes them, never ones inherited from wherever it was run.
+if [ "$HOME" != /tmp/roster-demo ] || [ "${ROSTER_TMUX_SOCKET:-}" != roster-demo ] ||
+  [ "${XDG_CONFIG_HOME:-}" != /tmp/roster-demo/.config ] ||
+  [ "${XDG_STATE_HOME:-}" != /tmp/roster-demo/.local/state ]; then
+  echo "seed.sh: run it through setup.sh (it resets HOME=/tmp/roster-demo); $HOME stays" >&2
+  exit 1
+fi
 tmux -L "$ROSTER_TMUX_SOCKET" kill-server 2>/dev/null || true
 rm -rf "$HOME"
 mkdir -p "$XDG_CONFIG_HOME/agent-roster"

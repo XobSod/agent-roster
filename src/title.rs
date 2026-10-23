@@ -16,8 +16,9 @@ impl Roster {
     pub fn generate_title(&mut self, id: &str) -> Result<String> {
         let title = self.make_title(id)?;
         let mut s = self.db.session(id)?;
+        let before = s.clone();
         s.title_override = Some(title.clone());
-        self.db.save_session(&s)?;
+        self.db.save_changes(&before, &s)?;
         Ok(title)
     }
 

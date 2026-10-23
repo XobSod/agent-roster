@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
+use std::os::unix::fs::OpenOptionsExt;
+
 use anyhow::{Context, Result, bail};
 
 /// Variables never passed into roster's tmux: the ones that make tmux think it's
@@ -26,6 +28,14 @@ pub(crate) const LEAKY_ENV: &[&str] = &[
     "CLAUDE_CODE_EXECPATH",
     "CLAUDE_PID",
 ];
+
+/// A line `type_line` couldn't type in: whether its text got into the pane
+/// first (then only its Enter is missing), and why.
+#[derive(Debug)]
+pub struct Untyped {
+    pub pasted: bool,
+    pub error: anyhow::Error,
+}
 
 /// State of the pane that runs an agent.
 #[derive(Clone, Debug)]
@@ -128,11 +138,15 @@ impl Tmux {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = self.command();
         // tmux takes an argument ending in `;` for the end of a command and
         // drops the `;`; `\;` keeps it. So text (a title, a first prompt) keeps
         // its last `;`, and a lone `;` still separates commands.
-        cmd.args(args.into_iter().map(|a| literal_end(a.as_ref())));
+        self.run_args(args.into_iter().map(|a| literal_end(a.as_ref(), false)))
+    }
+
+    fn run_args(&self, args: impl Iterator<Item = std::ffi::OsString>) -> Result<String> {
+        let mut cmd = self.command();
+        cmd.args(args);
         let out = cmd.output().context("can't run tmux (is it installed?)")?;
         if !out.status.success() {
             bail!("tmux: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -353,10 +367,38 @@ impl Tmux {
     /// part of a paste (a newline, not a submit); the paste markers and a pause
     /// make the Enter a key press. Programs that don't use bracketed paste get the
     /// plain text.
-    pub fn type_line(&self, name: &str, text: &str) -> Result<()> {
+    /// Failing, it says whether the text got into the pane (`Untyped::pasted`).
+    pub fn type_line(&self, name: &str, text: &str) -> Result<(), Untyped> {
         let target = pane_target(name);
         let buffer = format!("roster-{name}");
-        self.run(["set-buffer", "-b", buffer.as_str(), "--", text])?;
+        let unpasted = |error| Untyped {
+            pasted: false,
+            error,
+        };
+        // Through a file of roster's own: tmux takes a command line of about
+        // 16 KB at most (`command too long`), which a prompt can outgrow, and
+        // a file needs no escaping (an argument ending in `;` would).
+        let file = self
+            .conf
+            .with_file_name(format!("prompt-{name}.{}", std::process::id()));
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&file)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+            .with_context(|| format!("can't write {}", file.display()));
+        let loaded = written.and_then(|()| {
+            self.run([
+                OsStr::new("load-buffer"),
+                OsStr::new("-b"),
+                OsStr::new(&buffer),
+                file.as_os_str(),
+            ])
+        });
+        let _ = std::fs::remove_file(&file);
+        loaded.map_err(unpasted)?;
         self.run([
             "paste-buffer",
             "-p",
@@ -365,10 +407,34 @@ impl Tmux {
             buffer.as_str(),
             "-t",
             target.as_str(),
-        ])?;
+        ])
+        .map_err(unpasted)?;
         std::thread::sleep(std::time::Duration::from_millis(300));
         self.run(["send-keys", "-t", target.as_str(), "Enter"])
             .map(drop)
+            .map_err(|error| Untyped {
+                pasted: true,
+                error,
+            })
+    }
+
+    /// Shows `text` to whoever is attached to session `name`, for a while,
+    /// where tmux shows its own messages. Shown if it can be, else not.
+    pub fn say(&self, name: &str, text: &str) {
+        let target = pane_target(name);
+        let text = message_text(text);
+        let _ = self.run_args(
+            [
+                "display-message",
+                "-d",
+                "10000",
+                "-t",
+                target.as_str(),
+                text.as_str(),
+            ]
+            .iter()
+            .map(|a| literal_end(OsStr::new(a), true)),
+        );
     }
 
     /// Sizes the session's window while no one is attached. Unsetting
@@ -453,11 +519,20 @@ impl Tmux {
     }
 }
 
-/// `arg` as tmux should read it (see `Tmux::run`).
-fn literal_end(arg: &OsStr) -> std::ffi::OsString {
+/// `text` as `display-message` shows it as it is: not a format (`#{…}`),
+/// nor a time (`%H`).
+fn message_text(text: &str) -> String {
+    text.replace('#', "##").replace('%', "%%")
+}
+
+/// `arg` as tmux should read it (see `Tmux::run`); `text`, even a lone `;` is
+/// kept as one, not taken for the end of a command.
+fn literal_end(arg: &OsStr, text: bool) -> std::ffi::OsString {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     match arg.as_bytes().strip_suffix(b";") {
-        Some(rest) if !rest.is_empty() => std::ffi::OsString::from_vec([rest, b"\\;"].concat()),
+        Some(rest) if text || !rest.is_empty() => {
+            std::ffi::OsString::from_vec([rest, b"\\;"].concat())
+        }
         _ => arg.to_os_string(),
     }
 }
@@ -559,13 +634,21 @@ mod tests {
     }
 
     #[test]
+    fn a_message_is_shown_as_it_is() {
+        assert_eq!(message_text("50% of #{pane}"), "50%% of ##{pane}");
+    }
+
+    #[test]
     fn a_last_semicolon_stays_text() {
-        let end = |a: &str| literal_end(OsStr::new(a)).into_string().unwrap();
+        let end = |a: &str| literal_end(OsStr::new(a), false).into_string().unwrap();
         assert_eq!(end("Fix the parser;"), "Fix the parser\\;");
         // A lone `;` still separates commands.
         assert_eq!(
             (end(";"), end("a;b"), end("")),
             (";".into(), "a;b".into(), "".into())
         );
+        // Unless it's text: a message shown.
+        let text = |a: &str| literal_end(OsStr::new(a), true).into_string().unwrap();
+        assert_eq!((text(";"), text("a;")), ("\\;".into(), "a\\;".into()));
     }
 }

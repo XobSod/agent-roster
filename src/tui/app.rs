@@ -429,11 +429,13 @@ impl App {
         let editor = self.note.as_mut()?;
         match editor.on_key(e) {
             note::Outcome::None => None,
-            note::Outcome::Save { close } => Some(Op::SaveNote {
+            note::Outcome::Save { close, force } => Some(Op::SaveNote {
                 id: editor.session.clone(),
                 text: editor.text(),
                 pin: editor.pin,
                 close,
+                base: editor.base.clone(),
+                force,
             }),
             note::Outcome::Close => {
                 self.note = None;
@@ -442,6 +444,10 @@ impl App {
             note::Outcome::External => Some(Op::EditNote(editor.session.clone())),
             note::Outcome::Fail(why) => {
                 self.fail(why);
+                None
+            }
+            note::Outcome::Notice(what) => {
+                self.flash(what);
                 None
             }
         }

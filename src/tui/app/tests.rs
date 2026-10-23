@@ -852,6 +852,9 @@ fn s_o_opens_the_note_and_its_keys_go_to_it() {
             text: "sq".into(),
             pin: None,
             close: true,
+            // Over the note it was opened on (none), and only that.
+            base: None,
+            force: false,
         })
     );
     // :q! closes, and the list has its keys back.

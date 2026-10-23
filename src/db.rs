@@ -344,8 +344,105 @@ impl Db {
         load_session(&self.conn, id)?.with_context(|| format!("no session with id {id}"))
     }
 
+    /// The whole row (`save_changes` is what roster saves with).
+    #[cfg(test)]
     pub fn save_session(&self, s: &Session) -> Result<()> {
         save_session(&self.conn, s)
+    }
+
+    /// Saves what `after` changed of `before`, the session as it was loaded,
+    /// and only that: whatever another roster saved of it meanwhile (an edit,
+    /// a refresh, an archive) stays, unless it changed the same thing.
+    // A field taken out of `after` below but not compared is an error.
+    #[deny(unused_variables)]
+    pub fn save_changes(&self, before: &Session, after: &Session) -> Result<()> {
+        // Every field, so a new one isn't left out: what isn't saved here is
+        // fixed, joined in, or saved apart (the note).
+        let Session {
+            id,
+            project_id: _,
+            project: _,
+            agent: _,
+            workdir: _,
+            created_at: _,
+            note: _,
+            state,
+            name,
+            conversation_id,
+            transcript_path,
+            unread,
+            exit_status,
+            last_event_at,
+            screen_hash,
+            screen_changed_at,
+            deleted_at,
+            baseline_at,
+            title,
+            model,
+            effort,
+            state_since,
+            pending_prompt,
+            running_model,
+            running_effort,
+            title_override,
+            turns,
+            worked_ms,
+            fork_from,
+        } = after;
+        let state_name = state.as_str();
+        let mut set: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        if before.state != *state {
+            set.push(("state", &state_name));
+        }
+        macro_rules! changed {
+            ($($field:ident),*) => {$(
+                if before.$field != *$field {
+                    set.push((stringify!($field), $field));
+                }
+            )*};
+        }
+        changed!(
+            name,
+            conversation_id,
+            transcript_path,
+            unread,
+            exit_status,
+            last_event_at,
+            screen_hash,
+            screen_changed_at,
+            deleted_at,
+            baseline_at,
+            title,
+            model,
+            effort,
+            state_since,
+            pending_prompt,
+            running_model,
+            running_effort,
+            title_override,
+            turns,
+            worked_ms,
+            fork_from
+        );
+        if set.is_empty() {
+            return Ok(());
+        }
+        let columns: Vec<String> = (2..)
+            .zip(&set)
+            .map(|(i, (column, _))| format!("{column} = ?{i}"))
+            .collect();
+        let sql = format!("UPDATE sessions SET {} WHERE id = ?1", columns.join(", "));
+        let mut values: Vec<&dyn rusqlite::ToSql> = vec![id];
+        values.extend(set.iter().map(|(_, value)| *value));
+        self.conn.execute(&sql, values.as_slice()).map_err(|e| {
+            constraint(e, || {
+                format!(
+                    "project {:?} already has a session named {:?}",
+                    after.project, after.name
+                )
+            })
+        })?;
+        Ok(())
     }
 
     /// Saves a session's note (None removes it), and only that.
@@ -363,6 +460,33 @@ impl Db {
             bail!("no session with id {id}");
         }
         Ok(())
+    }
+
+    /// `set_note`, but only if the note is still `expected`: whether it was
+    /// (an error if there's no such session).
+    pub fn set_note_if(
+        &self,
+        id: &str,
+        expected: Option<&Note>,
+        note: Option<&Note>,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET note = ?2, note_pin = ?3, note_at = ?4
+             WHERE id = ?1 AND note IS ?5 AND note_pin IS ?6 AND note_at IS ?7",
+            params![
+                id,
+                note.map(|n| &n.text),
+                note.and_then(|n| n.pin).map(|p| p as i64),
+                note.map(|n| n.at),
+                expected.map(|n| &n.text),
+                expected.and_then(|n| n.pin).map(|p| p as i64),
+                expected.map(|n| n.at)
+            ],
+        )?;
+        if n == 0 {
+            self.session(id)?;
+        }
+        Ok(n == 1)
     }
 
     /// Takes a session's pending first prompt, so that only one process types it.
@@ -386,6 +510,16 @@ impl Db {
         }
         tx.commit()?;
         Ok(prompt)
+    }
+
+    /// Puts back a first prompt taken but not typed in, unless another one
+    /// was given meanwhile.
+    pub fn restore_pending_prompt(&self, id: &str, prompt: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET pending_prompt = ?2 WHERE id = ?1 AND pending_prompt IS NULL",
+            params![id, prompt],
+        )?;
+        Ok(())
     }
 
     // Events
@@ -889,6 +1023,82 @@ mod tests {
     }
 
     #[test]
+    fn a_save_of_what_changed_leaves_what_another_roster_saved() {
+        let (db, s) = db_with_session();
+        // A refresh loaded it; an edit saves a name and a title meanwhile.
+        let loaded = db.session(&s.id).unwrap();
+        let mut edited = db.session(&s.id).unwrap();
+        edited.name = "renamed".into();
+        edited.title_override = Some("New title".into());
+        db.save_changes(&loaded, &edited).unwrap();
+        // The refresh saves what it changed: the screen, the state.
+        let mut refreshed = loaded.clone();
+        refreshed.screen_hash = Some("h2".into());
+        refreshed.set_state(State::Idle, 50);
+        db.save_changes(&loaded, &refreshed).unwrap();
+        let saved = db.session(&s.id).unwrap();
+        assert_eq!(saved.name, "renamed");
+        assert_eq!(saved.title_override.as_deref(), Some("New title"));
+        assert_eq!(saved.screen_hash.as_deref(), Some("h2"));
+        assert_eq!(saved.state, State::Idle);
+        // Nothing changed, nothing written.
+        db.save_changes(&saved, &saved).unwrap();
+    }
+
+    #[test]
+    fn a_save_of_what_changed_writes_every_column_save_session_does() {
+        let (db, s) = db_with_session();
+        let before = db.session(&s.id).unwrap();
+        let mut after = before.clone();
+        after.name = "n".into();
+        after.conversation_id = Some("c".into());
+        after.transcript_path = Some("/t".into());
+        after.state = State::NeedsInput;
+        after.unread = true;
+        after.exit_status = Some(3);
+        after.last_event_at = Some(1);
+        after.screen_hash = Some("h".into());
+        after.screen_changed_at = Some(2);
+        after.deleted_at = Some(3);
+        after.baseline_at = Some(4);
+        after.title = Some("t".into());
+        after.model = Some("m".into());
+        after.effort = Some("e".into());
+        after.state_since = Some(5);
+        after.pending_prompt = Some("p".into());
+        after.running_model = Some("rm".into());
+        after.running_effort = Some("re".into());
+        after.title_override = Some("to".into());
+        after.turns = 6;
+        after.worked_ms = 7;
+        after.fork_from = Some("f".into());
+        db.save_changes(&before, &after).unwrap();
+        assert_eq!(db.session(&s.id).unwrap(), after);
+    }
+
+    #[test]
+    fn a_first_prompt_not_typed_in_is_put_back() {
+        let (mut db, mut s) = db_with_session();
+        s.pending_prompt = Some("fix it".into());
+        db.save_session(&s).unwrap();
+        let taken = db.take_pending_prompt(&s.id).unwrap().unwrap();
+        db.restore_pending_prompt(&s.id, &taken).unwrap();
+        assert_eq!(
+            db.session(&s.id).unwrap().pending_prompt.as_deref(),
+            Some("fix it")
+        );
+        // Not over one given meanwhile.
+        db.take_pending_prompt(&s.id).unwrap();
+        s.pending_prompt = Some("newer".into());
+        db.save_session(&s).unwrap();
+        db.restore_pending_prompt(&s.id, "fix it").unwrap();
+        assert_eq!(
+            db.session(&s.id).unwrap().pending_prompt.as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
     fn a_note_is_saved_apart_from_the_rest() {
         let (db, s) = db_with_session();
         let note = Note {
@@ -900,7 +1110,17 @@ mod tests {
         assert_eq!(db.session(&s.id).unwrap().note, Some(note.clone()));
         // A save of a copy read before (refresh's) leaves it.
         db.save_session(&s).unwrap();
-        assert_eq!(db.session(&s.id).unwrap().note, Some(note));
+        assert_eq!(db.session(&s.id).unwrap().note, Some(note.clone()));
+        // Only over what's expected there.
+        let newer = Note {
+            text: "newer".into(),
+            pin: None,
+            at: 8,
+        };
+        assert!(!db.set_note_if(&s.id, None, Some(&newer)).unwrap());
+        assert!(db.set_note_if(&s.id, Some(&note), Some(&newer)).unwrap());
+        assert_eq!(db.session(&s.id).unwrap().note, Some(newer));
+        assert!(db.set_note_if("nobody", None, None).is_err());
         db.set_note(&s.id, None).unwrap();
         assert_eq!(db.session(&s.id).unwrap().note, None);
         assert!(db.set_note("nobody", None).is_err());

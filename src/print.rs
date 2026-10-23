@@ -268,7 +268,7 @@ pub fn list_sessions(
                 ),
             };
             let marker = if s.unread { "●" } else { " " };
-            let title = s.title.as_deref().unwrap_or("-");
+            let title = s.title().unwrap_or("-");
             let title = match s.note {
                 Some(_) => format!("✎ {title}"),
                 None => title.to_string(),

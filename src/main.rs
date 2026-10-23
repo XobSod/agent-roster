@@ -236,6 +236,11 @@ enum Cmd {
     /// Called by agent hooks; always silent, always exits 0
     #[command(hide = true)]
     Report { kind: String },
+    /// Types a session's first prompt once its agent is ready: what `new
+    /// --attach` leaves running while you're attached, when nothing else
+    /// refreshes
+    #[command(hide = true)]
+    Deliver { session: String },
 }
 
 #[derive(Subcommand)]
@@ -369,6 +374,15 @@ fn run(cli: Cli) -> Result<()> {
         }
         return tui::run(&mut r);
     };
+    let done = run_command(&mut r, command);
+    // What a refresh in it couldn't type in, whichever session's.
+    for u in r.take_undelivered() {
+        eprintln!("roster: {}", u.message);
+    }
+    done
+}
+
+fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
     match command {
         Cmd::Project(ProjectCmd::Add {
             name,
@@ -400,7 +414,7 @@ fn run(cli: Cli) -> Result<()> {
             let p = r.update_project(p.id, &name, &path.unwrap_or(p.origin.clone()), updated)?;
             println!("Updated project {} ({})", p.name, p.origin.display());
         }
-        Cmd::Project(ProjectCmd::Ls) => list_projects(&r)?,
+        Cmd::Project(ProjectCmd::Ls) => list_projects(r)?,
         Cmd::Project(ProjectCmd::Rm { name }) => {
             let purged = r.remove_project(&name)?;
             println!("Removed project {name}");
@@ -422,12 +436,12 @@ fn run(cli: Cli) -> Result<()> {
                 format!("no project {project:?} (add it with `roster project add`)")
             })?;
             let (request, attach) = session.request(p, r.config.default_agent());
-            start_session(&mut r, request, attach)?;
+            start_session(r, request, attach)?;
         }
         Cmd::Chat { session } => {
             let chats = r.chat_project()?;
             let (request, attach) = session.request(chats, r.config.default_agent());
-            start_session(&mut r, request, attach)?;
+            start_session(r, request, attach)?;
         }
         Cmd::Ls {
             words,
@@ -439,7 +453,7 @@ fn run(cli: Cli) -> Result<()> {
             r.settle()?;
             let query = words.join(" ");
             let by_attention = sort == "attention";
-            list_sessions(&r, &query, archived, project.as_deref(), by_attention, json)?;
+            list_sessions(r, &query, archived, project.as_deref(), by_attention, json)?;
         }
         Cmd::Show { session } => {
             r.refresh()?;
@@ -449,7 +463,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Attach { session, yes } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
-            if s.state == State::Stopped && !confirm_new_conversation(&r, &s, yes)? {
+            if s.state == State::Stopped && !confirm_new_conversation(r, &s, yes)? {
                 return Ok(());
             }
             r.attach(&s.id)?;
@@ -458,7 +472,7 @@ fn run(cli: Cli) -> Result<()> {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             // A running one fails to start anyway; don't ask about it first.
-            if s.state == State::Stopped && !confirm_new_conversation(&r, &s, yes)? {
+            if s.state == State::Stopped && !confirm_new_conversation(r, &s, yes)? {
                 return Ok(());
             }
             r.start(&s.id)?;
@@ -476,7 +490,7 @@ fn run(cli: Cli) -> Result<()> {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             let asked = if !r.can_resume(&s) {
-                confirm_new_conversation(&r, &s, yes)?
+                confirm_new_conversation(r, &s, yes)?
             } else if s.state == State::Working {
                 confirm(&format!("{} is working. Restart it?", s.label()), yes)?
             } else {
@@ -556,10 +570,11 @@ fn run(cli: Cli) -> Result<()> {
             effort,
         } => {
             let s = r.resolve(&session, false)?;
+            // Only what's given changes: "" for the title follows the agent's.
             let s = r.update_session(
                 &s.id,
-                name.as_deref().unwrap_or(&s.name),
-                title.or(s.title_override.clone()),
+                name.as_deref(),
+                title.map(Some),
                 setting(model),
                 setting(effort),
             )?;
@@ -579,7 +594,7 @@ fn run(cli: Cli) -> Result<()> {
         | Cmd::Adopt {
             list: true, all, ..
         } => {
-            list_adoptable(&r, all)?;
+            list_adoptable(r, all)?;
         }
         Cmd::Adopt {
             conversation: Some(conversation),
@@ -616,7 +631,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Info { session } => {
             r.refresh()?;
             let s = r.resolve_any(&session)?;
-            print_info(&r, &s);
+            print_info(r, &s);
         }
         Cmd::Note {
             session,
@@ -693,7 +708,7 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{setting} is back to its default");
             }
             None if defaults => print!("{}", settings::template(&r.settings())),
-            None => print::settings(&r),
+            None => print::settings(r),
         },
         Cmd::Doctor { fix, yes } => {
             let mut diagnosis = r.diagnose()?;
@@ -714,22 +729,36 @@ fn run(cli: Cli) -> Result<()> {
                 return Err(anyhow::anyhow!("{} problem(s)", diagnosis.problems));
             }
         }
-        Cmd::Events { follow, session } => events(&r, follow, session.as_deref())?,
+        Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } => {}
+        Cmd::Deliver { session } => {
+            let s = r.resolve(&session, false)?;
+            // Its output goes nowhere: you're attached, so it says so there.
+            if let Err(e) = r.wait_for_prompt(&s.id, DELIVER_TIMEOUT) {
+                r.tmux.say(&s.tmux_name(), &format!("roster: {e:#}"));
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
 
-/// Starts a new session, waits for its first prompt to go in (unless attaching,
-/// which shows it), and attaches if asked.
+/// Starts a new session, waits for its first prompt to go in, and attaches if
+/// asked: then the prompt goes in from a roster left in the background, as
+/// nothing refreshes while you're attached.
 fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()> {
-    let waits = request.prompt.is_some() && !attach;
+    let prompted = request.prompt.is_some();
+    let waits = prompted && !attach;
     let s = r.new_session(request)?;
     println!("Started {} ({})", s.label(), s.id);
     if waits {
         if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
             println!("Sent the first prompt");
+        } else if r.db.session(&s.id)?.state == State::Stopped {
+            println!(
+                "The agent stopped before it was ready; the prompt is typed in once it's started and ready"
+            );
         } else {
             println!(
                 "The agent isn't ready yet (it may be waiting for you, e.g. to trust the folder);"
@@ -738,10 +767,15 @@ fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()
         }
     }
     if attach {
+        // Typed in meanwhile by a roster of its own (`Roster::attach_terminal`).
         r.attach(&s.id)?;
     }
     Ok(())
 }
+
+/// How long `roster deliver` waits for an agent to be ready for its first
+/// prompt: time to answer what it asks first, a folder to trust say.
+const DELIVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Asks before (re)starting an agent that can't resume its conversation.
 fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> {

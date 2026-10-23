@@ -32,12 +32,13 @@ pub enum Op {
         effort: Option<String>,
         prompt: Option<String>,
     },
+    /// Only what was changed in the form: None stays as it is.
     EditSession {
         id: String,
-        name: String,
-        /// None follows the agent's title.
-        title: Option<String>,
-        /// None: as it was; Some(None): the default.
+        name: Option<String>,
+        /// Some(None) follows the agent's title.
+        title: Option<Option<String>>,
+        /// Some(None): the default.
         model: Option<Option<String>>,
         effort: Option<Option<String>>,
     },
@@ -49,6 +50,10 @@ pub enum Op {
         text: String,
         pin: Option<usize>,
         close: bool,
+        /// The note the editor was opened on, which this replaces (unless
+        /// `force`d, not another saved meanwhile).
+        base: Option<crate::note::Note>,
+        force: bool,
     },
     /// A session's note in `$EDITOR`: the open editor's text, or the saved note.
     EditNote(String),

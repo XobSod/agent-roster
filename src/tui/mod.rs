@@ -208,8 +208,16 @@ fn reload(roster: &mut Roster, app: &mut App) {
     } else {
         roster.refresh()
     };
-    if let Err(e) = refreshed {
-        app.fail(format!("{e:#}"));
+    // Every prompt not typed in, unless the refresh itself failed (that first).
+    let undelivered: Vec<String> = roster
+        .take_undelivered()
+        .into_iter()
+        .map(|u| u.message)
+        .collect();
+    match refreshed {
+        Err(e) => app.fail(format!("{e:#}")),
+        Ok(()) if !undelivered.is_empty() => app.fail(undelivered.join("; ")),
+        Ok(()) => {}
     }
     match (roster.projects(), roster.sessions(true)) {
         (Ok(projects), Ok(sessions)) => app.set_data(projects, sessions),
@@ -449,7 +457,7 @@ fn perform(
             model,
             effort,
         } => roster
-            .update_session(&id, &name, title, model, effort)
+            .update_session(&id, name.as_deref(), title, model, effort)
             .map(|s| {
                 if s.state == crate::model::State::Stopped {
                     format!("Saved {}", s.label())
@@ -516,18 +524,22 @@ fn perform(
             text,
             pin,
             close,
-        } => roster.set_note(&id, &text, pin).map(|note| {
-            if close {
-                app.note = None;
-            } else if let Some(editor) = app.note.as_mut() {
-                editor.saved(note.as_ref());
-            }
-            let label = app.session_label(&id);
-            match note {
-                Some(_) => format!("Saved the note of {label}"),
-                None => format!("{label} has no note now"),
-            }
-        }),
+            base,
+            force,
+        } => roster
+            .save_note(&id, &text, pin, base.as_ref(), force)
+            .map(|note| {
+                if close {
+                    app.note = None;
+                } else if let Some(editor) = app.note.as_mut() {
+                    editor.saved(note.as_ref());
+                }
+                let label = app.session_label(&id);
+                match note {
+                    Some(_) => format!("Saved the note of {label}"),
+                    None => format!("{label} has no note now"),
+                }
+            }),
         Op::EditNote(id) => edit_note(terminal, roster, app, &id)?,
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);

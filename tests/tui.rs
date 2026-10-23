@@ -353,6 +353,22 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
 
+    // Saved by another meanwhile (an agent, through `roster note`): :w says
+    // so and saves nothing; :w! saves yours over it.
+    term.keys(&["s", "o"]);
+    term.wait_for("the editor again", "╭ Note ");
+    t.ok(&["note", "one", "--append", "from an agent"]);
+    term.keys(&["m", "m", ":", "w", "Enter"]);
+    term.wait_for("the refusal", "changed since you opened it");
+    assert!(t.ok(&["note", "one"]).contains("from an agent"));
+    term.keys(&[":", "w", "!", "Enter"]);
+    term.wait_for("the forced save", "Saved the note of demo/one");
+    assert!(!t.ok(&["note", "one"]).contains("from an agent"));
+    // Saved now, it's what the next save replaces: no refusal.
+    term.keys(&["m", "m", ":", "w", "q", "Enter"]);
+    term.wait_for_gone("the editor closed", "╭ Note ");
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+
     // Ctrl+G: to $EDITOR and back into the editor, unsaved until :w.
     term.keys(&["s", "o", "C-g"]);
     term.wait_for("the text back from $EDITOR", "second, done");
@@ -393,4 +409,66 @@ fn a_stopped_agents_error_shows_in_its_preview() {
     term.wait_for("how its screen ended", "Its last screen");
     term.wait_for("the error", "roster: preparing the environment failed");
     assert!(!term.screen().contains("Pane is dead"), "{}", term.screen());
+}
+
+#[test]
+fn a_first_prompt_is_typed_in_while_attached() {
+    let Some(t) = TestEnv::new("attachprompt") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    let command = format!(
+        "{} new demo --name a --attach --prompt 'first task'; sleep 600",
+        t.shell_command()
+    );
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("attached to the agent", "fake agent:");
+    // (Its id now, while asking refreshes nothing it's ready for.)
+    let id = t.session("a", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Ready once it reports its session, as Claude's hooks do; from then on
+    // nothing but what `new` left running may refresh, or this proves nothing.
+    let payload = format!(
+        r#"{{"session_id":"x","transcript_path":"{}"}}"#,
+        t.path("x.jsonl").display()
+    );
+    t.report(&id, "session", &payload);
+    term.wait_for("the prompt, typed in while attached", "first task");
+    assert!(term.screen().contains("C-q back"), "{}", term.screen());
+}
+
+#[test]
+fn a_pending_first_prompt_is_typed_in_whichever_way_you_attach() {
+    let Some(t) = TestEnv::new("attachpending") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // A session whose first prompt is still waiting for its agent: `new`
+    // gave up waiting (stopped here before the agent was ready).
+    let mut waiting = t
+        .command(&["new", "demo", "--name", "a", "--prompt", "pending task"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    t.wait_for("the session", |t| t.session("a", false).is_some());
+    waiting.kill().unwrap();
+    waiting.wait().unwrap();
+    let id = t.session("a", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(t.session("a", false).unwrap()["pending_prompt"], true);
+    // Attached with `roster attach`, then the agent is ready: typed in while
+    // attached (nothing else here refreshes).
+    let command = format!("{} attach a; sleep 600", t.shell_command());
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("attached to the agent", "C-q back");
+    let payload = format!(
+        r#"{{"session_id":"x","transcript_path":"{}"}}"#,
+        t.path("x.jsonl").display()
+    );
+    t.report(&id, "session", &payload);
+    term.wait_for("the prompt, typed in while attached", "pending task");
 }

@@ -91,7 +91,9 @@ Each session can have a note, what's left to do in it, say. `s o` opens it under
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
 insert and visual mode, motions, `C`, `r` (`rx` ticks a box, `.` the next), `ciw` and
 the like, `/` search, `u`, `.` (no counts). `:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
-unsaved changes, which `:q!` and `ZQ` leave. `Esc` doesn't close it, so pressing it once
+unsaved changes, which `:q!` and `ZQ` leave. A note saved meanwhile by something else
+(`roster note`, an agent using it) isn't saved over: `:w!` (`:wq!`, `:x!`) does that;
+in `$EDITOR`, what you wrote is kept in its file instead, and roster says where. `Esc` doesn't close it, so pressing it once
 too often is harmless; `escape = "jk"` under `[notes]` makes `jk` typed quickly leave
 insert mode too. `mm` pins the cursor's line (`▸`; again there unpins it): above the
 agent's screen the preview shows the pinned line and the one below, so a to-do list

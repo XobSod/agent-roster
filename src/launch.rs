@@ -63,43 +63,97 @@ pub fn wrap(
 }
 
 /// Runs `cmd` (`what`, in messages) to its end, for at most `timeout`. Its
-/// output is read meanwhile, so a full pipe can't hold it up.
+/// output is read meanwhile, so a full pipe can't hold it up, and what it
+/// starts ends with it: on a timeout, or as it exits if something it left
+/// running keeps its output open.
 pub fn run_with_timeout(
     mut cmd: std::process::Command,
     what: &str,
     timeout: Duration,
 ) -> Result<std::process::Output> {
     use std::io::Read;
-    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut out);
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
+    // In a session of its own, so a process group of its own: what it starts
+    // goes with it, on a timeout or when, its work done, something it left
+    // running would hold its output open. Without a terminal, too: something
+    // asking on one (an env file's `read </dev/tty`) fails at once, where in
+    // a group of the terminal's but not its foreground it would stop until
+    // the timeout. Ctrl+C on roster doesn't reach it, though.
+    // So, where it can, it ends with roster, as it would have in its group.
+    // SAFETY: setsid and prctl are async-signal-safe, as `pre_exec` needs.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
             }
-            out
-        })
+            #[cfg(target_os = "linux")]
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
     }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
+    let group = child.id() as libc::pid_t;
+    // SAFETY: kill only sends a signal, to the group the child leads.
+    let end_group = || unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    };
+    type Drained = (Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>);
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> Drained {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let into = Arc::clone(&out);
+        let reader = std::thread::spawn(move || {
+            let Some(mut pipe) = pipe else { return };
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => into.lock().unwrap().extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        (out, reader)
+    }
+    let (stdout, stdout_reader) = drain(child.stdout.take());
+    let (stderr, stderr_reader) = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() > deadline {
-            let _ = child.kill();
+            end_group();
             let _ = child.wait();
             bail!("{what} took longer than {}s", timeout.as_secs());
         }
         sleep(Duration::from_millis(100));
     };
+    // What it wrote before exiting is read at once; output held open longer
+    // is something it left running, which goes.
+    let read = || stdout_reader.is_finished() && stderr_reader.is_finished();
+    let lingering = (Instant::now() + LINGER).min(deadline);
+    while !read() && Instant::now() < lingering {
+        sleep(Duration::from_millis(10));
+    }
+    if !read() {
+        end_group();
+        let let_go = Instant::now() + LINGER;
+        while !read() && Instant::now() < let_go {
+            sleep(Duration::from_millis(10));
+        }
+    }
+    let taken = |out: &Arc<Mutex<Vec<u8>>>| std::mem::take(&mut *out.lock().unwrap());
     Ok(std::process::Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout: taken(&stdout),
+        stderr: taken(&stderr),
     })
 }
+
+/// How long a command's output may stay open after it exits.
+const LINGER: Duration = Duration::from_millis(500);
 
 #[cfg(test)]
 mod tests {
@@ -148,5 +202,73 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
                 .contains("roster: preparing the environment failed")
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    #[test]
+    fn what_a_command_leaves_running_doesnt_hold_its_output_past_the_timeout() {
+        // It exits at once, its output whole, but a process it started keeps
+        // its stdout open: that one goes, rather than being waited for.
+        let started = Instant::now();
+        let out = run_with_timeout(
+            sh("echo hi; sleep 5 & exit 0"),
+            "it",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    }
+
+    #[test]
+    fn a_timeout_ends_what_the_command_started_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("sleep 5 & echo $! > '{}'; sleep 5", pid_file.display());
+        let started = Instant::now();
+        let err = run_with_timeout(sh(&script), "it", Duration::from_secs(1)).unwrap_err();
+        assert!(err.to_string().contains("took longer"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Gone, or a zombie no one has reaped yet (where nothing reaps them).
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                stat.rsplit(") ")
+                    .next()
+                    .is_some_and(|s| !s.starts_with('Z'))
+            })
+        };
+        let gone_by = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < gone_by {
+            sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "what it started is still running");
     }
 }

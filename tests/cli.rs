@@ -95,9 +95,15 @@ fn session_lifecycle() {
         (s["state"].as_str(), s["conversation_id"].as_str()),
         (Some("stopped"), Some("conv-1"))
     );
+    // A project with a live session can't be removed, so that's said before
+    // anything is asked.
+    let out = t.run(&["project", "rm", "demo"]);
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !t.run(&["project", "rm", "demo"]).status.success(),
-        "project with a live session was removed"
+        !out.status.success()
+            && err.contains("archive its sessions first")
+            && !err.contains("--yes"),
+        "{err}"
     );
 
     // Deleting for good: only archived sessions, and it asks first.
@@ -108,7 +114,20 @@ fn session_lifecycle() {
     let out = t.ok(&["rm", "--yes", "one"]);
     assert!(out.contains("for good"), "{out}");
     assert!(t.session("one", false).is_none() && t.session("one", true).is_none());
-    t.ok(&["project", "rm", "demo"]);
+    // Removing a project asks too: its archived sessions would go with it.
+    t.ok(&["new", "demo", "--name", "two"]);
+    t.ok(&["archive", "--yes", "two"]);
+    let out = t.run(&["project", "rm", "demo"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("Its archived session goes for good")
+            && err.contains("--yes"),
+        "{err}"
+    );
+    assert!(t.session("two", true).is_some());
+    let out = t.ok(&["project", "rm", "--yes", "demo"]);
+    assert!(out.contains("with archived session two"), "{out}");
 }
 
 #[test]
@@ -1169,7 +1188,7 @@ fn chats_need_no_project() {
         t.ok(&["archive", "--yes", name]);
         t.ok(&["rm", "--yes", name]);
     }
-    t.ok(&["project", "rm", "talk"]);
+    t.ok(&["project", "rm", "--yes", "talk"]);
     let mine = t.path("my chats");
     let config = t.config_dir().join("config.toml");
     let text = fs::read_to_string(&config).unwrap();

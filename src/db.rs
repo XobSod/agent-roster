@@ -235,8 +235,9 @@ impl Db {
             .optional()?)
     }
 
-    /// Removes a project and its archived sessions. Returns the purged sessions.
-    pub fn remove_project(&mut self, project: &Project) -> Result<Vec<Session>> {
+    /// The archived sessions removing `project` would delete for good; an
+    /// error if it still has live ones.
+    pub fn purged_with(&self, project: &Project) -> Result<Vec<Session>> {
         let sessions: Vec<Session> = self
             .sessions(true)?
             .into_iter()
@@ -249,6 +250,12 @@ impl Db {
                 live.name
             );
         }
+        Ok(sessions)
+    }
+
+    /// Removes a project and its archived sessions. Returns the purged sessions.
+    pub fn remove_project(&mut self, project: &Project) -> Result<Vec<Session>> {
+        let sessions = self.purged_with(project)?;
         let tx = self.conn.transaction()?;
         // Their events go too, as when a session is deleted.
         tx.execute(

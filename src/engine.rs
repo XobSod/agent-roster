@@ -452,6 +452,17 @@ impl Roster {
         Ok(p)
     }
 
+    /// What removing project `name` asks first (`project_removal_question`);
+    /// an error if it can't be removed.
+    pub fn removal_question(&self, name: &str) -> Result<String> {
+        let project = self
+            .db
+            .project(name)?
+            .with_context(|| format!("no project {name:?}"))?;
+        let archived = self.db.purged_with(&project)?;
+        Ok(project_removal_question(&project.name, &archived))
+    }
+
     /// Removes a project that has no live sessions; returns the archived sessions
     /// purged with it.
     pub fn remove_project(&mut self, name: &str) -> Result<Vec<Session>> {
@@ -1170,6 +1181,27 @@ pub(crate) fn new_project_name(directory: &Path, taken: &[&str]) -> String {
         .expect("unbounded")
 }
 
+/// What removing project `name` asks first, in the TUI and the CLI: its
+/// `archived` sessions go with it, for good, and their notes.
+pub(crate) fn project_removal_question<'a>(
+    name: &str,
+    archived: impl IntoIterator<Item = &'a Session>,
+) -> String {
+    let archived: Vec<&Session> = archived.into_iter().collect();
+    let notes = archived.iter().filter(|s| s.note.is_some()).count();
+    let with = match (archived.len(), notes) {
+        (_, 0) => String::new(),
+        (1, _) => ", with its note".into(),
+        (_, 1) => ", one with a note".into(),
+        (_, n) => format!(", {n} with notes"),
+    };
+    match archived.len() {
+        0 => format!("Remove project {name}?"),
+        1 => format!("Remove project {name}? Its archived session goes for good{with}."),
+        n => format!("Remove project {name}? Its {n} archived sessions go for good{with}."),
+    }
+}
+
 fn validate_name(what: &str, name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
@@ -1192,5 +1224,51 @@ mod tests {
         assert!(validate_name("session", "").is_err());
         assert!(validate_name("session", "a/b").is_err());
         assert!(validate_name("session", "has space").is_err());
+    }
+
+    #[test]
+    fn removing_a_project_says_what_goes_with_it() {
+        let p = Project {
+            id: 1,
+            name: "demo".into(),
+            origin: "/tmp/demo".into(),
+            agent: None,
+            model: None,
+            effort: None,
+        };
+        let session = |noted: bool| {
+            let mut s = Session::new("r-1", &p, "one", "claude", 0);
+            s.note = noted.then(|| Note {
+                text: "todo".into(),
+                pin: None,
+                at: 0,
+            });
+            s
+        };
+        let ask = |notes: &[bool]| {
+            let sessions: Vec<Session> = notes.iter().map(|&n| session(n)).collect();
+            project_removal_question("demo", &sessions)
+        };
+        assert_eq!(ask(&[]), "Remove project demo?");
+        assert_eq!(
+            ask(&[false]),
+            "Remove project demo? Its archived session goes for good."
+        );
+        assert_eq!(
+            ask(&[true]),
+            "Remove project demo? Its archived session goes for good, with its note."
+        );
+        assert_eq!(
+            ask(&[false, false]),
+            "Remove project demo? Its 2 archived sessions go for good."
+        );
+        assert_eq!(
+            ask(&[true, false]),
+            "Remove project demo? Its 2 archived sessions go for good, one with a note."
+        );
+        assert_eq!(
+            ask(&[true, true, false]),
+            "Remove project demo? Its 3 archived sessions go for good, 2 with notes."
+        );
     }
 }

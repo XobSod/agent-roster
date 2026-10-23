@@ -266,8 +266,12 @@ enum ProjectCmd {
     },
     /// List projects
     Ls,
-    /// Remove a project (it must have no live sessions)
-    Rm { name: String },
+    /// Remove a project (it must have no live sessions); its archived sessions go for good
+    Rm {
+        name: String,
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 /// What a new session or chat should be.
@@ -415,7 +419,10 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             println!("Updated project {} ({})", p.name, p.origin.display());
         }
         Cmd::Project(ProjectCmd::Ls) => list_projects(r)?,
-        Cmd::Project(ProjectCmd::Rm { name }) => {
+        Cmd::Project(ProjectCmd::Rm { name, yes }) => {
+            if !confirm(&r.removal_question(&name)?, yes)? {
+                return Ok(());
+            }
             let purged = r.remove_project(&name)?;
             println!("Removed project {name}");
             for s in purged {

@@ -377,26 +377,7 @@ impl App {
             ));
             return;
         }
-        // Removing a project deletes its archived sessions for good, and
-        // their notes.
-        let notes = archived.iter().filter(|s| s.note.is_some()).count();
-        let with = match (archived.len(), notes) {
-            (_, 0) => String::new(),
-            (1, _) => ", with its note".into(),
-            (_, 1) => ", one with a note".into(),
-            (_, n) => format!(", {n} with notes"),
-        };
-        let question = match archived.len() {
-            0 => format!("Remove project {}?", p.name),
-            1 => format!(
-                "Remove project {}? Its archived session goes for good{with}.",
-                p.name
-            ),
-            n => format!(
-                "Remove project {}? Its {n} archived sessions go for good{with}.",
-                p.name
-            ),
-        };
+        let question = crate::engine::project_removal_question(&p.name, archived);
         self.confirm(question, Op::RemoveProject(p.name));
     }
 

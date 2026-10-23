@@ -78,7 +78,7 @@ fn tui_walkthrough() {
     term.wait_for("the stop", "Stopped demo/one");
     term.wait_for("the Stopped shelf", "Stopped (1)");
     // Its preview says what it was, as for an archived one, not its last screen.
-    term.wait_for("the stopped session's details", "s s starts it");
+    term.wait_for("the stopped session's details", "Conversation");
     assert!(
         !term.screen().contains("Its last screen"),
         "{}",
@@ -409,6 +409,51 @@ fn a_stopped_agents_error_shows_in_its_preview() {
     term.wait_for("how its screen ended", "Its last screen");
     term.wait_for("the error", "roster: preparing the environment failed");
     assert!(!term.screen().contains("Pane is dead"), "{}", term.screen());
+}
+
+#[test]
+fn a_shelf_shows_its_sessions_last_prompts_and_notes() {
+    let Some(t) = TestEnv::new("shelf") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    for (name, task) in [("one", "first task"), ("two", "second task")] {
+        t.ok(&["new", "demo", "--name", name]);
+        let id = t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let transcript = t.path(&format!("{name}.jsonl"));
+        std::fs::write(
+            &transcript,
+            format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{task}\"}}}}\n"),
+        )
+        .unwrap();
+        let payload = format!(
+            r#"{{"session_id":"{name}","transcript_path":"{}"}}"#,
+            transcript.display()
+        );
+        t.report(&id, "session", &payload);
+        t.report(&id, "idle", "{}");
+    }
+    t.ok(&["note", "two", "--set", "TODO\n- [ ] check the fork"]);
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    // Up to the shelf's heading: its transcripts are read on a thread, and
+    // their prompts show when they come.
+    term.keys(&["k"]);
+    term.wait_for("what the shelf is", "Waiting for you");
+    term.wait_for("one's last prompt", "› first task");
+    term.wait_for("two's", "› second task");
+    term.wait_for("two's note", "✎ TODO");
+    // Made again to the preview's size: short, the sessions show first,
+    // what the shelf is doesn't; tall again, it does.
+    term.resize((120, 8));
+    term.wait_for_gone("what the shelf is, short", "Waiting for you");
+    term.wait_for("one, short", "› first task");
+    term.wait_for("what doesn't fit, counted", "… and 1 more");
+    term.resize((120, 30));
+    term.wait_for("what the shelf is, tall", "Waiting for you");
 }
 
 #[test]

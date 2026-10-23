@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -60,11 +61,33 @@ pub struct Preview {
     pub stats: Option<crate::stats::AgentStats>,
     /// Transcript readers by session, kept so each read only takes what's new.
     pub transcripts: HashMap<String, Box<dyn crate::stats::Transcript>>,
+    /// Those read the first time on a thread (a heading's sessions').
+    pub reading: Reading,
     /// Its size when last drawn; agents drawing full screen get it.
     pub size: Cell<Option<(u16, u16)>>,
     /// Agents fitted to `fitted_size` (see `Roster::fit_screens`).
     pub fitted: HashSet<String>,
     pub fitted_size: Option<(u16, u16)>,
+}
+
+/// Transcripts read for the first time on a thread, as a big one would hold
+/// the TUI up (75 ms for 111 MB): which sessions' are being read, and the
+/// channel each comes back by (None if it couldn't be read).
+pub struct Reading {
+    pub ids: HashSet<String>,
+    pub send: Sender<(String, Option<Box<dyn crate::stats::Transcript>>)>,
+    pub came: Receiver<(String, Option<Box<dyn crate::stats::Transcript>>)>,
+}
+
+impl Default for Reading {
+    fn default() -> Self {
+        let (send, came) = std::sync::mpsc::channel();
+        Reading {
+            ids: HashSet::new(),
+            send,
+            came,
+        }
+    }
 }
 
 /// A title being made for session `id` (`s t`): its agent's answer to come,
@@ -244,14 +267,7 @@ impl App {
                 .filter(|s| self.filter.is_none_or(|p| s.project_id == p)),
         );
         // In the server view the list isn't shown, but kept for coming back.
-        let opts = list::Options {
-            grouped: self.grouped,
-            folded: self.folds(),
-            filter: self.filter,
-            hits: self.hits.as_ref(),
-            order: &self.order,
-        };
-        self.entries = list::entries(&self.projects, &self.sessions, &opts);
+        self.entries = list::entries(&self.projects, &self.sessions, &self.list_options());
         let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
         // A selected session that moved into a folded group: select that group.
         let found = keep.as_ref().and_then(|k| {
@@ -303,6 +319,23 @@ impl App {
     /// next rebuild keeps the cursor's row (see `rebuild`).
     pub fn detached(&mut self, prompted: bool) {
         self.keep_row = self.attached_row.take().filter(|_| prompted);
+    }
+
+    /// The sessions in `group` as the list shows them (`list::members`),
+    /// folded or not.
+    pub fn group_members(&self, group: Group) -> Vec<&Session> {
+        list::members(&self.sessions, group, &self.list_options())
+    }
+
+    /// How the list is arranged and filtered now.
+    fn list_options(&self) -> list::Options<'_> {
+        list::Options {
+            grouped: self.grouped,
+            folded: self.folds(),
+            filter: self.filter,
+            hits: self.hits.as_ref(),
+            order: &self.order,
+        }
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {

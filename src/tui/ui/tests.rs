@@ -488,6 +488,11 @@ fn sessions_without_a_screen_say_what_they_were() {
     let mut s = app.sessions[0].clone();
     s.deleted_at = Some(now - 2 * 86_400_000);
     s.conversation_id = Some("c0ffee123456".into());
+    // Resumed, as Claude has written it.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("c0ffee123456.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    s.transcript_path = Some(transcript.to_string_lossy().into_owned());
     s.workdir = "/r/services".into();
     let prompts = [
         "fix the tests".to_string(),
@@ -496,17 +501,21 @@ fn sessions_without_a_screen_say_what_they_were() {
     let shown = text(app.session_info(&s, &prompts, &[], now));
     for part in [
         "Archived 2d ago.",
-        "Project    RO roster  /r",
-        "Directory  /r/services",
-        "Agent      ✱ claude · opus · high",
-        "Title      Fix scrollback (Claude's)",
+        "Project       RO roster  /r",
+        "Directory     /r/services",
+        "Agent         ✱ claude · opus · high",
+        "Title         Fix scrollback (Claude's)",
+        "Conversation  c0ffee12 (resumed when started)",
         "Last prompts\n  › fix the tests\n  › and the changelog",
-        "Enter restores it; starting it then resumes its conversation (c0ffee12).",
-        "s D deletes it for good; its Claude conversation stays and can be adopted again.",
     ] {
         assert!(shown.contains(part), "{part:?} in\n{shown}");
     }
-    // Stopped, gone from tmux: how to start it; its own directory isn't repeated.
+    // No keys: the footer and the menus have them.
+    assert!(
+        !shown.contains("restores it") && !shown.contains("for good"),
+        "{shown}"
+    );
+    // Stopped, gone from tmux: its own directory isn't repeated.
     s.deleted_at = None;
     s.workdir = "/r".into();
     s.exit_status = Some(1);
@@ -536,8 +545,42 @@ fn sessions_without_a_screen_say_what_they_were() {
         !shown.contains("Directory") && !shown.contains("Last prompts"),
         "{shown}"
     );
+    assert!(!shown.contains("starts it"), "{shown}");
+    // One it can't go on with: none; one its agent never wrote (stopped
+    // before a prompt, or since removed), which it starts anew; or an agent
+    // that doesn't resume.
+    s.conversation_id = None;
+    let shown = text(app.session_info(&s, &[], &[], now));
     assert!(
-        shown.contains("s s starts it; it resumes its conversation"),
+        shown.contains("Conversation  a new one when started"),
+        "{shown}"
+    );
+    s.conversation_id = Some("c0ffee123456".into());
+    std::fs::remove_file(&transcript).unwrap();
+    let shown = text(app.session_info(&s, &[], &[], now));
+    assert!(
+        shown.contains("Conversation  a new one when started"),
+        "{shown}"
+    );
+    // Adopted as a copy and not written yet: the original, forked.
+    s.fork_from = Some("0a1b2c3d4e5f".into());
+    let shown = text(app.session_info(&s, &[], &[], now));
+    assert!(
+        shown.contains("Conversation  a fork of 0a1b2c3d when started"),
+        "{shown}"
+    );
+    // Once the copy is written, it's the copy that's resumed.
+    std::fs::write(&transcript, "").unwrap();
+    let shown = text(app.session_info(&s, &[], &[], now));
+    assert!(
+        shown.contains("Conversation  c0ffee12 (resumed when started)"),
+        "{shown}"
+    );
+    s.fork_from = None;
+    s.agent = "aider".into();
+    let shown = text(app.session_info(&s, &[], &[], now));
+    assert!(
+        shown.contains("Conversation  a new one when started"),
         "{shown}"
     );
 }
@@ -630,4 +673,263 @@ fn the_note_editor_sits_above_the_screen() {
         .unwrap()
         .on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
     assert!(render(&app, 120, 16).contains("╰ : "), "{screen}");
+}
+
+#[test]
+fn a_shelf_shows_its_sessions_at_a_glance() {
+    let mut app = app();
+    let now = now_ms();
+    let mut sessions = app.sessions.clone();
+    sessions[0].note = Some(crate::note::Note {
+        text: "TODO\n- [ ] check the fork path\n- [ ] README".into(),
+        pin: Some(1),
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), sessions);
+    // The Needs input heading, with a prompt read from its session's transcript.
+    app.selected = 0;
+    let prompts = std::collections::HashMap::from([(
+        "a1".to_string(),
+        "fix the scrollback\nand its tests".to_string(),
+    )]);
+    let size = (82, 13);
+    app.preview.text = app.group_info(
+        crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput),
+        &prompts,
+        size,
+        now,
+    );
+    let screen = render(&app, 120, 16);
+    for part in [
+        "Waiting for you: a question, a permission, or a turn you haven't read.",
+        "Questions and permissions come first, then turns to read; within each, the one",
+        "waiting longest is on top (order.needs_input).",
+        "  ✱ RO roster / api / Fix scrollback",
+        "needs input 2m",
+        "     › fix the scrollback and its tests",
+        // The pinned line, not the note's first.
+        "     ✎ - [ ] check the fork path",
+    ] {
+        assert!(screen.contains(part), "{part:?} in\n{screen}");
+    }
+    // The working one is on its own shelf, not this one.
+    assert!(!screen.contains("working 3m"), "{screen}");
+}
+
+#[test]
+fn a_project_shows_what_it_is_and_its_sessions() {
+    let mut app = app();
+    let now = now_ms();
+    let mut sessions = app.sessions.clone();
+    for i in 0..4 {
+        let mut s = session(&format!("x{i}"));
+        s.project = "roster".into();
+        s.name = format!("extra-{i}");
+        s.state = State::Idle;
+        s.state_since = Some(now - 60_000);
+        sessions.push(s);
+    }
+    app.grouped = true;
+    app.set_data(app.projects.clone(), sessions);
+    app.selected = 0;
+    let group = crate::tui::list::Group::Project(1);
+    app.preview.text = app.group_info(group, &Default::default(), (82, 13), now);
+    let screen = render(&app, 120, 16);
+    for part in [
+        "  Origin     /r",
+        "  Env file   /r/.agent-roster.env (none)",
+        "  Defaults   claude for its new sessions",
+        // Its project is the heading's: not said again.
+        "  ✱ api / Fix scrollback",
+        "  ✱ extra-3",
+        "working 3m",
+    ] {
+        assert!(screen.contains(part), "{part:?} in\n{screen}");
+    }
+    // What doesn't fit is counted.
+    app.preview.text = app.group_info(group, &Default::default(), (82, 8), now);
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("     … and 3 more"), "{screen}");
+    assert!(!screen.contains("extra-3"), "{screen}");
+    // All of them when they just fit: no row is kept for more.
+    let count = app.group_members(group).len();
+    let text = app.group_info(group, &Default::default(), (82, 4 + count as u16), now);
+    let lines: Vec<String> = text.lines.iter().map(|l| l.to_string()).collect();
+    assert!(lines.iter().any(|l| l.contains("extra-3")), "{lines:#?}");
+    assert!(!lines.iter().any(|l| l.contains("more")), "{lines:#?}");
+}
+
+#[test]
+fn a_groups_preview_fits_any_size() {
+    let mut app = app();
+    let now = now_ms();
+    let mut sessions = app.sessions.clone();
+    sessions[0].note = Some(crate::note::Note {
+        text: "a note with a long first line to be cut short\nmore".into(),
+        pin: None,
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), sessions);
+    let prompts = std::collections::HashMap::from([("a1".to_string(), "x".repeat(200))]);
+    let shelf = crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput);
+    let empty = crate::tui::list::Group::Shelf(crate::tui::list::Shelf::Stopped);
+    for group in [shelf, empty, crate::tui::list::Group::Project(1)] {
+        for width in [20, 30, 82] {
+            for height in 0..16 {
+                let text = app.group_info(group, &prompts, (width, height), now);
+                assert!(
+                    text.lines.len() <= height as usize,
+                    "{group:?} in {width}x{height}: {:#?}",
+                    text.lines
+                );
+                for line in &text.lines {
+                    assert!(
+                        line.width() <= width as usize,
+                        "{group:?} in {width}x{height}: {line}"
+                    );
+                }
+            }
+        }
+    }
+    let lines = |app: &App, size| -> Vec<String> {
+        let text = app.group_info(shelf, &prompts, size, now);
+        text.lines.iter().map(|l| l.to_string()).collect()
+    };
+    // Narrow, what the shelf is goes on over lines.
+    let narrow = lines(&app, (30, 20));
+    assert_eq!(
+        narrow[..3],
+        [
+            "Waiting for you: a question, a",
+            "permission, or a turn you",
+            "haven't read."
+        ],
+        "{narrow:#?}"
+    );
+    // What the shelf is shows when its session fits below it (4 lines and
+    // its 3), else the session first.
+    assert!(lines(&app, (82, 7))[0].starts_with("Waiting for you"));
+    assert!(lines(&app, (82, 6))[0].contains("Fix scrollback"));
+    // An empty one's, when "No sessions here." fits below it too.
+    let empty_shelf = |app: &App, size| -> Vec<String> {
+        let text = app.group_info(empty, &prompts, size, now);
+        text.lines.iter().map(|l| l.to_string()).collect()
+    };
+    assert_eq!(empty_shelf(&app, (82, 4)), ["  No sessions here."]);
+    assert!(empty_shelf(&app, (82, 5))[0].starts_with("Their agents aren't running"));
+    // Short, the session shows before what the shelf is.
+    let short = lines(&app, (82, 4));
+    assert!(short[0].contains("Fix scrollback"), "{short:#?}");
+    assert!(
+        !short.iter().any(|l| l.contains("Waiting for you")),
+        "{short:#?}"
+    );
+    // Too short for one whole: a line each, then how many.
+    let tiny = lines(&app, (82, 1));
+    assert!(tiny[0].contains("Fix scrollback"), "{tiny:#?}");
+    let mut sessions = app.sessions.clone();
+    for id in ["a2", "a3"] {
+        let mut other = sessions[0].clone();
+        other.id = id.into();
+        sessions.push(other);
+    }
+    app.set_data(app.projects.clone(), sessions);
+    assert_eq!(lines(&app, (82, 1)), ["  3 sessions"]);
+    let two = lines(&app, (82, 2));
+    assert!(
+        two[0].contains("Fix scrollback") && two[1] == "     … and 2 more",
+        "{two:#?}"
+    );
+    let three = lines(&app, (82, 3));
+    assert!(
+        three.iter().all(|l| l.contains("Fix scrollback")),
+        "{three:#?}"
+    );
+}
+
+#[test]
+fn wrap_breaks_between_words() {
+    use crate::tui::ui::wrap;
+    assert_eq!(wrap("one two three", 7), ["one two", "three"]);
+    // A word wider than the width is cut.
+    assert_eq!(wrap("a verylongword b", 6), ["a", "veryl…", "b"]);
+    assert_eq!(wrap("  ", 5), Vec::<String>::new());
+    assert_eq!(wrap("żółć gęś", 4), ["żółć", "gęś"]);
+}
+
+#[test]
+fn a_groups_sessions_say_what_they_wait_for() {
+    let mut app = app();
+    let now = now_ms();
+    let at = |s: &mut Session, state, ago_ms: i64| {
+        s.state = state;
+        s.state_since = Some(now - ago_ms);
+    };
+    let mut turn = session("t");
+    turn.name = "claude-3".into();
+    turn.title = Some("Read me".into());
+    turn.unread = true;
+    at(&mut turn, State::Idle, 60_000);
+    let mut idle = session("i");
+    at(&mut idle, State::Idle, 120_000);
+    let mut clean = session("c");
+    at(&mut clean, State::Stopped, 3_600_000);
+    clean.exit_status = Some(0);
+    let mut crashed = session("x");
+    at(&mut crashed, State::Stopped, 60_000);
+    crashed.exit_status = Some(1);
+    let mut old = session("o");
+    at(&mut old, State::Stopped, 0);
+    old.deleted_at = Some(now - 2 * 86_400_000);
+    app.set_data(app.projects.clone(), vec![turn, idle, clean, crashed, old]);
+    let shelf = |app: &App, shelf| {
+        let group = crate::tui::list::Group::Shelf(shelf);
+        let text = app.group_info(group, &Default::default(), (82, 20), now);
+        text.lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    use crate::tui::list::Shelf;
+    let input = shelf(&app, Shelf::NeedsInput);
+    // A name of its agent's making isn't said beside the title.
+    assert!(
+        input.contains("demo / Read me") && !input.contains("claude-3"),
+        "{input}"
+    );
+    assert!(input.contains("turn to read 1m"), "{input}");
+    assert!(shelf(&app, Shelf::Idle).contains("idle 2m"));
+    let stopped = shelf(&app, Shelf::Stopped);
+    assert!(
+        stopped.contains("stopped 1h") && stopped.contains("exited 1 · 1m"),
+        "{stopped}"
+    );
+    let archived = shelf(&app, Shelf::Archived);
+    assert!(archived.contains("archived 2d"), "{archived}");
+    // No keys: the footer and the menus have them.
+    assert!(
+        !archived.contains("Enter") && !archived.contains("s D"),
+        "{archived}"
+    );
+}
+
+#[test]
+fn a_blank_pinned_line_shows_the_next() {
+    let mut app = app();
+    let now = now_ms();
+    let mut sessions = app.sessions.clone();
+    sessions[0].note = Some(crate::note::Note {
+        text: "TODO\n\n- [ ] the next one".into(),
+        pin: Some(1),
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), sessions);
+    let shelf = crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput);
+    let text = app.group_info(shelf, &Default::default(), (82, 13), now);
+    let lines: Vec<String> = text.lines.iter().map(|l| l.to_string()).collect();
+    assert!(
+        lines.contains(&"     ✎ - [ ] the next one".to_string()),
+        "{lines:#?}"
+    );
 }

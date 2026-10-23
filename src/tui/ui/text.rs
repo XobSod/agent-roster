@@ -42,6 +42,31 @@ pub(super) fn wrapped_lines(text: &str, width: usize) -> usize {
     lines
 }
 
+/// `text` broken between words into lines of at most `width` columns (a
+/// word wider than that is cut).
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+        if line.width() > width {
+            lines.push(truncate(&line, width));
+            line.clear();
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let (width, height) = (width.min(area.width), height.min(area.height));
     Rect {
@@ -53,7 +78,7 @@ pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// `s` cut to `width` columns, with "…" if it was longer.
-pub(super) fn truncate(s: &str, width: usize) -> String {
+pub(crate) fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
     }
@@ -81,7 +106,7 @@ pub(super) fn pad(s: &str, width: usize) -> String {
 }
 
 /// A line `width` columns wide: `left` cut to fit, `right` flush right.
-pub(super) fn fit(
+pub(crate) fn fit(
     width: usize,
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,

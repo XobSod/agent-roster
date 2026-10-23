@@ -24,7 +24,7 @@ pub(crate) fn badge(project: &str) -> Span<'static> {
 }
 
 /// The agent's mark (its adapter's), else the generic one.
-pub(super) fn glyph(agent: &str) -> Span<'static> {
+pub(crate) fn glyph(agent: &str) -> Span<'static> {
     match crate::agent::adapter(agent).mark() {
         Some(m) => {
             let style = m.rgb.map_or(Style::new(), |(r, g, b)| {

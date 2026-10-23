@@ -133,17 +133,18 @@ fn entry(s: &Session) -> Entry {
 /// The sessions on shelves, or grouped by project with the archived ones on
 /// their shelf after the projects.
 pub fn entries(projects: &[Project], sessions: &[Session], opts: &Options) -> Vec<Entry> {
-    let shown: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| opts.filter.is_none_or(|p| s.project_id == p))
-        .filter(|s| opts.hits.is_none_or(|h| h.contains_key(&s.id)))
-        .collect();
-    let (archived, shown): (Vec<&Session>, Vec<&Session>) =
-        shown.into_iter().partition(|s| s.deleted_at.is_some());
     let mut entries = Vec::new();
-    // A shelf's heading and, unless it's folded, its sessions.
-    let push = |entries: &mut Vec<Entry>, group: Group, label: String, mut mine: Vec<&Session>| {
-        sort(&mut mine, opts.order);
+    // A group's heading and, unless it's folded, its sessions; one with
+    // none isn't shown, but for projects when not filtering by text.
+    let mut push = |group: Group, label: String| {
+        let mine = members(sessions, group, opts);
+        let keep = match group {
+            Group::Project(_) => opts.hits.is_none() || !mine.is_empty(),
+            Group::Shelf(_) => !mine.is_empty(),
+        };
+        if !keep {
+            return;
+        }
         let open = !opts.folded.contains(&group);
         entries.push(Entry::Heading {
             group,
@@ -160,45 +161,37 @@ pub fn entries(projects: &[Project], sessions: &[Session], opts: &Options) -> Ve
             .iter()
             .filter(|p| opts.filter.is_none_or(|f| p.id == f))
         {
-            let mine: Vec<&Session> = shown
-                .iter()
-                .copied()
-                .filter(|s| s.project_id == p.id)
-                .collect();
-            // Filtering by text, only projects with a match.
-            if opts.hits.is_some() && mine.is_empty() {
-                continue;
-            }
-            push(&mut entries, Group::Project(p.id), p.name.clone(), mine);
+            push(Group::Project(p.id), p.name.clone());
         }
-        if !archived.is_empty() {
-            let shelf = Shelf::Archived;
-            push(
-                &mut entries,
-                Group::Shelf(shelf),
-                shelf.title().into(),
-                archived,
-            );
-        }
+        push(
+            Group::Shelf(Shelf::Archived),
+            Shelf::Archived.title().into(),
+        );
     } else {
         for shelf in Shelf::ALL {
-            let mine: Vec<&Session> = shown
-                .iter()
-                .chain(&archived)
-                .copied()
-                .filter(|s| Shelf::of(s) == shelf)
-                .collect();
-            if !mine.is_empty() {
-                push(
-                    &mut entries,
-                    Group::Shelf(shelf),
-                    shelf.title().into(),
-                    mine,
-                );
-            }
+            push(Group::Shelf(shelf), shelf.title().into());
         }
     }
     entries
+}
+
+/// The sessions in `group` as the list shows them, filtered and in order,
+/// whether it's folded or not. Grouped by project, the shelves but Archived
+/// have none.
+pub fn members<'a>(sessions: &'a [Session], group: Group, opts: &Options) -> Vec<&'a Session> {
+    let mut mine: Vec<&Session> = sessions
+        .iter()
+        .filter(|s| opts.filter.is_none_or(|p| s.project_id == p))
+        .filter(|s| opts.hits.is_none_or(|h| h.contains_key(&s.id)))
+        .filter(|s| match group {
+            Group::Project(id) => s.deleted_at.is_none() && s.project_id == id,
+            Group::Shelf(shelf) => {
+                Shelf::of(s) == shelf && (!opts.grouped || shelf == Shelf::Archived)
+            }
+        })
+        .collect();
+    sort(&mut mine, opts.order);
+    mine
 }
 
 /// The group a session sits in, given how the list is arranged.
@@ -294,6 +287,48 @@ mod tests {
                 "row:archived",
             ]
         );
+    }
+
+    #[test]
+    fn a_groups_members_are_its_sessions_as_listed() {
+        let folded = HashSet::new();
+        let order = crate::config::Order::default();
+        let sessions = sessions();
+        let ids = |group, opts: &Options| -> Vec<String> {
+            members(&sessions, group, opts)
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let mut opts = Options {
+            grouped: false,
+            folded: &folded,
+            filter: None,
+            hits: None,
+            order: &order,
+        };
+        assert_eq!(
+            ids(Group::Shelf(Shelf::NeedsInput), &opts),
+            ["input", "unread"]
+        );
+        assert_eq!(ids(Group::Shelf(Shelf::Archived), &opts), ["archived"]);
+        // A project's are its live ones; grouped by project, only the
+        // Archived shelf has any.
+        opts.grouped = true;
+        assert_eq!(
+            ids(Group::Project(1), &opts),
+            ["idle", "stopped", "working-old"]
+        );
+        assert!(ids(Group::Shelf(Shelf::NeedsInput), &opts).is_empty());
+        assert_eq!(ids(Group::Shelf(Shelf::Archived), &opts), ["archived"]);
+        // Filtered as the list is.
+        opts.grouped = false;
+        opts.filter = Some(2);
+        assert_eq!(ids(Group::Shelf(Shelf::Working), &opts), ["working-new"]);
+        let hits = HashMap::from([("unread".to_string(), Hit::default())]);
+        opts.filter = None;
+        opts.hits = Some(&hits);
+        assert_eq!(ids(Group::Shelf(Shelf::NeedsInput), &opts), ["unread"]);
     }
 
     #[test]

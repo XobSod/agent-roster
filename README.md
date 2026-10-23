@@ -67,9 +67,11 @@ what you've handed off or finished: *Working* (dimmed) and *Archived* (folded;
 first served (configurable). Coming back from an agent you gave a task, the cursor
 stays where it was, on the next one waiting; after only reading, it stays on that
 agent. A stopped or archived session's preview says what it was: when it stopped or
-was archived, its project, title, note and last prompts, and what starts or restores
-it. For a stopped one whose agent exited with an error, it also shows how the agent's
-screen ended (`roster show` prints all of it).
+was archived, its project, title, note and last prompts, and whether starting it
+resumes its conversation. For a stopped one whose agent exited with an error, it
+also shows how the agent's screen ended (`roster show` prints all of it). A shelf's
+or a project's heading previews its sessions at a glance: what each is waiting for
+and since when, its last prompt, and its note's line.
 
 New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits). Projects
 carry a default agent, model and effort for their sessions, and each agent its own

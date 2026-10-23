@@ -178,36 +178,161 @@ impl App {
         )
     }
 
-    /// Preview for a shelf heading.
-    pub fn shelf_info(&self, shelf: Shelf, count: usize) -> Text<'static> {
-        let what = match shelf {
-            Shelf::NeedsInput => {
-                "waiting for your input: a question, a permission, or a finished turn you haven't seen"
-            }
-            Shelf::Idle => "idle, waiting for your next prompt",
-            Shelf::Stopped => {
-                "stopped: idle without a running agent; starting one resumes its conversation where the agent can"
-            }
-            Shelf::Working => "working; nothing to do until they finish",
-            Shelf::Archived => "archived: finished, put away with their conversations",
+    /// Preview for a group's heading, a shelf or (grouped by project) a
+    /// project: what it is, then its sessions at a glance, each with what
+    /// it's waiting for and since when, its last prompt (`prompts`, by
+    /// session) and its note's line; as many as fit `size`.
+    pub fn group_info(
+        &self,
+        group: Group,
+        prompts: &HashMap<String, String>,
+        size: (u16, u16),
+        now: i64,
+    ) -> Text<'static> {
+        use ratatui::style::Style;
+        let (width, height) = (size.0 as usize, size.1 as usize);
+        let muted = Style::new().fg(theme::MUTED);
+        let Some(header) = self.group_header(group, width) else {
+            return Text::default();
         };
-        let fold = self.keymap.label(Action::Collapse).unwrap_or("?");
-        let unfold = self.keymap.label(Action::Expand).unwrap_or("?");
-        Text::from(vec![
-            format!(
-                "{count} session{} {what}.",
-                if count == 1 { "" } else { "s" }
-            )
-            .into(),
-            "".into(),
-            format!("{fold} folds the shelf, {unfold} unfolds it.").into(),
-        ])
+        let members = self.group_members(group);
+        let count = members.len();
+        let mut blocks: Vec<Vec<Line<'static>>> = members
+            .iter()
+            .map(|s| member_block(s, group, prompts.get(&s.id).map(String::as_str), width, now))
+            .collect();
+        // What the group is only when a session fits below it (or "No
+        // sessions here."); else sessions first.
+        let below_header = height.saturating_sub(header.len() + 1);
+        let with_header = match count {
+            0 => below_header > 0,
+            _ => fitting(&blocks, below_header) > 0,
+        };
+        let room = if with_header { below_header } else { height };
+        let mut shown = fitting(&blocks, room);
+        // Not even one whole: a line each.
+        if shown == 0 {
+            blocks.iter_mut().for_each(|b| b.truncate(1));
+            shown = fitting(&blocks, height);
+        }
+        let mut lines = Vec::new();
+        if with_header {
+            lines.extend(header);
+            lines.push(Line::default());
+        }
+        for block in blocks.into_iter().take(shown) {
+            lines.extend(block);
+        }
+        match count - shown {
+            _ if count == 0 => lines.push(Line::styled("  No sessions here.", muted)),
+            0 => {}
+            // Not even a line each: how many there are.
+            _ if shown == 0 => lines.push(Line::styled(
+                format!("  {count} session{}", if count == 1 { "" } else { "s" }),
+                muted,
+            )),
+            more => lines.push(Line::styled(format!("     … and {more} more"), muted)),
+        }
+        lines.truncate(height);
+        Text::from(lines)
+    }
+
+    /// What a heading's group is, in lines `width` wide (its name and how
+    /// many it holds are the preview's header); None for a project gone
+    /// meanwhile.
+    fn group_header(&self, group: Group, width: usize) -> Option<Vec<Line<'static>>> {
+        use crate::tui::ui::{fit, wrap};
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+        let muted = Style::new().fg(theme::MUTED);
+        let p = match group {
+            Group::Shelf(shelf) => {
+                let meaning = wrap(shelf_meaning(shelf), width)
+                    .into_iter()
+                    .map(Line::from);
+                let order = wrap(&self.shelf_order(shelf), width)
+                    .into_iter()
+                    .map(|l| Line::styled(l, muted));
+                return Some(meaning.chain(order).collect());
+            }
+            Group::Project(id) => self.project(id)?,
+        };
+        let field = |label: &str, value: Vec<Span<'static>>| {
+            let mut spans = vec![Span::styled(format!("  {label:<11}"), muted)];
+            spans.extend(value);
+            Line::from(fit(width, spans, Vec::new()))
+        };
+        let mut header = Vec::new();
+        if self.chat_project == Some(p.id) {
+            header.push(field(
+                "Built-in",
+                vec![Span::raw(format!(
+                    "for chats ({}); its directory follows chats_dir in config.toml",
+                    self.chord(Menu::Session, Action::NewChat)
+                ))],
+            ));
+        }
+        header.push(field(
+            "Origin",
+            vec![Span::raw(crate::util::short_path(&p.origin))],
+        ));
+        let env = p.origin.join(PROJECT_ENV);
+        let sourced = match env.exists() {
+            true => "sourced before every start",
+            false => "none",
+        };
+        header.push(field(
+            "Env file",
+            vec![
+                Span::raw(format!("{} ", crate::util::short_path(&env))),
+                Span::styled(format!("({sourced})"), muted),
+            ],
+        ));
+        header.push(field(
+            "Defaults",
+            vec![
+                Span::raw(p.defaults_label(self.default_agent(), &self.models.names)),
+                Span::styled(" for its new sessions", muted),
+            ],
+        ));
+        Some(header)
+    }
+
+    /// How a shelf is ordered, as config.toml's `[order]` has it.
+    fn shelf_order(&self, shelf: Shelf) -> String {
+        use crate::config::First;
+        let o = &self.order;
+        let (first, key, how) = match shelf {
+            Shelf::NeedsInput => (o.needs_input, "needs_input", "waiting"),
+            Shelf::Idle => (o.idle, "idle", "idle"),
+            Shelf::Stopped => (o.stopped, "stopped", "stopped"),
+            Shelf::Working => (o.working, "working", "working"),
+            Shelf::Archived => (o.archived, "archived", "archived"),
+        };
+        match (shelf, first) {
+            // Questions and permissions come before turns to read, whatever
+            // the order within them.
+            (Shelf::NeedsInput, First::Oldest) => format!(
+                "Questions and permissions come first, then turns to read; within each, the one {how} longest is on top (order.{key})."
+            ),
+            (Shelf::NeedsInput, First::Newest) => format!(
+                "Questions and permissions come first, then turns to read; within each, the latest to get here is on top (order.{key})."
+            ),
+            (Shelf::Archived, First::Newest) => {
+                "The latest archived is on top (order.archived).".into()
+            }
+            (Shelf::Archived, First::Oldest) => {
+                "The first archived is on top (order.archived).".into()
+            }
+            (_, First::Oldest) => format!("The one {how} longest is on top (order.{key})."),
+            (_, First::Newest) => format!("The latest to get here is on top (order.{key})."),
+        }
     }
 
     /// Preview for a stopped or archived session: where it got to, what it
     /// is, how its screen ended if its agent exited with an error
-    /// (`last_screen`, see `screen_tail`), its note, what it was about (its
-    /// last `prompts`), and what can be done with it.
+    /// (`last_screen`, see `screen_tail`), its note, and what it was about
+    /// (its last `prompts`).
     pub fn session_info(
         &self,
         s: &Session,
@@ -219,7 +344,7 @@ impl App {
         use ratatui::text::Span;
         let muted = Style::new().fg(theme::MUTED);
         let field = |label: &str, mut value: Vec<Span<'static>>| {
-            value.insert(0, Span::styled(format!("  {label:<11}"), muted));
+            value.insert(0, Span::styled(format!("  {label:<14}"), muted));
             Line::from(value)
         };
         let ago = |at: i64| match crate::util::ago(now - at) {
@@ -271,6 +396,28 @@ impl App {
                 ],
             ));
         }
+        // What starting it goes on with: its conversation once its agent has
+        // written it. Until then, a fork of the one it was adopted from, or
+        // a new one.
+        let short = |id: &str| id.chars().take(8).collect::<String>();
+        let written = s
+            .transcript_path
+            .as_deref()
+            .is_some_and(|p| std::path::Path::new(p).exists());
+        let conversation = match (&s.conversation_id, &s.fork_from) {
+            _ if !self.resumes(&s.agent) => vec![Span::styled("a new one when started", muted)],
+            (Some(id), _) if written => vec![
+                Span::raw(short(id)),
+                Span::styled(" (resumed when started)", muted),
+            ],
+            (_, Some(from)) => vec![
+                Span::styled("a fork of ", muted),
+                Span::raw(short(from)),
+                Span::styled(" when started", muted),
+            ],
+            _ => vec![Span::styled("a new one when started", muted)],
+        };
+        lines.push(field("Conversation", conversation));
         // Before what's longer, so an error isn't the part that doesn't fit.
         if !last_screen.is_empty() {
             lines.push(Line::default());
@@ -314,31 +461,6 @@ impl App {
                     Span::raw(crate::util::one_line(p)),
                 ]));
             }
-        }
-        // What can be done with it.
-        lines.push(Line::default());
-        let conversation = match (&s.conversation_id, self.resumes(&s.agent)) {
-            (Some(id), true) => format!("resumes its conversation ({})", id.get(..8).unwrap_or(id)),
-            _ => "starts a new conversation".to_string(),
-        };
-        if s.deleted_at.is_some() {
-            let restore = self.keymap.label(Action::Confirm).unwrap_or("?");
-            let delete = self.chord(Menu::Session, Action::Delete);
-            lines.push(Line::from(format!(
-                "{restore} restores it; starting it then {conversation}."
-            )));
-            let kept = if crate::agent::adapter(&s.agent).adopts() {
-                format!(
-                    "; its {} conversation stays and can be adopted again",
-                    crate::util::capitalize(&s.agent)
-                )
-            } else {
-                String::new()
-            };
-            lines.push(Line::from(format!("{delete} deletes it for good{kept}.")));
-        } else {
-            let start = self.chord(Menu::Session, Action::Start);
-            lines.push(Line::from(format!("{start} starts it; it {conversation}.")));
         }
         Text::from(lines)
     }
@@ -402,4 +524,121 @@ pub fn screen_tail(raw: &str, rows: usize, width: usize) -> Vec<String> {
         .skip(start)
         .skip_while(|l| l.trim().is_empty())
         .collect()
+}
+
+/// What a shelf holds, in a sentence.
+fn shelf_meaning(shelf: Shelf) -> &'static str {
+    match shelf {
+        Shelf::NeedsInput => {
+            "Waiting for you: a question, a permission, or a turn you haven't read."
+        }
+        Shelf::Idle => "Their turn done and read, each waits for your next prompt.",
+        Shelf::Stopped => {
+            "Their agents aren't running; starting one resumes its conversation where its agent can."
+        }
+        Shelf::Working => "At work on what you gave them: nothing to do until they finish.",
+        Shelf::Archived => {
+            "Put away with their conversations, kept until restored or deleted for good."
+        }
+    }
+}
+
+/// A session's lines in a heading's preview: what it is (`member_line`),
+/// its last prompt and its note's line (the first not blank of those it
+/// shows), each cut to `width`.
+fn member_block(
+    s: &Session,
+    group: Group,
+    prompt: Option<&str>,
+    width: usize,
+    now: i64,
+) -> Vec<Line<'static>> {
+    use crate::tui::ui::truncate;
+    use ratatui::style::Style;
+    use ratatui::text::Span;
+    let indented = |mark: Span<'static>, text: &str, style: Style| {
+        let text = truncate(&crate::util::one_line(text), width.saturating_sub(7));
+        Line::from(vec![Span::raw("     "), mark, Span::styled(text, style)])
+    };
+    let muted = Style::new().fg(theme::MUTED);
+    let mut lines = vec![member_line(s, group, width, now)];
+    if let Some(prompt) = prompt {
+        lines.push(indented(Span::styled("› ", muted), prompt, muted));
+    }
+    let note = s.note.as_ref().and_then(|n| {
+        n.shown()
+            .lines
+            .into_iter()
+            .find(|l| !l.trim().is_empty())
+            .map(str::to_string)
+    });
+    if let Some(line) = note {
+        let mark = Span::styled("✎ ", Style::new().fg(theme::ACCENT));
+        lines.push(indented(mark, &line, Style::new()));
+    }
+    lines
+}
+
+/// How many of the sessions' `blocks` fit in `room` lines, with one for "…
+/// and N more" if not all do.
+fn fitting(blocks: &[Vec<Line>], room: usize) -> usize {
+    let mut used = 0;
+    for (i, block) in blocks.iter().enumerate() {
+        let more = usize::from(i + 1 < blocks.len());
+        if used + block.len() + more > room {
+            return i;
+        }
+        used += block.len();
+    }
+    blocks.len()
+}
+
+/// A session's line in a heading's preview: its agent's mark, where it is
+/// (its project too, on a shelf) and its title; on the right what it's
+/// waiting for, and since when.
+fn member_line(s: &Session, group: Group, width: usize, now: i64) -> Line<'static> {
+    use crate::tui::ui::{badge, fit, glyph};
+    use ratatui::style::Style;
+    use ratatui::text::Span;
+    let muted = Style::new().fg(theme::MUTED);
+    let slash = || Span::styled(" / ", Style::new().fg(theme::FAINT));
+    let mut left = vec![Span::raw("  "), glyph(&s.agent), Span::raw(" ")];
+    if matches!(group, Group::Shelf(_)) {
+        left.extend([
+            badge(&s.project),
+            Span::raw(" "),
+            Span::styled(s.project.clone(), muted),
+            slash(),
+        ]);
+    }
+    match s.title() {
+        Some(title) => {
+            if !s.has_default_name() {
+                left.extend([Span::styled(s.name.clone(), muted), slash()]);
+            }
+            left.push(Span::raw(title.to_string()));
+        }
+        None => left.push(Span::raw(s.name.clone())),
+    }
+    let right = vec![waiting_words(s, now), Span::raw(" ")];
+    Line::from(fit(width, left, right))
+}
+
+/// What a session is waiting for, and since when.
+fn waiting_words(s: &Session, now: i64) -> ratatui::text::Span<'static> {
+    use ratatui::style::{Color, Style};
+    let ago = |at: i64| theme::ago(now - at);
+    let at = s.state_since.unwrap_or(s.created_at);
+    let (words, color): (String, Color) = match (s.deleted_at, s.state, s.unread) {
+        (Some(archived), ..) => (format!("archived {}", ago(archived)), theme::FAINT),
+        (None, State::NeedsInput, _) => (format!("needs input {}", ago(at)), theme::INPUT),
+        (None, State::Idle, true) => (format!("turn to read {}", ago(at)), theme::UNREAD),
+        (None, State::Idle, false) => (format!("idle {}", ago(at)), theme::MUTED),
+        (None, State::Working, _) => (format!("working {}", ago(at)), theme::WORKING),
+        (None, State::Stopped, _) => match s.exit_status {
+            Some(code) if code != 0 => (format!("exited {code} · {}", ago(at)), theme::ERROR),
+            _ => (format!("stopped {}", ago(at)), theme::MUTED),
+        },
+    };
+    ratatui::text::Span::styled(words, Style::new().fg(color))
 }

@@ -145,12 +145,23 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             reload(roster, app);
             last_reload = Instant::now();
         }
+        // A heading's sessions' prompts, read on a thread, show as they come.
+        if transcripts_read(app) && heading_shown(app) {
+            update_preview(roster, app);
+        }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
         if let Some(editor) = app.note.as_mut() {
             editor.tick(Instant::now());
         }
+        let size = app.preview.size.get();
         terminal.draw(|f| ui::draw(f, app))?;
+        // A heading's preview is made to the preview's size: resized, it's
+        // made again.
+        if app.preview.size.get() != size && heading_shown(app) {
+            update_preview(roster, app);
+            terminal.draw(|f| ui::draw(f, app))?;
+        }
         // Redraw often enough to move the spinners, refresh the data once a tick.
         let until_reload = TICK.saturating_sub(last_reload.elapsed());
         let mut wait = if ui::animating(app) {
@@ -161,8 +172,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         if let Some(deadline) = app.note.as_ref().and_then(|e| e.deadline()) {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
-        // A title coming is looked for more often than a tick.
-        if !app.titling.is_empty() {
+        // A title or a transcript coming is looked for more often than a tick.
+        if !app.titling.is_empty() || !app.preview.reading.ids.is_empty() {
             wait = wait.min(Duration::from_millis(200));
         }
         if event::poll(wait)?
@@ -336,18 +347,12 @@ fn update_preview(roster: &Roster, app: &mut App) {
     app.preview.screen = false;
     app.preview.text = match app.selected_entry().cloned() {
         None => app.empty_info(),
-        Some(Entry::Heading {
-            group: Group::Project(id),
-            ..
-        }) => app
-            .project(id)
-            .cloned()
-            .map_or_else(Text::default, |p| app.project_info(&p)),
-        Some(Entry::Heading {
-            group: Group::Shelf(shelf),
-            count,
-            ..
-        }) => app.shelf_info(shelf, count),
+        // A shelf or a project: its sessions at a glance.
+        Some(Entry::Heading { group, .. }) => {
+            let size = app.preview.size.get().unwrap_or((80, 24));
+            let prompts = group_prompts(app, group, size.1);
+            app.group_info(group, &prompts, size, now)
+        }
         Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => {
             app.session_info(&s, &prompts, &[], now)
         }
@@ -372,6 +377,86 @@ fn update_preview(roster: &Roster, app: &mut App) {
             Err(_) => app.session_info(&s, &prompts, &[], now),
         },
     };
+}
+
+/// The last prompt of each of `group`'s sessions that may show in `rows`,
+/// from their transcripts: those read before (which costs next to nothing);
+/// the others are read on a thread, and show when they come
+/// (`transcripts_read`).
+fn group_prompts(app: &mut App, group: Group, rows: u16) -> HashMap<String, String> {
+    // As many as can show: each takes a line, and one for its prompt and
+    // one for its note.
+    let mut lines = 0;
+    let members: Vec<crate::model::Session> = app
+        .group_members(group)
+        .into_iter()
+        .take_while(|s| {
+            let fits = lines < rows as usize;
+            lines += 1 + usize::from(s.transcript_path.is_some()) + usize::from(s.note.is_some());
+            fits
+        })
+        .cloned()
+        .collect();
+    let mut prompts = HashMap::new();
+    let mut unread = Vec::new();
+    for s in members {
+        let Some(path) = s.transcript_path.as_deref().map(Path::new) else {
+            continue;
+        };
+        match app.preview.transcripts.get_mut(&s.id) {
+            Some(reader) if reader.path() == path => {
+                if reader.update().is_ok()
+                    && let Some(last) = reader.recent_prompts().pop()
+                {
+                    prompts.insert(s.id.clone(), last);
+                }
+            }
+            // Not read again: one being read, or one that's gone (deleted
+            // with its conversation).
+            _ if app.preview.reading.ids.contains(&s.id) || !path.exists() => {}
+            _ => {
+                if let Some(reader) = agent::adapter(&s.agent).transcript(path) {
+                    unread.push((s.id.clone(), reader));
+                }
+            }
+        }
+    }
+    if !unread.is_empty() {
+        let reading = &mut app.preview.reading;
+        reading.ids.extend(unread.iter().map(|(id, _)| id.clone()));
+        let send = reading.send.clone();
+        std::thread::spawn(move || {
+            for (id, mut reader) in unread {
+                let read = reader.update().is_ok().then_some(reader);
+                if send.send((id, read)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    prompts
+}
+
+/// Keeps the transcripts read on a thread that have come (`group_prompts`);
+/// whether any did. One that couldn't be read is tried again at the next
+/// refresh.
+fn transcripts_read(app: &mut App) -> bool {
+    let reading = &mut app.preview.reading;
+    let mut any = false;
+    for (id, read) in reading.came.try_iter() {
+        reading.ids.remove(&id);
+        if let Some(reader) = read {
+            app.preview.transcripts.insert(id, reader);
+            any = true;
+        }
+    }
+    any
+}
+
+/// Whether the session list shows a heading's preview, which is made to its
+/// size and of what's been read on a thread.
+fn heading_shown(app: &App) -> bool {
+    app.mode == Mode::Sessions && matches!(app.selected_entry(), Some(Entry::Heading { .. }))
 }
 
 /// What the agent can tell about a session, its transcript read incrementally:
@@ -794,6 +879,85 @@ fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_headings_transcripts_are_read_on_a_thread_as_many_as_show() {
+        use crate::tui::list::Shelf;
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| Some(dir.path().join(name).to_string_lossy().into_owned());
+        // Not empty, so it isn't taken for an empty file on any filesystem.
+        std::fs::create_dir(dir.path().join("a-directory")).unwrap();
+        std::fs::write(dir.path().join("a-directory/x"), "x").unwrap();
+        let mut app = App::new(
+            crate::keys::Keymap::new(&crate::config::Keys::default()).unwrap(),
+            "/".into(),
+            vec!["claude".into()],
+        );
+        let sessions: Vec<_> = (0..10)
+            .map(|i| {
+                let mut s = crate::model::tests::session(&format!("s{i}"));
+                s.state = crate::model::State::NeedsInput;
+                // First come, first served: s0 on top.
+                s.state_since = Some(i);
+                s.transcript_path = match i {
+                    // Gone, and one that can't be read.
+                    0 => path("gone.jsonl"),
+                    1 => path("a-directory"),
+                    _ => {
+                        let line =
+                            format!(r#"{{"type":"user","message":{{"content":"task {i}"}}}}"#);
+                        std::fs::write(dir.path().join(format!("{i}.jsonl")), line + "\n").unwrap();
+                        path(&format!("{i}.jsonl"))
+                    }
+                };
+                s
+            })
+            .map(|mut s| {
+                // A note's line counts too.
+                if s.id == "s2" {
+                    s.note = Some(crate::note::Note {
+                        text: "todo".into(),
+                        pin: None,
+                        at: 0,
+                    });
+                }
+                s
+            })
+            .collect();
+        app.set_data(Vec::new(), sessions);
+        let shelf = Group::Shelf(Shelf::NeedsInput);
+        let reading = |app: &App| {
+            let mut ids: Vec<String> = app.preview.reading.ids.iter().cloned().collect();
+            ids.sort();
+            ids
+        };
+        // What's being read comes back, each with its id cleared; whether
+        // any could be read.
+        let come = |app: &mut App| {
+            let until = Instant::now() + Duration::from_secs(5);
+            let mut any = false;
+            while !app.preview.reading.ids.is_empty() && Instant::now() < until {
+                any |= transcripts_read(app);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            any
+        };
+        // In 7 rows three show (a line each, one for its prompt, s2's one for
+        // its note); the one that's gone isn't read.
+        assert!(group_prompts(&mut app, shelf, 7).is_empty());
+        assert_eq!(reading(&app), ["s1", "s2"]);
+        assert!(come(&mut app));
+        assert!(reading(&app).is_empty());
+        // The one read is kept and its prompt shows; the other is tried
+        // again, and isn't news when it fails again.
+        assert_eq!(app.preview.transcripts.keys().collect::<Vec<_>>(), ["s2"]);
+        let prompts = group_prompts(&mut app, shelf, 7);
+        assert_eq!(prompts, HashMap::from([("s2".into(), "task 2".into())]));
+        assert_eq!(reading(&app), ["s1"]);
+        assert!(!come(&mut app));
+        assert!(reading(&app).is_empty());
+        assert_eq!(app.preview.transcripts.len(), 1);
+    }
 
     #[test]
     fn titles_that_failed_say_which_and_why() {

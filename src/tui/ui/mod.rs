@@ -22,8 +22,10 @@ use sidebar::*;
 pub use spans::status_line;
 // For the previews of sessions without a screen (app::texts).
 use spans::*;
-pub(crate) use spans::{agent_spans, badge};
+pub(crate) use spans::{agent_spans, badge, glyph};
+// For the previews of headings (app::texts).
 use text::*;
+pub(crate) use text::{fit, truncate, wrap};
 use views::*;
 
 use super::app::{App, Dialog, Mode};

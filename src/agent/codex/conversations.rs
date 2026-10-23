@@ -159,8 +159,8 @@ fn read(path: &Path) -> Option<Conversation> {
     Some(c)
 }
 
-/// A prompt you typed: a message's text, with what codex injects (the
-/// environment, a model switch) left out.
+/// A prompt you typed: a message's text, unless it's context codex gives the
+/// model as one (`transcript::typed`).
 fn typed_prompt(payload: &Value) -> Option<String> {
     match &payload["content"] {
         Value::String(text) => Some(text.clone()),
@@ -175,7 +175,7 @@ fn typed_prompt(payload: &Value) -> Option<String> {
         _ => None,
     }
     .map(|text| text.trim().to_string())
-    .filter(|text| !text.is_empty() && !text.starts_with('<'))
+    .filter(|text| super::transcript::typed(text))
 }
 
 #[cfg(test)]
@@ -217,6 +217,11 @@ mod tests {
                 ),
                 r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"high"}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>ignored</environment_context>"}]}}"#,
+                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work/app
+
+<INSTRUCTIONS>
+be brief
+</INSTRUCTIONS>"}]}}"##,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}]}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"and the tests"}]}}"#,

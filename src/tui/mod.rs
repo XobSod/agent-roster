@@ -133,24 +133,26 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
     reload(roster, app);
     let mut last_reload = Instant::now();
     loop {
-        // What each agent has answered of its models, as it answers; the
-        // receiver is kept only while its thread is still running.
-        if let Some(listing) = app.listing.take() {
-            let (mut offered, mut listing) = (Vec::new(), Some(listing));
+        // What each agent has answered of its models, as it answers, into an
+        // open form too; the receiver goes once its thread is done.
+        if let Some(listing) = &app.listing {
+            let mut arrived = false;
             loop {
-                match listing.as_ref().map(|r| r.try_recv()) {
-                    Some(Ok(one)) => offered.push(one),
-                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) => break,
-                    _ => {
-                        listing = None;
+                match listing.try_recv() {
+                    Ok((agent, models)) => {
+                        app.models.offered.insert(agent, models);
+                        arrived = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        app.listing = None;
                         break;
                     }
                 }
             }
-            for (agent, models) in offered {
-                app.models.offered.insert(agent, models);
+            if arrived && let Some(app::Dialog::Form(form)) = &mut app.dialog {
+                form.set_models(&app.models);
             }
-            app.listing = listing;
         }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).

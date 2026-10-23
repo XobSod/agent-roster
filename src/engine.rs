@@ -532,6 +532,10 @@ impl Roster {
         if launch.conversation_id.is_some() {
             s.conversation_id = launch.conversation_id;
         }
+        // Handed to it on its command line: nothing left to type in.
+        if agent::adapter(&s.agent).takes_prompt() {
+            s.pending_prompt = None;
+        }
         s.set_state(State::Working, now);
         s.unread = false;
         s.exit_status = None;
@@ -917,16 +921,12 @@ impl Roster {
 
     /// Whether an agent is waiting for its first prompt: for one with hooks,
     /// after it has reported its session, which names its transcript (a new
-    /// conversation has none before that); for one whose hooks never name it
-    /// (codex), once it has been up and quiet a while; for others, idle after
-    /// starting up.
+    /// conversation has none before that); for others, idle after starting up.
+    /// (An agent that takes its first prompt on its command line never waits.)
     fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
-        let adapter = agent::adapter(&s.agent);
         s.state == State::Idle
-            && if adapter.reports() {
+            && if agent::adapter(&s.agent).reports() {
                 s.transcript_path.is_some()
-                    || (!adapter.reports_its_start()
-                        && s.last_event_at.is_some_and(|at| now - at > BOOT_GRACE_MS))
             } else {
                 s.baseline_at.is_some_and(|b| now > b)
             }

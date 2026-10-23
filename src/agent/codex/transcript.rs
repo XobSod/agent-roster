@@ -33,6 +33,10 @@ impl Tally for Totals {
         let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
             return;
         };
+        if entry.kind.as_deref() == Some("compacted") {
+            self.context = None;
+            return;
+        }
         let Some(payload) = entry.payload else {
             return;
         };
@@ -42,11 +46,9 @@ impl Tally for Totals {
             Some("response_item") => match payload.kind.as_deref() {
                 Some("message") if payload.role.as_deref() == Some("user") => {
                     // A typed prompt is text; tool results are lists of
-                    // outputs, and the context codex injects is wrapped in
-                    // tags.
-                    if let Some(text) = payload.text()
-                        && !text.trim_start().starts_with('<')
-                    {
+                    // outputs, and codex gives the model context as user
+                    // messages too.
+                    if let Some(text) = payload.text().filter(|t| typed(t)) {
                         self.prompts.push(text);
                     }
                 }
@@ -184,6 +186,14 @@ struct Block {
     text: Option<String>,
 }
 
+/// Whether a user message's text is a prompt you typed, not context codex
+/// gives the model as one: its fragments wrapped in tags (the environment, a
+/// skill's or a hook's text, an aborted turn) and AGENTS.md's instructions.
+pub(super) fn typed(text: &str) -> bool {
+    let text = text.trim_start();
+    !text.is_empty() && !text.starts_with('<') && !text.starts_with("# AGENTS.md instructions")
+}
+
 /// The lines worth parsing: codex writes a line per thing that happens, and
 /// most of them say nothing roster counts. (Its `type` comes after its
 /// timestamp, so `stats::leading_type` can't tell them apart.)
@@ -193,6 +203,7 @@ fn wanted(line: &[u8]) -> bool {
         br#""token_usage_record""#,
         br#""token_count""#,
         br#""compaction""#,
+        br#""compacted""#,
         br#""context_compacted""#,
     ];
     MARKS
@@ -263,6 +274,7 @@ mod tests {
         for injected in [
             "<environment_context>…</environment_context>",
             "<model_switch>use another model</model_switch>",
+            "# AGENTS.md instructions for /work/app\n\n<INSTRUCTIONS>\nbe brief\n</INSTRUCTIONS>",
         ] {
             lines.push(
                 json!({"type": "response_item", "payload": {"type": "message", "role": "user",
@@ -322,12 +334,20 @@ mod tests {
 
     #[test]
     fn a_compaction_leaves_the_context_unknown_until_the_next_call() {
-        let mut lines = turn("fix it", 5, 115, 400_000);
-        lines.push(
-            json!({"type": "event_msg", "payload": {"type": "context_compacted"}}).to_string(),
-        );
-        let (stats, _) = totals(&lines);
-        assert_eq!(stats.context_used, None);
-        assert_eq!(stats.output_tokens, Some(5));
+        // As codex writes it now (its paged history keeps no
+        // `context_compacted` event), and as it did.
+        for compacted in [
+            json!({"timestamp": "t", "type": "compacted", "payload": {"message": "summary"}}),
+            json!({"type": "event_msg", "payload": {"type": "context_compacted"}}),
+        ] {
+            let mut lines = turn("fix it", 5, 115, 400_000);
+            lines.push(compacted.to_string());
+            let (stats, _) = totals(&lines);
+            assert_eq!(stats.context_used, None, "{compacted}");
+            assert_eq!(stats.output_tokens, Some(5));
+            // The next call says what's in context again.
+            lines.extend(turn("go on", 7, 50, 400_000));
+            assert_eq!(totals(&lines).0.context_used, Some(50));
+        }
     }
 }

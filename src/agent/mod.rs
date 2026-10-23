@@ -118,8 +118,8 @@ pub trait Adapter: Sync {
     /// A one-off run of the agent for a small job such as a title: the prompt
     /// goes last, the answer comes on stdout, and nothing of it is kept
     /// (no tools, no session). `[agents.<name>] title_model` picks its model,
-    /// else a cheap one the adapter knows, else the agent's default. None if
-    /// the agent has no such mode.
+    /// else `model` (`AgentConfig::titles_by`), else the agent's default.
+    /// None if the agent has no such mode.
     fn oneoff(&self, _config: &Config) -> Option<Vec<String>> {
         None
     }

@@ -36,6 +36,21 @@ impl crate::engine::Roster {
         sections(&self.config, &self.config_text, &env)
     }
 
+    /// config.toml, for editing, and whether it was just written from the
+    /// template of every setting, as it is when there's none. The template
+    /// holds the defaults in use, so it counts as the text in use: closing it
+    /// unchanged changes nothing (`reload_config_now`).
+    pub fn config_file_to_edit(&mut self) -> Result<(PathBuf, bool)> {
+        let file = self.paths.config_file();
+        if file.exists() {
+            return Ok((file, false));
+        }
+        let text = template(&self.settings());
+        write_file(&file, &text)?;
+        self.config_text = text;
+        Ok((file, true))
+    }
+
     /// What taking out the setting at `dotted` asks first (`removal_question`),
     /// as config.toml is now.
     pub fn unset_question(&self, dotted: &str) -> Option<String> {

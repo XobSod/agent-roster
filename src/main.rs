@@ -215,12 +215,17 @@ enum Cmd {
     /// Mark a session unread
     Unread { session: String },
     /// Every setting of config.toml: its value, whether you set it, what it does
+    #[command(args_conflicts_with_subcommands = true)]
     Config {
         #[command(subcommand)]
         change: Option<ConfigCmd>,
         /// Print a config.toml with every setting commented out at its default
         #[arg(long)]
         defaults: bool,
+        /// Open config.toml in $VISUAL or $EDITOR, written first from those
+        /// defaults if there's none
+        #[arg(long, conflicts_with = "defaults")]
+        edit: bool,
     },
     /// Check roster's tmux server and database against each other
     Doctor {
@@ -386,10 +391,18 @@ fn run(cli: Cli) -> Result<()> {
         cli.command,
         Some(Cmd::Deliver { .. } | Cmd::Retitle { auto: true, .. })
     );
-    let mut r = if helper {
-        Roster::open_quietly()?
+    let opened = if helper {
+        Roster::open_quietly()
     } else {
-        Roster::open()?
+        Roster::open()
+    };
+    let mut r = match opened {
+        Ok(r) => r,
+        // A config.toml roster can't read is what `config --edit` is for.
+        Err(e) if matches!(cli.command, Some(Cmd::Config { edit: true, .. })) => {
+            return edit_unread_config(e);
+        }
+        Err(e) => return Err(e),
     };
     let Some(command) = cli.command else {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -758,7 +771,11 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             let s = r.resolve(&session, false)?;
             r.set_unread(&s.id, true)?;
         }
-        Cmd::Config { change, defaults } => match change {
+        Cmd::Config {
+            change,
+            defaults,
+            edit,
+        } => match change {
             Some(ConfigCmd::Set { setting, value }) => {
                 r.change_setting(&setting, Some(&value))?;
                 println!("Set {setting}");
@@ -777,6 +794,24 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 }
             }
             None if defaults => print!("{}", settings::template(&r.settings())),
+            None if edit => {
+                let (file, made) = r.config_file_to_edit()?;
+                if !util::run_editor(&file)? {
+                    bail!("the editor exited with an error; config.toml is as it left it");
+                }
+                match r.reload_config_now()? {
+                    settings::Reloaded::Same if made => {
+                        println!("config.toml made, every setting commented out at its default")
+                    }
+                    settings::Reloaded::Same => println!("config.toml unchanged"),
+                    settings::Reloaded::InUse(None) => println!("config.toml saved"),
+                    settings::Reloaded::InUse(Some(e)) => {
+                        return Err(
+                            e.context("config.toml is saved, but roster's tmux didn't take it")
+                        );
+                    }
+                }
+            }
             None => print::settings(r),
         },
         Cmd::Doctor { fix, yes } => {
@@ -858,6 +893,28 @@ fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> 
         s.agent
     );
     confirm(&question, yes)
+}
+
+/// `roster config --edit` when roster couldn't open (`why`): if config.toml
+/// is why, the file in the editor, then roster opened with it, which puts it
+/// in use in roster's tmux too; anything else is `why` as it is.
+fn edit_unread_config(why: anyhow::Error) -> Result<()> {
+    let file = paths::Paths::from_env()?.config_file();
+    if config::Config::load_text(&file).is_ok() {
+        return Err(why);
+    }
+    eprintln!("roster: {why:#}");
+    if !util::run_editor(&file)? {
+        bail!("the editor exited with an error; config.toml is as it left it");
+    }
+    config::Config::load_text(&file).context("config.toml still has an error")?;
+    let mut r = Roster::open()?;
+    let notices = r.take_notices();
+    if !notices.is_empty() {
+        bail!("config.toml is saved, but {}", notices.join("; "));
+    }
+    println!("config.toml saved");
+    Ok(())
 }
 
 /// Says on stderr what came up that isn't worth failing for (`take_notices`).

@@ -811,6 +811,118 @@ fn config_changes_reach_a_running_server() {
 }
 
 #[test]
+fn config_toml_opens_in_the_editor() {
+    let Some(t) = TestEnv::new("edit-config") else {
+        return;
+    };
+    let file = t.config_dir().join("config.toml");
+    let editor = |name: &str, sed: &str| {
+        let path = t.path(name);
+        fs::write(&path, format!("#!/bin/sh\nsed -i '{sed}' \"$1\"\n")).unwrap();
+        Command::new("chmod").arg("+x").arg(&path).status().unwrap();
+        path
+    };
+    let edit = |editor: &std::path::Path| {
+        t.command(&["config", "--edit"])
+            .env("EDITOR", editor)
+            .env_remove("VISUAL")
+            .output()
+            .unwrap()
+    };
+    let says = |out: &std::process::Output, said: &str| {
+        String::from_utf8_lossy(&out.stdout).contains(said)
+            || String::from_utf8_lossy(&out.stderr).contains(said)
+    };
+    let out = edit(&editor("on.sh", "1i status_line = false"));
+    assert!(
+        out.status.success() && says(&out, "config.toml saved"),
+        "{out:?}"
+    );
+    assert!(
+        fs::read_to_string(&file)
+            .unwrap()
+            .starts_with("status_line = false\n")
+    );
+    let out = edit(std::path::Path::new("true"));
+    assert!(
+        out.status.success() && says(&out, "config.toml unchanged"),
+        "{out:?}"
+    );
+
+    // A mistake is said, and --edit is still the way to fix it.
+    let out = edit(&editor("bad.sh", "1i no_such_setting = 1"));
+    assert!(
+        !out.status.success() && says(&out, "no_such_setting"),
+        "{out:?}"
+    );
+    let out = edit(&editor("fix.sh", "/no_such_setting/d"));
+    assert!(
+        out.status.success() && says(&out, "config.toml saved"),
+        "{out:?}"
+    );
+    assert!(t.ok(&["config"]).contains("status_line"));
+
+    // An editor that fails is said.
+    let out = edit(std::path::Path::new("false"));
+    assert!(
+        !out.status.success() && says(&out, "the editor exited with an error"),
+        "{out:?}"
+    );
+
+    // With no file yet, it's made from the template first.
+    fs::remove_file(&file).unwrap();
+    let out = edit(std::path::Path::new("true"));
+    assert!(
+        out.status.success() && says(&out, "config.toml made, every setting commented out"),
+        "{out:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        t.ok(&["config", "--defaults"])
+    );
+
+    // Not with a change: one or the other.
+    let out = t.run(&["config", "--edit", "set", "status_line", "on"]);
+    assert!(!out.status.success(), "{out:?}");
+
+    // Fixed with --edit, it's in use at once, in a running server too.
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo"]);
+    let text = fs::read_to_string(&file).unwrap();
+    fs::write(
+        &file,
+        format!("{text}[keys]\ndetach = \"C-b\"\nno_such_key = 1\n"),
+    )
+    .unwrap();
+    let out = edit(&editor("fix-keys.sh", "/no_such_key/d"));
+    assert!(
+        out.status.success() && says(&out, "config.toml saved"),
+        "{out:?}"
+    );
+    let keys = Command::new("tmux")
+        .args(["-L", &t.socket, "list-keys", "-T", "root"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&keys.stdout).contains("C-b"),
+        "{keys:?}"
+    );
+
+    // Roster failing to open for another reason isn't config.toml's to fix.
+    let ran = t.path("ran");
+    let marks = t.path("marks.sh");
+    fs::write(&marks, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&marks)
+        .status()
+        .unwrap();
+    fs::write(t.db(), "not a database, not at all").unwrap();
+    let out = edit(&marks);
+    assert!(!out.status.success() && !ran.exists(), "{out:?}");
+}
+
+#[test]
 fn a_tmux_conf_with_an_error_is_said_when_the_server_starts_too() {
     let Some(t) = TestEnv::new("coldconf") else {
         return;

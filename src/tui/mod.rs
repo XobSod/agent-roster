@@ -834,13 +834,10 @@ fn edit_config(
     roster: &mut Roster,
     app: &mut App,
 ) -> Result<Result<String>> {
-    let file = roster.paths.config_file();
-    if !file.exists()
-        && let Err(e) =
-            crate::settings::write_file(&file, &crate::settings::template(&roster.settings()))
-    {
-        return Ok(Err(e));
-    }
+    let file = match roster.config_file_to_edit() {
+        Ok((file, _)) => file,
+        Err(e) => return Ok(Err(e)),
+    };
     Ok(
         match in_terminal(terminal, || crate::util::run_editor(&file))? {
             Err(e) => Err(e),

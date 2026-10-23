@@ -137,6 +137,7 @@ roster config                           # every setting: its value, yours or the
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
 roster config unset fit_preview         # back to its default
 roster config --defaults                # a config.toml with every setting, commented out
+roster config --edit                    # config.toml in $EDITOR (from those defaults if there's none)
 ```
 
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`

@@ -361,9 +361,20 @@ keys, `PgUp`/`PgDn`, or `Ctrl+O` for the transcript, which scrolls like `less`
 conversation into tmux's history, for copy mode. Its docs say the mouse wheel needs
 tmux's mouse mode: `set -g mouse on` in roster's `tmux.conf`.
 
-pi draws full screen by default, the same way. For copy mode, run it on the normal
-screen instead: `args = ["--tui-mode", "regular"]` under `[agents.pi]` in
-`config.toml`, from its next start.
+pi and Codex draw full screen by default, the same way. For copy mode, run them on
+the normal screen instead, from their next start, in `config.toml`:
+
+```toml
+[agents.pi]
+args = ["--tui-mode", "regular"]
+
+[agents.codex]
+args = ["--no-alt-screen"]
+```
+
+Codex then writes each message into tmux's history once it's finished; the one being
+written, and the prompt, stay below until then. `alternate_screen = "never"` under
+`[tui]` in Codex's own `~/.codex/config.toml` does the same outside roster too.
 
 ## Inside your own tmux
 

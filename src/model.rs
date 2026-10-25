@@ -277,9 +277,13 @@ impl Session {
             .or_else(|| self.model.clone())
     }
 
-    /// The effort to show: what the agent runs with, else what was asked for.
+    /// The effort to show: what the agent runs with, reported or asked for at
+    /// its start. One started on its default runs on it whatever an edit says
+    /// meanwhile (codex doesn't say which); stopped, it's what starts next.
     pub fn effort_label(&self) -> Option<String> {
-        self.running_effort.clone().or_else(|| self.effort.clone())
+        self.running_effort
+            .clone()
+            .or_else(|| self.effort.clone().filter(|_| self.state == State::Stopped))
     }
 
     /// The title: yours if you set one, else the agent's.
@@ -629,6 +633,21 @@ pub mod tests {
         s.effort = Some("low".into());
         assert_eq!(s.model_label().as_deref(), Some("Opus 5.5 (1M)"));
         assert_eq!(s.effort_label().as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn an_effort_edited_shows_from_the_next_start() {
+        // Started on its agent's default, which it doesn't report (codex).
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.effort = Some("low".into());
+        assert_eq!(s.effort_label(), None);
+        s.state = State::Stopped;
+        assert_eq!(s.effort_label().as_deref(), Some("low"));
+        // Started with it.
+        s.running_effort = Some("low".into());
+        s.state = State::Working;
+        assert_eq!(s.effort_label().as_deref(), Some("low"));
     }
 
     #[test]

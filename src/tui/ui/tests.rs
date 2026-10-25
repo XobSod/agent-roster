@@ -34,6 +34,8 @@ fn app() -> App {
     a.unread = true;
     a.model = Some("opus".into());
     a.effort = Some("high".into());
+    // Started with it, as a launch records.
+    a.running_effort = a.effort.clone();
     a.state_since = Some(now - 120_000);
     let mut b = session("b1");
     b.created_at = now - 2 * 86_400_000;
@@ -596,6 +598,8 @@ fn details_name_what_the_mark_doesnt_say() {
     let mut s = session("a1");
     s.model = Some("opus".into());
     s.effort = Some("high".into());
+    // Started with it, as a launch records.
+    s.running_effort = s.effort.clone();
     // A made-up name only repeats the type; a chosen one says something.
     s.name = "claude-1".into();
     assert_eq!(text(&s), "✱ opus high");
@@ -608,7 +612,7 @@ fn details_name_what_the_mark_doesnt_say() {
     assert_eq!(text(&s), "π MyName · opus high");
     // The generic mark doesn't say which agent it is: its type does.
     s.agent = "aider".into();
-    (s.model, s.effort) = (None, None);
+    (s.model, s.effort, s.running_effort) = (None, None, None);
     s.name = "aider-1".into();
     assert_eq!(text(&s), "◇ aider");
     s.name = "reviewer".into();

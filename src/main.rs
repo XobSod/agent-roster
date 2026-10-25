@@ -630,17 +630,19 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             model,
             effort,
         } => {
-            let s = r.resolve(&session, false)?;
+            let before = r.resolve(&session, false)?;
             // Only what's given changes: "" for the title follows the agent's.
             let s = r.update_session(
-                &s.id,
+                &before.id,
                 name.as_deref(),
                 title.map(Some),
                 setting(model),
                 setting(effort),
             )?;
             println!("Updated {}", s.label());
-            if s.state != State::Stopped {
+            // A running agent goes on with what it started with.
+            let restart = (&s.model, &s.effort) != (&before.model, &before.effort);
+            if restart && s.state != State::Stopped {
                 println!(
                     "The agent picks up a new model or effort on its next start (`roster restart {}`)",
                     s.label()

@@ -570,6 +570,25 @@ fn pi_conversations_can_be_adopted() {
         screen.contains(&format!("--fork pc-two --session-id {copy}")),
         "{screen}"
     );
+
+    // Outside any project: the project made for it runs pi, not the default.
+    let elsewhere = t.path("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let folder = t.pi_dir().join("sessions").join("--elsewhere--");
+    fs::create_dir_all(&folder).unwrap();
+    let lines = [
+        serde_json::json!({"type": "session", "version": 3, "id": "pc-three", "cwd": elsewhere}),
+        serde_json::json!({"type": "message", "id": "a", "message": {"role": "user", "content": [{"type": "text", "text": "plan it"}]}}),
+    ];
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    fs::write(folder.join("2026-10-22T07-00-00-000Z_pc-three.jsonl"), text).unwrap();
+    t.ok(&["adopt", "pc-three", "--name", "c"]);
+    let projects = t.ok(&["project", "ls"]);
+    let made = projects
+        .lines()
+        .find(|l| l.starts_with("elsewhere"))
+        .unwrap();
+    assert!(made.trim_end().ends_with("pi"), "{projects}");
 }
 
 /// Stand-in for codex, as codex's source says it behaves: its hooks report
@@ -859,11 +878,11 @@ fn codex_conversations_can_be_adopted() {
     // A copy forks the original, and does again until codex has reported the
     // copy's own conversation, which it resumes from then on.
     t.ok(&["adopt", two, "--fork", "--name", "b"]);
-    // Roster's own id for it, until codex reports the copy's.
-    let made_up = t.session("b", false).unwrap()["conversation_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // No id for it until codex reports the copy's: codex names it.
+    assert_eq!(
+        t.session("b", false).unwrap()["conversation_id"],
+        Value::Null
+    );
     t.wait_for("the fork", |t| {
         t.ok(&["show", "b"]).contains(&format!("fork {two}"))
     });
@@ -873,13 +892,13 @@ fn codex_conversations_can_be_adopted() {
     });
     type_into(&t, "b", "carry on");
     t.wait_for("the copy's own conversation", |t| {
-        t.session("b", false).unwrap()["conversation_id"] != made_up.as_str()
+        t.session("b", false).unwrap()["conversation_id"].is_string()
     });
     let copy = t.session("b", false).unwrap()["conversation_id"]
         .as_str()
         .unwrap()
         .to_string();
-    assert!(copy != two && copy != made_up, "{copy}");
+    assert!(copy != two, "{copy}");
     t.ok(&["restart", "--yes", "b"]);
     t.wait_for("the copy resumed", |t| {
         t.ok(&["show", "b"]).contains(&format!("resume {copy}"))
@@ -1445,6 +1464,9 @@ fn projects_and_sessions_can_be_edited() {
         (s["model"].clone(), s["effort"].as_str()),
         (Value::Null, Some("max"))
     );
+    // A title alone needs no restart; a model does.
+    let out = t.ok(&["edit", "s", "--title", "Mine"]);
+    assert!(!out.contains("next start"), "{out}");
     let out = t.ok(&["edit", "s", "--name", "t", "--model", "haiku"]);
     assert!(out.contains("next start"), "{out}");
     let s = t.session("t", false).unwrap();

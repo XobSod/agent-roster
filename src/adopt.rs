@@ -77,13 +77,18 @@ impl Roster {
                 crate::util::capitalize(&c.agent)
             );
         }
+        // A project made for it runs its agent, unless that's the default.
+        let made_for_it = || Defaults {
+            agent: (c.agent != self.config.default_agent()).then(|| c.agent.clone()),
+            ..Defaults::default()
+        };
         let project = match (&req.project, &found.project) {
             (Some(name), _) => match self.db.project(name)? {
                 Some(p) => p,
-                None => self.add_project(name, &c.cwd, Defaults::default())?,
+                None => self.add_project(name, &c.cwd, made_for_it())?,
             },
             (None, Some(p)) => p.clone(),
-            (None, None) => self.add_project(&found.new_project, &c.cwd, Defaults::default())?,
+            (None, None) => self.add_project(&found.new_project, &c.cwd, made_for_it())?,
         };
         // The defaults: the project's model and effort, which are for its
         // agent (the agent's in config.toml, else its own, after those).
@@ -120,15 +125,20 @@ impl Roster {
             effort: pick(req.effort, ran_on.1, defaults.1),
             prompt: None,
         };
+        // A copy's conversation is its agent's to name as it starts: Claude
+        // and pi are given an id, codex reports its own.
         let fork_from = req.fork.then(|| c.id.clone());
         let (conversation_id, transcript_path) = if req.fork {
-            (uuid::Uuid::new_v4().to_string(), None)
+            (None, None)
         } else {
-            (c.id.clone(), Some(c.path.to_string_lossy().into_owned()))
+            (
+                Some(c.id.clone()),
+                Some(c.path.to_string_lossy().into_owned()),
+            )
         };
         self.create_session(request, |s| {
             s.workdir = c.cwd.clone();
-            s.conversation_id = Some(conversation_id);
+            s.conversation_id = conversation_id;
             s.transcript_path = transcript_path;
             s.fork_from = fork_from;
             s.title = c.title.clone();

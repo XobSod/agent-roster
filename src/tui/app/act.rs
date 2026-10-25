@@ -141,12 +141,39 @@ impl App {
         None
     }
 
-    /// In the usage view: Enter asks the agents again.
+    /// In the usage view: left and right go along its tabs (the limits, then
+    /// what was spent in each period), Enter asks the agents again (the
+    /// limits) or reads their files again (what they spent), up and down
+    /// scroll.
     fn act_in_usage_view(&mut self, action: Action) -> Option<Op> {
+        use crate::tokens::Period;
         match action {
+            Action::Collapse | Action::Expand => {
+                let tabs: Vec<Option<Period>> =
+                    std::iter::once(None).chain(Period::ALL.map(Some)).collect();
+                let at = tabs
+                    .iter()
+                    .position(|t| *t == self.usage_period)
+                    .unwrap_or(0);
+                let to = match action {
+                    Action::Collapse => at.saturating_sub(1),
+                    _ => (at + 1).min(tabs.len() - 1),
+                };
+                if to != at {
+                    self.usage_period = tabs[to];
+                    self.usage_scroll = 0;
+                    if self.usage_period.is_none() {
+                        self.limits.want(false);
+                    }
+                }
+            }
+            Action::Confirm if self.usage_period.is_some() => self.tokens.want(),
             Action::Confirm if self.limits.asking() => self.flash("Asking them already"),
             Action::Confirm => self.limits.want(true),
-            Action::Up | Action::Down => {}
+            Action::Up => self.usage_scroll = self.usage_scroll.saturating_sub(1),
+            Action::Down => {
+                self.usage_scroll = (self.usage_scroll + 1).min(self.usage_scroll_max.get())
+            }
             _ => self.fail("This is the usage view: Esc goes back to the sessions"),
         }
         None

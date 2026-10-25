@@ -175,6 +175,14 @@ pub struct App {
     /// sidebar shows it (config.toml).
     pub limits: super::limits::Limits,
     pub sidebar_usage: bool,
+    /// What the agents spent, and the period the usage view shows of it
+    /// (None: the limits).
+    pub tokens: super::tokens::Tokens,
+    pub usage_period: Option<crate::tokens::Period>,
+    /// How far the usage view is scrolled, and how far it can be (as last
+    /// drawn).
+    pub usage_scroll: usize,
+    pub usage_scroll_max: Cell<usize>,
 }
 
 impl App {
@@ -223,6 +231,10 @@ impl App {
             notes: Default::default(),
             limits: Default::default(),
             sidebar_usage: true,
+            tokens: Default::default(),
+            usage_period: None,
+            usage_scroll: 0,
+            usage_scroll_max: Cell::new(0),
         }
     }
 
@@ -392,6 +404,7 @@ impl App {
             // The usage view asks again, unless it just did.
             if mode == Mode::Usage {
                 self.limits.want(false);
+                self.usage_scroll = 0;
             }
             self.mode = mode;
             self.report_scroll = 0;

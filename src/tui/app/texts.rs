@@ -36,7 +36,20 @@ impl App {
             }
             Mode::Server => self.labelled([(Action::Down, "scroll")]),
             Mode::Settings => self.settings_view_hints(),
-            Mode::Usage => self.labelled([(Action::Confirm, "ask again")]),
+            Mode::Usage => {
+                let enter = match self.usage_period {
+                    None => "ask again",
+                    Some(_) => "read again",
+                };
+                let mut hints = self.labelled([(Action::Confirm, enter)]);
+                if let (Some(left), Some(right)) = (
+                    self.keymap.label(Action::Collapse),
+                    self.keymap.label(Action::Expand),
+                ) {
+                    hints.push((format!("{left}/{right}"), "tabs"));
+                }
+                hints
+            }
         };
         // Then the same everywhere: Esc, help, and in the session list quit (in a
         // view the quit key goes back, like Esc).

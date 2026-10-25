@@ -38,6 +38,7 @@ use serde::{Deserialize, Deserializer};
 use crate::config::Config;
 use crate::model::{QUIET_MS, Session};
 use crate::stats::Transcript;
+use crate::tokens::Spending;
 use crate::usage::Usage;
 
 pub use claude::CLAUDE;
@@ -171,6 +172,18 @@ pub trait Adapter: Sync {
     /// A reader for the transcript at `path` (as its reports named it), which
     /// reads nothing yet; None if it keeps none (`keeps_transcript`).
     fn transcript(&self, _path: &Path) -> Option<Box<dyn Transcript>> {
+        None
+    }
+
+    /// Every file it keeps what it spent in (its conversations', started in
+    /// roster or not), each with the id of the conversation it's of.
+    fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
+        Vec::new()
+    }
+
+    /// A reader of what the file at `path` (one of `token_files`) says it
+    /// spent, call by call, which reads nothing yet.
+    fn tokens(&self, _path: &Path) -> Option<Box<dyn Spending>> {
         None
     }
 }

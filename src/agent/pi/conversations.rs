@@ -36,7 +36,7 @@ fn home(path: PathBuf) -> PathBuf {
 }
 
 /// The session files in `sessions`: in its directories, or in it.
-fn session_files(sessions: &Path) -> impl Iterator<Item = PathBuf> {
+pub(super) fn session_files(sessions: &Path) -> impl Iterator<Item = PathBuf> {
     fs::read_dir(sessions)
         .into_iter()
         .flatten()
@@ -73,7 +73,7 @@ pub fn session_file(sessions: &Path, id: &str) -> Option<PathBuf> {
 }
 
 /// The id in a session file's name, after its timestamp.
-fn id_of(path: &Path) -> Option<&str> {
+pub(super) fn id_of(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
     Some(stem.split_once('_').map_or(stem, |(_, id)| id))
 }

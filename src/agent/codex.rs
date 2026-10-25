@@ -9,6 +9,7 @@
 
 pub mod conversations;
 mod limits;
+mod tokens;
 mod transcript;
 
 use anyhow::{Context as _, Result};
@@ -17,7 +18,8 @@ use serde_json::Value;
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Question, Report};
 use crate::config::Config;
 use crate::model::Session;
-use crate::stats::Transcript;
+use crate::stats::{Jsonl, Transcript};
+use crate::tokens::Spending;
 use crate::usage::Usage;
 use crate::util::sh_quote;
 use transcript::CodexTranscript;
@@ -219,6 +221,14 @@ impl Adapter for Codex {
 
     fn transcript(&self, path: &std::path::Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(CodexTranscript::new(path)))
+    }
+
+    fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
+        conversations::codex_dir().map_or_else(Vec::new, |dir| tokens::files(&dir))
+    }
+
+    fn tokens(&self, path: &std::path::Path) -> Option<Box<dyn Spending>> {
+        Some(Box::new(Jsonl::<tokens::ModelCalls>::new(path)))
     }
 
     /// `codex exec`: nothing kept (`--ephemeral`), nothing changed (a read-only

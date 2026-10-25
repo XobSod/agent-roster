@@ -3,6 +3,7 @@
 
 pub mod conversations;
 mod limits;
+mod tokens;
 mod transcript;
 
 use std::fs;
@@ -14,7 +15,8 @@ use serde_json::{Value, json};
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
 use crate::config::Config;
 use crate::model::Session;
-use crate::stats::Transcript;
+use crate::stats::{Jsonl, Transcript};
+use crate::tokens::Spending;
 use crate::usage::Usage;
 use crate::util::sh_quote;
 use transcript::ClaudeTranscript;
@@ -177,6 +179,14 @@ impl Adapter for Claude {
 
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(ClaudeTranscript::new(path)))
+    }
+
+    fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
+        conversations::claude_dir().map_or_else(Vec::new, |dir| tokens::files(&dir))
+    }
+
+    fn tokens(&self, path: &Path) -> Option<Box<dyn Spending>> {
+        Some(Box::new(Jsonl::<tokens::Replies>::new(path)))
     }
 
     /// `claude -p`: no tools, no settings (so no hooks), nothing saved; on

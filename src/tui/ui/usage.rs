@@ -1,7 +1,8 @@
-//! What the agents' accounts have used of their limits: the usage view, and
-//! the sidebar's line under the session list.
+//! What the agents' accounts have used of their limits, and what they spent:
+//! the usage view, and the sidebar's line under the session list.
 
 use super::*;
+use crate::tokens::{Counts, Period, Report, Spent, amount, dollars};
 use crate::tui::limits::STALE_MS;
 use crate::usage::{Pace, Usage, Window};
 
@@ -96,9 +97,8 @@ fn bar(window: &Window, width: usize, now: i64) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// Every agent that says what its account has used: its plan, then each
-/// window as a bar with its use, and when it starts over; what else it says;
-/// and why it couldn't be asked last time, if it couldn't.
+/// The usage view: its tabs, the limits and what was spent in each period,
+/// and the one chosen, scrolled as far as it goes.
 pub(super) fn draw_usage(f: &mut Frame, app: &App, area: Rect) {
     let now = now_ms();
     let inner = Rect {
@@ -112,34 +112,102 @@ pub(super) fn draw_usage(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Min(0),
     ])
     .areas(inner);
-    let state = if app.limits.asking() {
-        Span::styled("asking…", Style::new().fg(MUTED))
-    } else {
-        match app
-            .limits
-            .agents
-            .iter()
-            .filter_map(|s| s.usage.as_ref())
-            .map(|u| u.at)
-            .max()
-        {
-            Some(at) => Span::styled(
-                format!("as of {}", crate::util::local_when(at, now)),
-                Style::new().fg(MUTED),
-            ),
-            None => Span::raw(""),
-        }
+    let state = match app.usage_period {
+        None => limits_state(app, now),
+        Some(_) if app.tokens.reading() => Span::styled("reading…", Style::new().fg(MUTED)),
+        Some(_) => Span::raw(""),
     };
-    let title = vec![
+    let mut title = vec![
         "roster".bold(),
-        Span::styled("  usage", Style::new().fg(MUTED)),
+        Span::styled("  usage   ", Style::new().fg(MUTED)),
     ];
+    title.extend(tabs(app.usage_period));
     f.render_widget(
         Paragraph::new(Line::from(fit(head.width as usize, title, vec![state]))),
         head,
     );
-
     let width = body.width as usize;
+    let lines = match app.usage_period {
+        None => limits_lines(app, width, now),
+        Some(period) => {
+            let mut lines = match app.tokens.report(period) {
+                Some(report) => spent_lines(report, period, width),
+                None => vec![Line::styled(
+                    "Reading the agents' conversations…",
+                    Style::new().fg(MUTED),
+                )],
+            };
+            if let Some(error) = &app.tokens.error {
+                lines.insert(0, Line::default());
+                lines.insert(
+                    0,
+                    Line::styled(
+                        format!("can't read them now: {error}"),
+                        Style::new().fg(ERROR),
+                    ),
+                );
+            }
+            lines
+        }
+    };
+    let max = lines.len().saturating_sub(body.height as usize);
+    app.usage_scroll_max.set(max);
+    let scroll = app.usage_scroll.min(max) as u16;
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
+}
+
+/// The view's tabs, the one shown standing out: `Limits │ Tokens 24h 7 days …`.
+fn tabs(shown: Option<Period>) -> Vec<Span<'static>> {
+    let tab = |label: &'static str, on: bool| {
+        if on {
+            Span::styled(
+                label,
+                Style::new()
+                    .fg(ACCENT)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )
+        } else {
+            Span::styled(label, Style::new().fg(MUTED))
+        }
+    };
+    let mut spans = vec![
+        tab("Limits", shown.is_none()),
+        Span::styled("  │  Tokens  ", Style::new().fg(FAINT)),
+    ];
+    for (i, period) in Period::ALL.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(tab(period.label(), shown == Some(period)));
+    }
+    spans
+}
+
+/// When the limits were last said, or that they're being asked.
+fn limits_state(app: &App, now: i64) -> Span<'static> {
+    if app.limits.asking() {
+        return Span::styled("asking…", Style::new().fg(MUTED));
+    }
+    match app
+        .limits
+        .agents
+        .iter()
+        .filter_map(|s| s.usage.as_ref())
+        .map(|u| u.at)
+        .max()
+    {
+        Some(at) => Span::styled(
+            format!("as of {}", crate::util::local_when(at, now)),
+            Style::new().fg(MUTED),
+        ),
+        None => Span::raw(""),
+    }
+}
+
+/// Every agent that says what its account has used: its plan, then each
+/// window as a bar with its use, and when it starts over; what else it says;
+/// and why it couldn't be asked last time, if it couldn't.
+fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     if app.limits.agents.is_empty() {
         let text = if app.limits.asking() || app.limits.asked().is_none() {
@@ -223,7 +291,251 @@ pub(super) fn draw_usage(f: &mut Frame, app: &App, area: Rect) {
             ));
         }
     }
-    f.render_widget(Paragraph::new(lines), body);
+    lines
+}
+
+/// The kinds of tokens, each in its colour: what's sent beyond the cache,
+/// read from it, written to it, and the output.
+fn kinds(c: &Counts) -> [(&'static str, u64, ratatui::style::Color); 4] {
+    [
+        ("input", c.input, WORKING),
+        ("cache read", c.cache_read, MUTED),
+        ("cache write", c.cache_write, INPUT),
+        ("output", c.output, UNREAD),
+    ]
+}
+
+/// The kinds of tokens as one bar `width` long, each its share of it, a kind
+/// with any at least a cell.
+fn kinds_bar(c: &Counts, width: usize) -> Vec<Span<'static>> {
+    let kinds = kinds(c);
+    let total = c.total();
+    if total == 0 || width == 0 {
+        return Vec::new();
+    }
+    let mut cells: Vec<usize> = kinds
+        .iter()
+        .map(|(_, n, _)| match n {
+            0 => 0,
+            n => ((*n as f64 / total as f64 * width as f64).round() as usize).max(1),
+        })
+        .collect();
+    // The largest takes up what the others' rounding left over, or gives it.
+    let largest = (0..cells.len()).max_by_key(|i| cells[*i]).unwrap_or(0);
+    let others: usize = cells.iter().sum::<usize>() - cells[largest];
+    cells[largest] = width.saturating_sub(others).max(1);
+    kinds
+        .iter()
+        .zip(cells)
+        .filter(|(_, n)| *n > 0)
+        .map(|((_, _, color), n)| Span::styled("█".repeat(n), Style::new().fg(*color)))
+        .collect()
+}
+
+/// What was spent in a stretch after another, as bars eighths tall, all to
+/// the scale of `tallest`: blank for none, the least bar for a little.
+fn chart(values: &[u64], tallest: u64) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    values
+        .iter()
+        .map(|&v| match v {
+            0 => ' ',
+            v => {
+                let eighths = (v as f64 / tallest.max(1) as f64 * 8.0).ceil() as usize;
+                BARS[eighths.clamp(1, 8) - 1]
+            }
+        })
+        .collect()
+}
+
+/// What was spent in `period`: in all, of each kind, by each agent (with a
+/// chart of when), and by each model.
+fn spent_lines(report: &Report, period: Period, width: usize) -> Vec<Line<'static>> {
+    let muted = Style::new().fg(MUTED);
+    let faint = Style::new().fg(FAINT);
+    let total = &report.total;
+    let all = total.tokens.total();
+    if all == 0 {
+        let span = match period {
+            Period::Day => "24 hours".to_string(),
+            p => p.label().to_string(),
+        };
+        return vec![Line::styled(
+            format!("Nothing spent in the last {span}."),
+            muted,
+        )];
+    }
+    let cost = |s: &Spent| {
+        if s.unpriced() {
+            "unpriced".to_string()
+        } else {
+            dollars(s.cost)
+        }
+    };
+    let mut lines = Vec::new();
+    let sessions = match report.sessions {
+        1 => "1 session".to_string(),
+        n => format!("{n} sessions"),
+    };
+    let summary = vec![
+        Span::styled(amount(all), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" tokens · {sessions} · "), muted),
+        Span::styled(
+            dollars(total.cost),
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" at API prices", muted),
+    ];
+    let saved = vec![Span::styled(
+        format!("the cache saved {}", dollars(total.saved)),
+        faint,
+    )];
+    lines.push(Line::from(fit(width, summary, saved)));
+    lines.push(Line::default());
+    lines.push(Line::from(kinds_bar(&total.tokens, width.min(72))));
+    let mut legend = Vec::new();
+    for (i, (name, n, color)) in kinds(&total.tokens).into_iter().enumerate() {
+        if i > 0 {
+            legend.push(Span::raw("  "));
+        }
+        legend.push(Span::styled("■ ", Style::new().fg(color)));
+        legend.push(Span::styled(format!("{name} "), muted));
+        legend.push(Span::raw(amount(n)));
+    }
+    lines.push(Line::from(fit(width, legend, Vec::new())));
+    if total.unpriced > 0 {
+        lines.push(Line::styled(
+            format!(
+                "{} of them are of models without a known price, not in the cost.",
+                amount(total.unpriced)
+            ),
+            faint,
+        ));
+    }
+
+    // Each agent: its conversations, tokens, share, cost, and when.
+    lines.push(Line::default());
+    let name_w = report
+        .agents
+        .iter()
+        .map(|a| a.agent.width())
+        .max()
+        .unwrap_or(0);
+    let sessions_w = report
+        .agents
+        .iter()
+        .map(|a| a.sessions.to_string().len())
+        .max()
+        .unwrap_or(1);
+    // Mark, name, sessions, tokens, share, cost; then the chart.
+    let row_w = 2 + name_w + 2 + sessions_w + 9 + 2 + 6 + 2 + 6 + 2 + 9;
+    let (stretches, each) = period.stretches();
+    let room = width.saturating_sub(row_w + 3).min(stretches);
+    let tallest = report
+        .agents
+        .iter()
+        .flat_map(|a| a.chart.iter().copied())
+        .max()
+        .unwrap_or(0);
+    for a in &report.agents {
+        let share = a.spent.tokens.total() as f64 * 100.0 / all as f64;
+        let mut spans = vec![
+            glyph(&a.agent),
+            Span::raw(" "),
+            Span::styled(
+                pad(&crate::util::capitalize(&a.agent), name_w),
+                Style::new().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {:>sessions_w$} {}",
+                    a.sessions,
+                    if a.sessions == 1 {
+                        "session "
+                    } else {
+                        "sessions"
+                    }
+                ),
+                muted,
+            ),
+            Span::raw(format!("  {:>6}", amount(a.spent.tokens.total()))),
+            Span::styled(format!("  {share:>5.1}%"), muted),
+            Span::raw(format!("  {:>9}", cost(&a.spent))),
+        ];
+        if room >= 8 {
+            let color = crate::agent::adapter(&a.agent)
+                .mark()
+                .and_then(|m| m.rgb)
+                .map_or(ACCENT, |(r, g, b)| ratatui::style::Color::Rgb(r, g, b));
+            let shown = &a.chart[a.chart.len().saturating_sub(room)..];
+            spans.push(Span::raw("   "));
+            spans.push(Span::styled(chart(shown, tallest), Style::new().fg(color)));
+        }
+        lines.push(Line::from(spans));
+    }
+    if room >= 8 {
+        let scale = format!("each bar is {each}, the tallest {}", amount(tallest));
+        let indent = (row_w + 3 + room).saturating_sub(scale.width());
+        lines.push(Line::styled(
+            format!("{}{scale}", " ".repeat(indent)),
+            faint,
+        ));
+    }
+
+    // Each model: its tokens of each kind, and cost. Narrow, input and cache
+    // write go.
+    lines.push(Line::default());
+    let all_columns = width >= 2 + 16 + 8 + 12 + 13 + 9 + 10;
+    let columns: Vec<(&str, usize)> = [
+        ("Input", 8, true),
+        ("Cache read", 12, false),
+        ("Cache write", 13, true),
+        ("Output", 9, false),
+        ("Cost", 10, false),
+    ]
+    .into_iter()
+    .filter(|(_, _, droppable)| all_columns || !droppable)
+    .map(|(name, w, _)| (name, w))
+    .collect();
+    let longest = report
+        .models
+        .iter()
+        .map(|m| m.model.width())
+        .max()
+        .unwrap_or(0);
+    let model_w = width
+        .saturating_sub(2 + columns.iter().map(|c| c.1).sum::<usize>())
+        .clamp(8, longest.max(5) + 2);
+    let mut header = format!("  {}", pad("Model", model_w));
+    for (name, w) in &columns {
+        header.push_str(&format!("{name:>w$}"));
+    }
+    lines.push(Line::styled(header, muted));
+    for m in &report.models {
+        let t = &m.spent.tokens;
+        let figures = |name: &str| match name {
+            "Input" => amount(t.input),
+            "Cache read" => amount(t.cache_read),
+            "Cache write" => amount(t.cache_write),
+            "Output" => amount(t.output),
+            _ => cost(&m.spent),
+        };
+        let mut spans = vec![
+            glyph(&m.agent),
+            Span::raw(" "),
+            Span::raw(pad(&m.model, model_w)),
+        ];
+        for (name, w) in &columns {
+            let style = if *name == "Cost" && m.spent.unpriced() {
+                faint
+            } else {
+                Style::new()
+            };
+            spans.push(Span::styled(format!("{:>w$}", figures(name)), style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -232,6 +544,27 @@ mod tests {
 
     fn text(spans: &[Span]) -> String {
         spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_kinds_share_the_bar_each_with_some_at_least_a_cell() {
+        let counts = Counts {
+            input: 5,
+            cache_read: 900,
+            cache_write: 0,
+            cache_write_hour: 0,
+            output: 95,
+        };
+        let bar = kinds_bar(&counts, 20);
+        let cells: Vec<usize> = bar.iter().map(|s| s.content.chars().count()).collect();
+        assert_eq!(cells, [1, 17, 2]);
+        assert!(kinds_bar(&Counts::default(), 20).is_empty());
+    }
+
+    #[test]
+    fn a_chart_is_to_the_tallests_scale_and_shows_a_little() {
+        assert_eq!(chart(&[0, 1, 50, 100], 100), " ▁▄█");
+        assert_eq!(chart(&[0, 0], 0), "  ");
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod settings;
 mod stats;
 mod title;
 mod tmux;
+mod tokens;
 mod tui;
 mod usage;
 mod util;
@@ -34,7 +35,8 @@ use adopt::{Adopt, RunOn};
 use engine::{Defaults, NewSession, Roster};
 use model::{Session, State};
 use print::{
-    doctor_line, events, list_adoptable, list_projects, list_sessions, print_info, print_usage,
+    doctor_line, events, list_adoptable, list_projects, list_sessions, print_info, print_tokens,
+    print_usage,
 };
 
 #[derive(Parser)]
@@ -232,6 +234,14 @@ enum Cmd {
     },
     /// What your Claude and codex accounts have used of their limits: each window, and when it starts over
     Usage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What the agents spent: tokens of each kind and their cost at API prices, by agent and model, from every conversation they keep on this machine
+    Tokens {
+        /// How many days back, up to now
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(i64).range(1..))]
+        days: i64,
         #[arg(long)]
         json: bool,
     },
@@ -844,6 +854,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             }
         }
         Cmd::Usage { json } => print_usage(r, json)?,
+        Cmd::Tokens { days, json } => print_tokens(r, days, json)?,
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } => {}

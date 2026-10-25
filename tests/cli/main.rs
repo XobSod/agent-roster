@@ -11,4 +11,5 @@ mod config;
 mod generic;
 mod pi;
 mod sessions;
+mod tokens;
 mod usage;

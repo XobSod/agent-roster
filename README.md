@@ -119,6 +119,16 @@ to renew, so once it expires roster waits for Claude to), and Codex's own server
 the view opens; `Enter` there asks again. Codex also writes them into its rollouts as it
 works, which roster reads as they change. pi and other agents say nothing of the kind.
 
+To the right of the limits (`h`/`l` move along the tabs), what the agents spent in the
+last 24 hours, 7, 30 or 90 days, from every conversation they keep on this machine,
+started in roster or not: tokens of each kind (input, read from the cache, written to
+it, output) and what they'd cost at the API's prices, by agent, with a chart of when,
+and by model. Prices are roster's own table, from pi's model catalog; a model it has no
+price for shows as unpriced, and pi's own costs count as pi says them. Roster keeps it in
+its database, by the hour, so it stays once a conversation is gone: Claude deletes its
+after 30 days (`cleanupPeriodDays`), and you may delete them yourself.
+It goes back as far as the agents' files did when roster first read them.
+
 Everything is also available from the CLI:
 
 ```sh
@@ -147,6 +157,7 @@ roster archive api && roster restore api   # archived sessions keep their conver
 roster rm api                           # delete an archived session for good (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster usage                            # what your Claude and Codex accounts have used of their limits
+roster tokens --days 7                  # what the agents spent: tokens by kind, and their cost at API prices
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
 roster config                           # every setting: its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept

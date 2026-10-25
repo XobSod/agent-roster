@@ -267,6 +267,111 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What the agents spent in the last `days`, from every conversation they
+/// keep on this machine and what roster kept of those gone: tokens of each
+/// kind, and their cost at the API's prices, in all, by agent and by model.
+/// The files changed since are read first.
+pub fn print_tokens(r: &Roster, days: i64, json: bool) -> Result<()> {
+    use crate::tokens::{Report, Scan, Spent, amount, dollars};
+    Scan::default().update(&r.db)?;
+    let now = util::now_ms();
+    let from = now - days * 86_400_000;
+    let report = Report::of(&r.db.spent_hours(from, now)?, from, now, 0);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    let span = if days == 1 {
+        "the last 24h".to_string()
+    } else {
+        format!("the last {days} days")
+    };
+    let total = &report.total;
+    if total.tokens.total() == 0 {
+        println!("Nothing spent in {span}.");
+        return Ok(());
+    }
+    let cost = |s: &Spent| {
+        if s.unpriced() {
+            "unpriced".to_string()
+        } else {
+            dollars(s.cost)
+        }
+    };
+    println!(
+        "In {span}: {} tokens in {} sessions, {} at API prices (the cache saved {})",
+        amount(total.tokens.total()),
+        report.sessions,
+        dollars(total.cost),
+        dollars(total.saved)
+    );
+    let t = &total.tokens;
+    println!(
+        "input {} · cache read {} · cache write {} · output {}",
+        amount(t.input),
+        amount(t.cache_read),
+        amount(t.cache_write),
+        amount(t.output)
+    );
+    if total.unpriced > 0 {
+        println!(
+            "{} tokens are of models without a known price, not in the cost.",
+            amount(total.unpriced)
+        );
+    }
+    println!();
+    let share = |s: &Spent| {
+        format!(
+            "{:.1}%",
+            s.tokens.total() as f64 * 100.0 / t.total().max(1) as f64
+        )
+    };
+    let rows: Vec<Vec<String>> = report
+        .agents
+        .iter()
+        .map(|a| {
+            vec![
+                a.agent.clone(),
+                a.sessions.to_string(),
+                amount(a.spent.tokens.total()),
+                share(&a.spent),
+                cost(&a.spent),
+            ]
+        })
+        .collect();
+    print_table(&["AGENT", "SESSIONS", "TOKENS", "SHARE", "COST"], &rows);
+    println!();
+    let rows: Vec<Vec<String>> = report
+        .models
+        .iter()
+        .map(|m| {
+            let t = &m.spent.tokens;
+            vec![
+                m.model.clone(),
+                m.agent.clone(),
+                amount(t.input),
+                amount(t.cache_read),
+                amount(t.cache_write),
+                amount(t.output),
+                cost(&m.spent),
+            ]
+        })
+        .collect();
+    print_table(
+        &[
+            "MODEL",
+            "AGENT",
+            "INPUT",
+            "CACHE READ",
+            "CACHE WRITE",
+            "OUTPUT",
+            "COST",
+        ],
+        &rows,
+    );
+    Ok(())
+}
+
 pub fn list_sessions(
     r: &Roster,
     query: &str,

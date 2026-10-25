@@ -4,6 +4,7 @@
 //! doesn't do goes into that extension, and only that.
 
 pub mod conversations;
+mod tokens;
 mod transcript;
 
 use std::fs;
@@ -16,7 +17,8 @@ use serde_json::Value;
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Question, Report};
 use crate::config::Config;
 use crate::model::Session;
-use crate::stats::Transcript;
+use crate::stats::{Jsonl, Transcript};
+use crate::tokens::Spending;
 use transcript::PiTranscript;
 
 pub const PI: &str = "pi";
@@ -122,6 +124,14 @@ impl Adapter for Pi {
 
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(PiTranscript::new(path)))
+    }
+
+    fn token_files(&self) -> Vec<(PathBuf, String)> {
+        conversations::sessions_dir().map_or_else(Vec::new, |dir| tokens::files(&dir))
+    }
+
+    fn tokens(&self, path: &Path) -> Option<Box<dyn Spending>> {
+        Some(Box::new(Jsonl::<tokens::Replies>::new(path)))
     }
 
     /// `pi -p`, with none of the user's extensions, tools or context files and

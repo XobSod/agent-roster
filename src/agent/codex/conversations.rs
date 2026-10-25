@@ -46,7 +46,7 @@ pub fn conversations(dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Conversat
 }
 
 /// The rollout files in `dir`, however deep codex has filed them.
-fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
+pub(super) fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
     if depth > DEPTH {
         return Vec::new();
     }
@@ -74,7 +74,7 @@ fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 /// The conversation id in a rollout's name, after its timestamp. Codex writes
 /// a UUID there, and its `id`s are UUIDs, so it's the file's last 36
 /// characters; a name that isn't that says nothing.
-fn id_of(path: &Path) -> Option<&str> {
+pub(super) fn id_of(path: &Path) -> Option<&str> {
     let stem = path.file_stem()?.to_str()?;
     if stem.len() < "rollout-".len() + 37 {
         return None;

@@ -1022,3 +1022,60 @@ fn the_usage_view_shows_each_window_and_why_an_agent_couldnt_say() {
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.limits.due(false));
 }
+
+#[test]
+fn the_usage_views_tabs_show_what_was_spent_in_each_period() {
+    use crate::tokens::tests::{call, hours_of};
+    use crate::tokens::{Period, Report};
+    let mut app = app();
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    // Right of the limits, what was spent in the last day.
+    app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert_eq!(app.usage_period, Some(Period::Day));
+    let screen = render(&app, 100, 30);
+    assert!(
+        screen.contains("Reading the agents' conversations…"),
+        "{screen}"
+    );
+    let now = now_ms();
+    let hours = hours_of(vec![
+        (
+            "claude",
+            "a",
+            vec![call(now - 1000, "claude-opus-5-5", 100, 1_000_000, 2_000)],
+        ),
+        (
+            "pi",
+            "b",
+            vec![call(now - 2000, "vllm/qwen3", 50_000, 0, 500)],
+        ),
+    ]);
+    app.tokens
+        .summed(Period::Day, Report::of(&hours, now - 86_400_000, now, 24));
+    let screen = render(&app, 100, 30);
+    for shown in [
+        "Limits  │  Tokens  24h  7 days",
+        // $4 × 0.0001 + $0.20 × 1 + $20 × 0.002.
+        "1.05M tokens · 2 sessions · $0.24 at API prices",
+        "the cache saved $3.80",
+        "■ input 50.1k  ■ cache read 1.00M  ■ cache write 0  ■ output 2.50k",
+        "50.5k of them are of models without a known price",
+        "✱ Claude  1 session    1.00M   95.2%      $0.24",
+        "unpriced",
+        "each bar is an hour, the tallest 1.00M",
+        "Model",
+        "claude-opus-5-5",
+        "vllm/qwen3",
+        "Enter read again   h/l tabs",
+    ] {
+        assert!(screen.contains(shown), "{shown:?} in\n{screen}");
+    }
+    // Enter reads again; back left, the limits.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.tokens.due(true));
+    app.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    assert_eq!(app.usage_period, None);
+    let screen = render(&app, 100, 30);
+    assert!(screen.contains("Enter ask again"), "{screen}");
+}

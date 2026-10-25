@@ -11,6 +11,7 @@ mod note;
 mod op;
 mod picker;
 mod theme;
+mod tokens;
 mod ui;
 
 pub use ui::status_line;
@@ -176,6 +177,16 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             app.limits.ask(roster.usage_reader());
         }
         app.limits.arrived();
+        // What the agents spent, read in the background while a period of
+        // it shows.
+        let period = app.usage_period.filter(|_| app.mode == Mode::Usage);
+        if app.tokens.due(period.is_some()) {
+            app.tokens.read(tokens::scan(roster.paths.db()));
+        }
+        app.tokens.arrived();
+        if let Some(period) = period {
+            app.tokens.sum(period, &roster.db);
+        }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
         if let Some(editor) = app.note.as_mut() {
@@ -200,7 +211,11 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
         // A title or a transcript coming is looked for more often than a tick.
-        if !app.titling.is_empty() || !app.preview.reading.ids.is_empty() || app.limits.asking() {
+        if !app.titling.is_empty()
+            || !app.preview.reading.ids.is_empty()
+            || app.limits.asking()
+            || app.tokens.reading()
+        {
             wait = wait.min(Duration::from_millis(200));
         }
         if event::poll(wait)?

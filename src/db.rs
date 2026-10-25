@@ -1,5 +1,6 @@
-//! The SQLite state database: projects, sessions and reported
-//! events, in WAL mode so hooks can insert events while the CLI or TUI reads.
+//! The SQLite state database: projects, sessions, reported events, and what
+//! the agents spent, in WAL mode so hooks can insert events while the CLI or
+//! TUI reads.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_pa
 use crate::model::{Event, Project, Session, State};
 use crate::note::Note;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -64,6 +65,27 @@ CREATE TABLE events (
     at         INTEGER NOT NULL,
     payload    TEXT
 );
+CREATE TABLE spent_files (
+    path     TEXT PRIMARY KEY,
+    agent    TEXT NOT NULL,
+    session  TEXT NOT NULL,
+    modified INTEGER NOT NULL,
+    size     INTEGER NOT NULL
+);
+CREATE TABLE spent (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    at          INTEGER NOT NULL,
+    input       INTEGER NOT NULL,
+    cache_read  INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    output      INTEGER NOT NULL,
+    cost        REAL,
+    saved       REAL
+);
+CREATE INDEX spent_at ON spent(at);
+CREATE INDEX spent_path ON spent(path);
 ";
 
 const SESSION_COLUMNS: &str =
@@ -107,6 +129,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE sessions ADD COLUMN note_pin INTEGER;
          ALTER TABLE sessions ADD COLUMN note_at INTEGER;",
     ),
+    (
+        8,
+        "CREATE TABLE spent_files (
+             path     TEXT PRIMARY KEY,
+             agent    TEXT NOT NULL,
+             session  TEXT NOT NULL,
+             modified INTEGER NOT NULL,
+             size     INTEGER NOT NULL
+         );
+         CREATE TABLE spent (
+             id          TEXT PRIMARY KEY,
+             path        TEXT NOT NULL,
+             model       TEXT NOT NULL,
+             at          INTEGER NOT NULL,
+             input       INTEGER NOT NULL,
+             cache_read  INTEGER NOT NULL,
+             cache_write INTEGER NOT NULL,
+             output      INTEGER NOT NULL,
+             cost        REAL,
+             saved       REAL
+         );
+         CREATE INDEX spent_at ON spent(at);
+         CREATE INDEX spent_path ON spent(path);",
+    ),
 ];
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
@@ -118,6 +164,15 @@ const EVENT_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub struct Db {
     conn: Connection,
+}
+
+/// One of the agents' files whose calls are saved, as it was then.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpentFile {
+    pub agent: String,
+    /// In ms.
+    pub modified: i64,
+    pub size: u64,
 }
 
 impl Db {
@@ -729,6 +784,121 @@ impl Db {
             .and_then(|v| v.parse().ok()))
     }
 
+    // What was spent
+
+    /// The agents' files whose calls are saved, by path, as each was when
+    /// they were.
+    pub fn spent_files(&self) -> Result<HashMap<String, SpentFile>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, agent, modified, size FROM spent_files")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                SpentFile {
+                    agent: r.get(1)?,
+                    modified: r.get(2)?,
+                    size: r.get::<_, i64>(3)? as u64,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Saves the calls in the file at `path` in place of what was saved of
+    /// it, as of its `modified` time (ms) and `size`. A call saved already
+    /// from another file (copied there by a fork) stays that file's; one that
+    /// spent nothing (it failed) isn't saved.
+    pub fn save_spent(
+        &self,
+        path: &str,
+        agent: &str,
+        session: &str,
+        modified: i64,
+        size: u64,
+        calls: &[crate::tokens::Call],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM spent WHERE path = ?1", [path])?;
+        tx.execute(
+            "INSERT INTO spent_files (path, agent, session, modified, size)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (path) DO UPDATE SET agent = excluded.agent,
+                 session = excluded.session, modified = excluded.modified, size = excluded.size",
+            params![path, agent, session, modified, size as i64],
+        )?;
+        let mut insert = tx.prepare(
+            "INSERT OR IGNORE INTO spent (id, path, model, at, input, cache_read, cache_write,
+                 output, cost, saved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for call in calls.iter().filter(|c| c.counts.total() > 0) {
+            let (t, cost) = (&call.counts, call.cost());
+            insert.execute(params![
+                call.id,
+                path,
+                call.model,
+                call.at,
+                t.input as i64,
+                t.cache_read as i64,
+                t.cache_write as i64,
+                t.output as i64,
+                cost.map(|c| c.0),
+                cost.map(|c| c.1),
+            ])?;
+        }
+        drop(insert);
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forgets what was saved of the file at `path` (it moved).
+    pub fn forget_spent(&self, path: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM spent WHERE path = ?1", [path])?;
+        tx.execute("DELETE FROM spent_files WHERE path = ?1", [path])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// What the calls saved from `from` to `to` (ms) spent, by conversation,
+    /// model and hour.
+    pub fn spent_hours(&self, from: i64, to: i64) -> Result<Vec<crate::tokens::Hour>> {
+        use crate::tokens::{Counts, Hour, Spent};
+        let mut stmt = self.conn.prepare(
+            "SELECT f.agent, f.session, s.model, s.at / 3600000 * 3600000 AS hour,
+                 SUM(s.input), SUM(s.cache_read), SUM(s.cache_write), SUM(s.output),
+                 TOTAL(s.cost), TOTAL(s.saved),
+                 TOTAL(CASE WHEN s.cost IS NULL
+                     THEN s.input + s.cache_read + s.cache_write + s.output END)
+             FROM spent s JOIN spent_files f USING (path)
+             WHERE s.at >= ?1 AND s.at <= ?2
+             GROUP BY f.agent, f.session, s.model, hour",
+        )?;
+        let rows = stmt.query_map([from, to], |r| {
+            let n = |i| r.get::<_, i64>(i).map(|v| v as u64);
+            Ok(Hour {
+                agent: r.get(0)?,
+                session: r.get(1)?,
+                model: r.get(2)?,
+                start: r.get(3)?,
+                spent: Spent {
+                    tokens: Counts {
+                        input: n(4)?,
+                        cache_read: n(5)?,
+                        cache_write: n(6)?,
+                        cache_write_hour: 0,
+                        output: n(7)?,
+                    },
+                    cost: r.get(8)?,
+                    saved: r.get(9)?,
+                    unpriced: r.get::<_, f64>(10)? as u64,
+                },
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn
@@ -1017,6 +1187,63 @@ mod tests {
         s.project_id = project.id;
         db.insert_session(&s).unwrap();
         (db, s)
+    }
+
+    #[test]
+    fn a_files_calls_are_saved_in_place_of_what_was_and_a_copy_counts_once() {
+        use crate::tokens::tests::call;
+        let db = Db::open_in_memory().unwrap();
+        let hour = 3_600_000;
+        let calls = |input| {
+            vec![
+                call(hour, "claude-opus-5-5", input, 0, 0),
+                call(5 * hour, "claude-opus-5-5", 1, 0, 0),
+            ]
+        };
+        db.save_spent("/a.jsonl", "claude", "c1", 10, 100, &calls(5))
+            .unwrap();
+        // Read again, grown: in place of what was, not beside it (the call
+        // with 5 changed, as Claude's reply does as it's written).
+        let mut grown = calls(5);
+        grown[0].counts.output = 9;
+        db.save_spent("/a.jsonl", "claude", "c1", 20, 200, &grown)
+            .unwrap();
+        let files = db.spent_files().unwrap();
+        assert_eq!(
+            (files["/a.jsonl"].modified, files["/a.jsonl"].size),
+            (20, 200)
+        );
+        let mut hours = db.spent_hours(0, 10 * hour).unwrap();
+        hours.sort_by_key(|h| h.start);
+        assert_eq!(hours.len(), 2);
+        assert_eq!(
+            (hours[0].agent.as_str(), hours[0].session.as_str()),
+            ("claude", "c1")
+        );
+        assert_eq!(hours[0].spent.tokens.total(), 14);
+        assert!(hours[0].spent.cost > 0.0);
+        // A fork with a copy of the calls, and one of its own: the copies
+        // count once, for the file they were saved from first.
+        let mut fork = grown.clone();
+        fork.push(call(6 * hour, "vllm/qwen3", 7, 0, 0));
+        db.save_spent("/b.jsonl", "claude", "c2", 30, 300, &fork)
+            .unwrap();
+        let hours = db.spent_hours(0, 10 * hour).unwrap();
+        let total: u64 = hours.iter().map(|h| h.spent.tokens.total()).sum();
+        assert_eq!(total, 14 + 1 + 7);
+        let own = hours.iter().find(|h| h.session == "c2").unwrap();
+        assert_eq!((own.model.as_str(), own.spent.unpriced), ("vllm/qwen3", 7));
+        // Only the calls from `from` to `to`.
+        let hours = db.spent_hours(hour, 2 * hour).unwrap();
+        assert_eq!(hours.len(), 1);
+        // Forgotten (moved), it's gone, and its copies are no one's until
+        // the fork is saved again.
+        db.forget_spent("/a.jsonl").unwrap();
+        assert!(!db.spent_files().unwrap().contains_key("/a.jsonl"));
+        db.save_spent("/b.jsonl", "claude", "c2", 30, 300, &fork)
+            .unwrap();
+        let hours = db.spent_hours(0, 10 * hour).unwrap();
+        assert!(hours.iter().all(|h| h.session == "c2"));
     }
 
     #[test]

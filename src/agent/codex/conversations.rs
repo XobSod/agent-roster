@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -16,6 +15,7 @@ use serde_json::Value;
 use super::CODEX;
 use super::transcript::Typed;
 use crate::agent::Conversation;
+use crate::stats::{Jsonl, Lines};
 
 /// Codex's directory: `$CODEX_HOME`, else `~/.codex`.
 pub fn codex_dir() -> Option<PathBuf> {
@@ -86,72 +86,37 @@ fn id_of(path: &Path) -> Option<&str> {
 /// What codex calls its threads, by conversation id: names it made itself,
 /// from what you asked first.
 fn names(index: &Path) -> HashMap<String, String> {
-    let mut names = Names::new(index.to_path_buf());
-    names.update();
-    names.by_id
+    let mut names = Jsonl::<Names>::new(index);
+    let _ = names.read();
+    names.tally().0.clone()
 }
 
 /// The name codex gave conversation `id`, from its index as it is now.
 pub fn name_of(id: &str) -> Option<String> {
-    static NAMES: OnceLock<Option<Mutex<Names>>> = OnceLock::new();
+    static NAMES: OnceLock<Option<Mutex<Jsonl<Names>>>> = OnceLock::new();
     let names = NAMES.get_or_init(|| {
-        codex_dir().map(|dir| Mutex::new(Names::new(dir.join("session_index.jsonl"))))
+        codex_dir().map(|dir| Mutex::new(Jsonl::new(&dir.join("session_index.jsonl"))))
     });
     let mut names = names.as_ref()?.lock().ok()?;
-    names.update();
-    names.by_id.get(id).cloned()
+    let _ = names.read();
+    names.tally().0.get(id).cloned()
 }
 
-/// Codex's index of its threads, read as it grows: a line each time one is
-/// named (or renamed), so the last line for an id is its name.
-struct Names {
-    path: PathBuf,
-    /// How far it's been read, to the end of its last whole line.
-    read: u64,
-    by_id: HashMap<String, String>,
-}
+/// Codex's index of its threads, by id: a line each time one is named (or
+/// renamed), so the last line for an id is its name.
+#[derive(Debug, Default)]
+struct Names(HashMap<String, String>);
 
-impl Names {
-    fn new(path: PathBuf) -> Names {
-        Names {
-            path,
-            read: 0,
-            by_id: HashMap::new(),
-        }
-    }
-
-    /// Reads what was added since; a file that shrank was rewritten, and is
-    /// read again whole.
-    fn update(&mut self) {
-        let Ok(mut file) = fs::File::open(&self.path) else {
+impl Lines for Names {
+    fn line(&mut self, line: &[u8]) {
+        let Ok(v) = serde_json::from_slice::<Value>(line) else {
             return;
         };
-        let len = file.metadata().map_or(0, |m| m.len());
-        if len < self.read {
-            *self = Names::new(std::mem::take(&mut self.path));
+        if let (Some(id), Some(name)) = (v["id"].as_str(), v["thread_name"].as_str())
+            && !name.is_empty()
+        {
+            self.0.insert(id.to_string(), name.to_string());
         }
-        if len == self.read || file.seek(SeekFrom::Start(self.read)).is_err() {
-            return;
-        }
-        let mut added = Vec::new();
-        if file.read_to_end(&mut added).is_err() {
-            return;
-        }
-        // Up to the last whole line: the rest is still being written.
-        let Some(end) = added.iter().rposition(|&b| b == b'\n') else {
-            return;
-        };
-        for line in added[..end].split(|&b| b == b'\n') {
-            let Ok(v) = serde_json::from_slice::<Value>(line) else {
-                continue;
-            };
-            if let (Some(id), Some(name)) = (v["id"].as_str(), v["thread_name"].as_str())
-                && !name.is_empty()
-            {
-                self.by_id.insert(id.to_string(), name.to_string());
-            }
-        }
-        self.read += end as u64 + 1;
     }
 }
 
@@ -217,7 +182,7 @@ fn read(path: &Path) -> Option<Conversation> {
                                 .collect()
                         });
                 if typed.message(kinds.as_deref())
-                    && let Some(text) = message_text(payload)
+                    && let Some(text) = crate::agent::message_text(&payload["content"])
                 {
                     prompt(text);
                 }
@@ -240,24 +205,6 @@ fn read(path: &Path) -> Option<Conversation> {
     c.cwd = cwd?;
     c.first_prompt.as_ref()?;
     Some(c)
-}
-
-/// A message's text: one string, or the text blocks of a list.
-fn message_text(payload: &Value) -> Option<String> {
-    match &payload["content"] {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(blocks) => {
-            let parts: Vec<&str> = blocks
-                .iter()
-                .filter(|b| matches!(b["type"].as_str(), None | Some("input_text") | Some("text")))
-                .filter_map(|b| b["text"].as_str())
-                .collect();
-            (!parts.is_empty()).then(|| parts.join("\n"))
-        }
-        _ => None,
-    }
-    .map(|text| text.trim().to_string())
-    .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]
@@ -338,11 +285,8 @@ be brief
         fs::write(
             dir.path().join("session_index.jsonl"),
             format!(
-                "{}\n",
-                format!(
-                    r#"{{"id":"{id}","thread_name":"Fix the parser","updated_at":"2026-10-21T10:05:00Z"}}"#
-                )
-            ),
+                r#"{{"id":"{id}","thread_name":"Fix the parser","updated_at":"2026-10-21T10:05:00Z"}}"#
+            ) + "\n",
         )
         .unwrap();
 
@@ -379,9 +323,10 @@ be brief
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session_index.jsonl");
         let mut index = fs::File::create(&path).unwrap();
-        let mut names = Names::new(path.clone());
-        names.update();
-        assert!(names.by_id.is_empty());
+        let mut names = Jsonl::<Names>::new(&path);
+        let name = |names: &Jsonl<Names>, id: &str| names.tally().0.get(id).cloned();
+        names.read().unwrap();
+        assert!(names.tally().0.is_empty());
         writeln!(
             index,
             r#"{{"id":"a","thread_name":"Fix the parser","updated_at":"t"}}"#
@@ -389,12 +334,9 @@ be brief
         .unwrap();
         // Half a line: it waits for the rest.
         write!(index, r#"{{"id":"b","thread_na"#).unwrap();
-        names.update();
-        assert_eq!(
-            names.by_id.get("a").map(String::as_str),
-            Some("Fix the parser")
-        );
-        assert!(!names.by_id.contains_key("b"));
+        names.read().unwrap();
+        assert_eq!(name(&names, "a").as_deref(), Some("Fix the parser"));
+        assert_eq!(name(&names, "b"), None);
         writeln!(index, r#"me":"Add tests","updated_at":"t"}}"#).unwrap();
         // Renamed: the last line for it wins. An empty name is none.
         writeln!(
@@ -403,18 +345,15 @@ be brief
         )
         .unwrap();
         writeln!(index, r#"{{"id":"c","thread_name":"","updated_at":"t"}}"#).unwrap();
-        names.update();
-        assert_eq!(
-            names.by_id.get("a").map(String::as_str),
-            Some("Parse the config")
-        );
-        assert_eq!(names.by_id.get("b").map(String::as_str), Some("Add tests"));
-        assert!(!names.by_id.contains_key("c"));
+        names.read().unwrap();
+        assert_eq!(name(&names, "a").as_deref(), Some("Parse the config"));
+        assert_eq!(name(&names, "b").as_deref(), Some("Add tests"));
+        assert_eq!(name(&names, "c"), None);
         // Rewritten shorter: read again from its start.
         fs::write(&path, "{\"id\":\"d\",\"thread_name\":\"Only\"}\n").unwrap();
-        names.update();
-        assert_eq!(names.by_id.len(), 1);
-        assert_eq!(names.by_id.get("d").map(String::as_str), Some("Only"));
+        names.read().unwrap();
+        assert_eq!(names.tally().0.len(), 1);
+        assert_eq!(name(&names, "d").as_deref(), Some("Only"));
     }
 
     #[test]

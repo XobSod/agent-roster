@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::stats::{AgentStats, Jsonl, Prompts, Tally, leading_type};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, leading_type};
 
 /// Reads a Claude transcript as it grows.
 pub type ClaudeTranscript = Jsonl<Totals>;
@@ -24,7 +24,7 @@ pub struct Totals {
     replies_since_cost: bool,
 }
 
-impl Tally for Totals {
+impl Lines for Totals {
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -57,7 +57,7 @@ impl Tally for Totals {
             Some("user") if entry.is_meta != Some(true) => {
                 // A typed prompt is text; tool results are lists, and local
                 // commands and their output are wrapped in tags.
-                if let Some(Text(Some(text))) = message.content
+                if let Some(PlainText(Some(text))) = message.content
                     && !text.trim_start().starts_with('<')
                 {
                     self.prompts.push(text);
@@ -74,7 +74,9 @@ impl Tally for Totals {
             _ => {}
         }
     }
+}
 
+impl Tally for Totals {
     /// `model` (as Claude reports it) gives the context window.
     fn stats(&self, model: Option<&str>) -> AgentStats {
         // A window smaller than what's in use is the wrong one.
@@ -118,7 +120,7 @@ struct Entry<'a> {
 struct Message {
     id: Option<String>,
     usage: Option<Usage>,
-    content: Option<Text>,
+    content: Option<PlainText>,
 }
 
 #[derive(Default, Deserialize)]
@@ -129,31 +131,33 @@ struct Usage {
     cache_creation_input_tokens: Option<u64>,
 }
 
-/// A message's content if it's text (a typed prompt). Anything else (tool
-/// results, replies: lists, often large) is skipped without being kept.
-struct Text(Option<String>);
+/// A message's content if it's a string (a typed prompt). Claude writes the
+/// rest as lists (tool results, replies, often large; and its own markers,
+/// such as an interruption), so unlike `stats::Text` these are skipped
+/// whole, without being kept.
+struct PlainText(Option<String>);
 
-impl<'de> Deserialize<'de> for Text {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
+impl<'de> Deserialize<'de> for PlainText {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<PlainText, D::Error> {
         struct Content;
         impl<'de> Visitor<'de> for Content {
-            type Value = Text;
+            type Value = PlainText;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a message's content")
             }
-            fn visit_str<E>(self, text: &str) -> Result<Text, E> {
-                Ok(Text(Some(text.to_string())))
+            fn visit_str<E>(self, text: &str) -> Result<PlainText, E> {
+                Ok(PlainText(Some(text.to_string())))
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Text, A::Error> {
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<PlainText, A::Error> {
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(Text(None))
+                Ok(PlainText(None))
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Text, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<PlainText, A::Error> {
                 while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(Text(None))
+                Ok(PlainText(None))
             }
-            fn visit_unit<E>(self) -> Result<Text, E> {
-                Ok(Text(None))
+            fn visit_unit<E>(self) -> Result<PlainText, E> {
+                Ok(PlainText(None))
             }
         }
         d.deserialize_any(Content)

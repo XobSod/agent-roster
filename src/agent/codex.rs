@@ -91,6 +91,18 @@ impl Adapter for Codex {
         true
     }
 
+    fn names_its_conversation(&self) -> bool {
+        true
+    }
+
+    fn keeps_transcript(&self) -> bool {
+        true
+    }
+
+    fn runs_oneoff(&self) -> bool {
+        true
+    }
+
     fn conversations(&self, wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
         conversations::codex_dir()
             .map_or_else(Vec::new, |dir| conversations::conversations(&dir, wanted))
@@ -166,20 +178,10 @@ impl Adapter for Codex {
         })
     }
 
-    /// Codex's payloads name the conversation and the file it's kept in, both
-    /// of which change when it's cleared; `source` says how it started:
-    /// `startup` for a new conversation, `resume` and `clear` otherwise.
+    /// A hook's payload, as Claude's are (`super::hook_report`); codex's
+    /// don't say the effort.
     fn report(&self, payload: &Value) -> Report {
-        let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
-        let source = payload.get("source").and_then(Value::as_str);
-        Report {
-            conversation_id: text(payload.get("session_id")),
-            transcript_path: text(payload.get("transcript_path")),
-            cleared: source == Some("clear"),
-            started: source == Some("startup"),
-            model: text(payload.get("model")),
-            ..Report::default()
-        }
+        super::hook_report(payload)
     }
 
     fn names_its_task(&self) -> bool {

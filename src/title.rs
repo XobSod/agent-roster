@@ -83,8 +83,8 @@ impl Roster {
                 .as_deref()
                 .is_some_and(|p| Path::new(p).exists())
             && !adapter.names_its_task()
-            && adapter.oneoff(&self.config).is_some()
-            && adapter.transcript(Path::new("")).is_some()
+            && adapter.runs_oneoff()
+            && adapter.keeps_transcript()
             && self.config.agent(&s.agent).auto_title != Some(false)
     }
 
@@ -96,8 +96,7 @@ impl Roster {
         self.db.fold_events(crate::util::now_ms())?;
         let s = self.db.session(id)?;
         let adapter = agent::adapter(&s.agent);
-        // (Asked without a path: whether it has a transcript roster reads at all.)
-        if adapter.transcript(Path::new("")).is_none() {
+        if !adapter.keeps_transcript() {
             bail!(
                 "{} keeps no transcript roster can read, so it can't get a generated title; set one with edit",
                 s.agent

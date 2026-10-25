@@ -7,6 +7,8 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+
 /// How many recent prompts a transcript keeps, for generating a title.
 const RECENT_PROMPTS: usize = 5;
 
@@ -36,19 +38,23 @@ pub trait Transcript: Send {
     fn recent_prompts(&self) -> Vec<String>;
 }
 
-/// What an agent's JSONL transcript adds up to, line by line: what each
-/// agent's reader knows of its format (`Jsonl` does the reading).
-pub trait Tally: Default + Send {
+/// What a JSONL file adds up to, line by line: what its reader knows of its
+/// format (`Jsonl` does the reading).
+pub trait Lines: Default + Send {
     /// One complete line of the file.
     fn line(&mut self, line: &[u8]);
+}
+
+/// What an agent's JSONL transcript adds up to: its statistics and prompts.
+pub trait Tally: Lines {
     /// The totals so far; see `Transcript::stats`.
     fn stats(&self, model: Option<&str>) -> AgentStats;
     fn prompts(&self) -> &Prompts;
 }
 
-/// Reads a JSONL transcript as it grows: each read takes only what was added
-/// since, a line still being written waits for the next, and a file that got
-/// shorter (rewritten) is read again from the start.
+/// Reads a JSONL file as it grows (a transcript, say): each read takes only
+/// what was added since, a line still being written waits for the next, and
+/// a file that got shorter (rewritten) is read again from the start.
 #[derive(Debug, Default)]
 pub struct Jsonl<T> {
     path: PathBuf,
@@ -58,7 +64,7 @@ pub struct Jsonl<T> {
     tally: T,
 }
 
-impl<T: Tally> Jsonl<T> {
+impl<T: Lines> Jsonl<T> {
     pub fn new(path: &Path) -> Jsonl<T> {
         Jsonl {
             path: path.to_path_buf(),
@@ -67,14 +73,14 @@ impl<T: Tally> Jsonl<T> {
             tally: T::default(),
         }
     }
-}
 
-impl<T: Tally> Transcript for Jsonl<T> {
-    fn path(&self) -> &Path {
-        &self.path
+    /// What its lines add up to so far.
+    pub fn tally(&self) -> &T {
+        &self.tally
     }
 
-    fn update(&mut self) -> std::io::Result<()> {
+    /// Reads what was added since the last read (all of it the first time).
+    pub fn read(&mut self) -> std::io::Result<()> {
         let mut file = File::open(&self.path)?;
         let len = file.metadata()?.len();
         if len < self.offset {
@@ -94,6 +100,16 @@ impl<T: Tally> Transcript for Jsonl<T> {
         text.drain(..start);
         self.rest = text;
         Ok(())
+    }
+}
+
+impl<T: Tally> Transcript for Jsonl<T> {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn update(&mut self) -> std::io::Result<()> {
+        self.read()
     }
 
     fn stats(&self, model: Option<&str>) -> AgentStats {
@@ -119,6 +135,60 @@ impl Prompts {
             self.recent.pop_front();
         }
         self.recent.push_back(text);
+    }
+}
+
+/// A message's text, read from a transcript: a string, or the text blocks of
+/// a list joined (images, tool calls and the like skipped, unread), as pi and
+/// codex write them (`agent::message_text` for one already parsed).
+pub struct Text(pub Option<String>);
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
+        struct Content;
+        impl<'de> Visitor<'de> for Content {
+            type Value = Text;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a message's content")
+            }
+            fn visit_str<E>(self, text: &str) -> Result<Text, E> {
+                Ok(Text(Some(text.to_string())))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Text, A::Error> {
+                let mut text = Vec::new();
+                while let Some(block) = seq.next_element::<Block>()? {
+                    text.extend(block.into_text());
+                }
+                Ok(Text((!text.is_empty()).then(|| text.join("\n"))))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Text, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(Text(None))
+            }
+            fn visit_unit<E>(self) -> Result<Text, E> {
+                Ok(Text(None))
+            }
+        }
+        d.deserialize_any(Content)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Block {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    text: Option<String>,
+}
+
+impl Block {
+    /// Its text, if it's a text block (`text`, codex's `input_text`, or one
+    /// that says no type).
+    fn into_text(self) -> Option<String> {
+        self.kind
+            .as_deref()
+            .is_none_or(|k| matches!(k, "text" | "input_text"))
+            .then_some(self.text)
+            .flatten()
     }
 }
 
@@ -187,6 +257,19 @@ pub fn tokens(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_messages_text_is_its_string_or_its_text_blocks() {
+        let text = |json: &str| serde_json::from_str::<Text>(json).unwrap().0;
+        assert_eq!(text(r#""fix it""#).as_deref(), Some("fix it"));
+        assert_eq!(
+            text(r#"[{"type":"text","text":"one"},{"type":"image","data":"…"},{"type":"input_text","text":"two"},{"text":"three"},{"type":"output_text","text":"no"}]"#).as_deref(),
+            Some("one\ntwo\nthree")
+        );
+        assert_eq!(text(r#"[{"type":"tool_result","content":"x"}]"#), None);
+        assert_eq!(text(r#"{"type":"text"}"#), None);
+        assert_eq!(text("null"), None);
+    }
 
     #[test]
     fn summary_has_what_is_known() {

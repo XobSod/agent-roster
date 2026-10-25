@@ -74,6 +74,23 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// Whether it names a conversation itself, reporting its id once it has
+    /// one (codex); if not, an agent that resumes is given one at its start
+    /// (`Launch::conversation_id`).
+    fn names_its_conversation(&self) -> bool {
+        false
+    }
+
+    /// Whether it keeps a transcript roster reads (`transcript`).
+    fn keeps_transcript(&self) -> bool {
+        false
+    }
+
+    /// Whether it has a one-off mode (`oneoff`), for generated titles.
+    fn runs_oneoff(&self) -> bool {
+        false
+    }
+
     /// The conversations it has kept, started in roster or not, whose id
     /// `wanted` says yes to (only their files are read), for adopting.
     fn conversations(&self, _wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
@@ -101,7 +118,7 @@ pub trait Adapter: Sync {
     }
 
     /// The command line that starts `s`, given its command and the config's
-    /// arguments.
+    /// arguments, and the conversation it starts on if roster gives it one.
     fn launch(&self, _s: &Session, argv: Vec<String>, _cx: &Context) -> Result<Launch> {
         Ok(Launch {
             argv,
@@ -131,13 +148,13 @@ pub trait Adapter: Sync {
     /// goes last, the answer comes on stdout, and nothing of it is kept
     /// (no tools, no session). `[agents.<name>] title_model` picks its model,
     /// else `model` (`AgentConfig::titles_by`), else the agent's default.
-    /// None if the agent has no such mode.
+    /// None if the agent has no such mode (`runs_oneoff`).
     fn oneoff(&self, _config: &Config) -> Option<Vec<String>> {
         None
     }
 
-    /// A reader for the transcript at `path` (as its reports named it). Reads
-    /// nothing yet: whether an agent has one at all is asked this way.
+    /// A reader for the transcript at `path` (as its reports named it), which
+    /// reads nothing yet; None if it keeps none (`keeps_transcript`).
     fn transcript(&self, _path: &Path) -> Option<Box<dyn Transcript>> {
         None
     }
@@ -199,6 +216,25 @@ impl Conversation {
         .next()
         .map_or(String::new(), |s| crate::util::one_line(s))
     }
+}
+
+/// A message's text from a conversation file already parsed: a string, or the
+/// text blocks of a list joined (`stats::Text` reads it the same way from a
+/// transcript), trimmed; None if there's none.
+pub(crate) fn message_text(content: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| matches!(b["type"].as_str(), None | Some("text" | "input_text")))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// A conversation file's lines worth reading for what it says about itself:
@@ -294,6 +330,25 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Optio
     T::deserialize(d).map(Some)
 }
 
+/// What a hook's payload says in the shape Claude's have, which codex's
+/// copy: the conversation it's on and the file it's kept in, both of which a
+/// /clear changes; how it started (`source`: `startup` the agent's own
+/// start, `clear` a new task; `resume`, `compact` and codex's `fork`
+/// neither); and the model.
+pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
+    use serde_json::Value;
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
+    let source = payload.get("source").and_then(Value::as_str);
+    Report {
+        conversation_id: text(payload.get("session_id")),
+        transcript_path: text(payload.get("transcript_path")),
+        cleared: source == Some("clear"),
+        started: source == Some("startup"),
+        model: text(payload.get("model")),
+        ..Report::default()
+    }
+}
+
 /// What a report from agent `name` says; nothing if its payload isn't JSON.
 pub fn read_report(name: &str, payload: Option<&str>) -> Report {
     payload
@@ -312,7 +367,9 @@ pub struct Context<'a> {
 
 pub struct Launch {
     pub argv: Vec<String>,
-    /// The conversation the agent will use, to store with the session.
+    /// The conversation the agent will use, to store with the session: None
+    /// for one that names its own (`Adapter::names_its_conversation`), or
+    /// keeps none.
     pub conversation_id: Option<String>,
 }
 
@@ -370,7 +427,7 @@ pub fn resumes(s: &Session) -> bool {
 /// What the CLI and TUI ask before starting `s`, which begins a new
 /// conversation (`resumes`).
 pub fn new_conversation_question(s: &Session) -> String {
-    if adapter(&s.agent).resumes() {
+    if adapter(&s.agent).names_its_conversation() {
         format!(
             "{} ({}) hasn't said which conversation it's on, so it can't resume it. Start a new one?",
             s.label(),
@@ -522,6 +579,60 @@ mod tests {
             Some("aider")
         );
         assert!(available(&config).contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn a_parsed_messages_text_is_read_as_a_transcripts_is() {
+        let text = |v: serde_json::Value| message_text(&v);
+        assert_eq!(
+            text(serde_json::json!("  fix it \n")).as_deref(),
+            Some("fix it")
+        );
+        assert_eq!(
+            text(
+                serde_json::json!([{"type": "text", "text": "one"}, {"type": "image"},
+                {"type": "input_text", "text": "two"}, {"type": "output_text", "text": "no"}])
+            )
+            .as_deref(),
+            Some("one\ntwo")
+        );
+        assert_eq!(text(serde_json::json!("   ")), None);
+        assert_eq!(text(serde_json::json!({"text": "a map"})), None);
+    }
+
+    #[test]
+    fn each_agent_says_what_it_can_do_as_it_does() {
+        let state = tempfile::tempdir().unwrap();
+        let cx = Context {
+            roster: Path::new("/roster"),
+            state_dir: state.path(),
+        };
+        for name in BUILT_IN.iter().copied().chain(["aider"]) {
+            let a = adapter(name);
+            assert_eq!(
+                a.keeps_transcript(),
+                a.transcript(Path::new("/t.jsonl")).is_some(),
+                "{name}"
+            );
+            assert_eq!(
+                a.runs_oneoff(),
+                a.oneoff(&Config::default()).is_some(),
+                "{name}"
+            );
+            // A new session's start: given a conversation, unless the agent
+            // names its own (or keeps none to resume).
+            let mut s = session("a");
+            s.agent = name.into();
+            let given = a
+                .launch(&s, vec![name.into()], &cx)
+                .unwrap()
+                .conversation_id;
+            assert_eq!(
+                given.is_some(),
+                a.resumes() && !a.names_its_conversation(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

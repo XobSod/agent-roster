@@ -42,6 +42,14 @@ impl Adapter for Pi {
         true
     }
 
+    fn keeps_transcript(&self) -> bool {
+        true
+    }
+
+    fn runs_oneoff(&self) -> bool {
+        true
+    }
+
     fn conversations(&self, wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
         conversations::sessions_dir()
             .map_or_else(Vec::new, |dir| conversations::conversations(&dir, wanted))

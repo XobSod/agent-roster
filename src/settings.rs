@@ -633,7 +633,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             s.placeholder = Some("\"<effort>\"".into());
             settings.push(s);
         }
-        if adapter.oneoff(&Config::default()).is_some() {
+        if adapter.runs_oneoff() {
             // Its default: the model above, else the agent's own.
             let mut s = text_setting(
                 &p("title_model"),
@@ -647,7 +647,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             }
             settings.push(s);
         }
-        if !adapter.names_its_task() && adapter.oneoff(&Config::default()).is_some() {
+        if !adapter.names_its_task() && adapter.runs_oneoff() {
             settings.push(bool_setting(
                 &p("auto_title"),
                 auto_title.unwrap_or(true),

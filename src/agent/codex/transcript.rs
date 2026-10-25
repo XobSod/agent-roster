@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::stats::{AgentStats, Jsonl, Prompts, Tally};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text};
 
 /// Reads a codex rollout as it grows.
 pub type CodexTranscript = Jsonl<Totals>;
@@ -35,7 +35,7 @@ pub struct Totals {
     removed: u64,
 }
 
-impl Tally for Totals {
+impl Lines for Totals {
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -117,7 +117,9 @@ impl Tally for Totals {
             _ => {}
         }
     }
+}
 
+impl Tally for Totals {
     /// Codex says which window it's calling into, so `model` isn't needed.
     /// What a subscription costs it doesn't say at all.
     fn stats(&self, _model: Option<&str>) -> AgentStats {
@@ -187,7 +189,7 @@ struct Payload {
     #[serde(rename = "type")]
     kind: Option<String>,
     role: Option<String>,
-    content: Option<Content>,
+    content: Option<Text>,
     usage: Option<Usage>,
     info: Option<Info>,
     /// A `user_message` event's text.
@@ -249,41 +251,10 @@ impl Payload {
         self.metadata.as_ref()?.content_item_kinds.as_deref()
     }
 
-    /// The text of a message: one string, or the text blocks of a list (the
-    /// images, files and tool outputs in it are skipped).
+    /// The text of a message (`Text`).
     fn text(&self) -> Option<String> {
-        match self.content.as_ref()? {
-            Content::Text(text) => Some(text.clone()),
-            Content::Blocks(blocks) => {
-                let parts: Vec<&str> = blocks
-                    .iter()
-                    .filter(|b| {
-                        b.kind
-                            .as_deref()
-                            .is_none_or(|k| matches!(k, "input_text" | "text"))
-                    })
-                    .filter_map(|b| b.text.as_deref())
-                    .collect();
-                (!parts.is_empty()).then(|| parts.join("\n"))
-            }
-        }
+        self.content.as_ref()?.0.clone()
     }
-}
-
-/// A message's content, either way codex writes it.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Content {
-    Text(String),
-    Blocks(Vec<Block>),
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Block {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
 }
 
 /// Which of a rollout's user messages are prompts you typed, as codex says

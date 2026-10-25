@@ -48,6 +48,14 @@ impl Adapter for Claude {
         true
     }
 
+    fn keeps_transcript(&self) -> bool {
+        true
+    }
+
+    fn runs_oneoff(&self) -> bool {
+        true
+    }
+
     fn conversations(&self, wanted: &dyn Fn(&str) -> bool) -> Vec<Conversation> {
         conversations::claude_dir()
             .map_or_else(Vec::new, |dir| conversations::conversations(&dir, wanted))
@@ -131,18 +139,15 @@ impl Adapter for Claude {
         })
     }
 
-    /// Hook payloads carry the current conversation, which changes after
-    /// /clear; SessionStart names the model, Stop the effort.
+    /// A hook's payload (`super::hook_report`): SessionStart names the
+    /// model, Stop the effort too.
     fn report(&self, payload: &Value) -> Report {
-        let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
         Report {
-            conversation_id: text(payload.get("session_id")),
-            transcript_path: text(payload.get("transcript_path")),
-            cleared: payload.get("source").and_then(Value::as_str) == Some("clear"),
-            started: payload.get("source").and_then(Value::as_str) == Some("startup"),
-            model: text(payload.get("model")),
-            effort: text(payload.pointer("/effort/level")),
-            ..Report::default()
+            effort: payload
+                .pointer("/effort/level")
+                .and_then(Value::as_str)
+                .map(String::from),
+            ..super::hook_report(payload)
         }
     }
 

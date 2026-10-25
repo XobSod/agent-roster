@@ -2,9 +2,8 @@
 //! each message with its usage and cost. Whatever can't be read is left out.
 
 use serde::Deserialize;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use crate::stats::{AgentStats, Jsonl, Prompts, Tally, leading_type};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text, leading_type};
 
 /// Reads a pi session file as it grows.
 pub type PiTranscript = Jsonl<Totals>;
@@ -32,7 +31,7 @@ impl Totals {
     }
 }
 
-impl Tally for Totals {
+impl Lines for Totals {
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -74,7 +73,9 @@ impl Tally for Totals {
             _ => {}
         }
     }
+}
 
+impl Tally for Totals {
     /// The context window isn't in the file; pi reports it (see
     /// `Report::context_window`).
     fn stats(&self, _model: Option<&str>) -> AgentStats {
@@ -123,56 +124,6 @@ struct Usage {
 #[derive(Default, Deserialize)]
 struct Cost {
     total: Option<f64>,
-}
-
-/// A message's text: a string, or the text blocks of a list (images and the
-/// like are skipped).
-struct Text(Option<String>);
-
-impl<'de> Deserialize<'de> for Text {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Text, D::Error> {
-        struct Content;
-        impl<'de> Visitor<'de> for Content {
-            type Value = Text;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a message's content")
-            }
-            fn visit_str<E>(self, text: &str) -> Result<Text, E> {
-                Ok(Text(Some(text.to_string())))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Text, A::Error> {
-                let mut text = Vec::new();
-                while let Some(block) = seq.next_element::<Block>()? {
-                    text.extend(block.into_text());
-                }
-                Ok(Text((!text.is_empty()).then(|| text.join("\n"))))
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Text, A::Error> {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(Text(None))
-            }
-            fn visit_unit<E>(self) -> Result<Text, E> {
-                Ok(Text(None))
-            }
-        }
-        d.deserialize_any(Content)
-    }
-}
-
-#[derive(Deserialize)]
-struct Block {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
-}
-
-impl Block {
-    /// Its text, if it's a text block.
-    fn into_text(self) -> Option<String> {
-        (self.kind.as_deref() == Some("text"))
-            .then_some(self.text)
-            .flatten()
-    }
 }
 
 /// Whether a line can be one roster reads. Pi writes `type` first: the

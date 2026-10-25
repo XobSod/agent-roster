@@ -125,7 +125,7 @@ fn read(path: &Path) -> Option<Conversation> {
                 let m = &e["message"];
                 match m["role"].as_str() {
                     Some("user") => {
-                        if let Some(text) = text_of(&m["content"]) {
+                        if let Some(text) = crate::agent::message_text(&m["content"]) {
                             c.last_prompt = Some(text);
                         }
                     }
@@ -168,28 +168,12 @@ fn first_prompt(path: &Path) -> Option<String> {
         };
         if e["type"] == "message"
             && e["message"]["role"] == "user"
-            && let Some(text) = text_of(&e["message"]["content"])
+            && let Some(text) = crate::agent::message_text(&e["message"]["content"])
         {
             return Some(text);
         }
     }
     None
-}
-
-/// A message's text: a string, or its text blocks.
-fn text_of(content: &Value) -> Option<String> {
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter(|b| b["type"] == "text")
-            .filter_map(|b| b["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => return None,
-    };
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
 }
 
 #[cfg(test)]

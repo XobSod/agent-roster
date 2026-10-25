@@ -174,15 +174,27 @@ impl Tmux {
         cmd
     }
 
+    /// Runs a tmux command whose arguments are all text, as given: an
+    /// agent's arguments and first prompt, a title, a lone `;` among them.
     fn run<I, S>(&self, args: I) -> Result<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        // tmux takes an argument ending in `;` for the end of a command and
-        // drops the `;`; `\;` keeps it. So text (a title, a first prompt) keeps
-        // its last `;`, and a lone `;` still separates commands.
-        self.run_args(args.into_iter().map(|a| literal_end(a.as_ref(), false)))
+        self.run_args(args.into_iter().map(|a| literal_end(a.as_ref())))
+    }
+
+    /// Runs tmux commands one after the other, in one call: only the `;`
+    /// between them is tmux's own.
+    fn run_all(&self, commands: &[&[&str]]) -> Result<String> {
+        let mut args = Vec::new();
+        for (i, command) in commands.iter().enumerate() {
+            if i > 0 {
+                args.push(std::ffi::OsString::from(";"));
+            }
+            args.extend(command.iter().map(|a| literal_end(OsStr::new(a))));
+        }
+        self.run_args(args.into_iter())
     }
 
     fn run_args(&self, args: impl Iterator<Item = std::ffi::OsString>) -> Result<String> {
@@ -469,18 +481,14 @@ impl Tmux {
     pub fn say(&self, name: &str, text: &str) {
         let target = pane_target(name);
         let text = message_text(text);
-        let _ = self.run_args(
-            [
-                "display-message",
-                "-d",
-                "10000",
-                "-t",
-                target.as_str(),
-                text.as_str(),
-            ]
-            .iter()
-            .map(|a| literal_end(OsStr::new(a), true)),
-        );
+        let _ = self.run([
+            "display-message",
+            "-d",
+            "10000",
+            "-t",
+            target.as_str(),
+            text.as_str(),
+        ]);
     }
 
     /// Sizes the session's window while no one is attached. Unsetting
@@ -490,21 +498,24 @@ impl Tmux {
     pub fn resize(&self, name: &str, size: (u16, u16)) -> Result<()> {
         let target = pane_target(name);
         let (w, h) = (size.0.to_string(), size.1.to_string());
-        self.run([
-            "resize-window",
-            "-t",
-            target.as_str(),
-            "-x",
-            w.as_str(),
-            "-y",
-            h.as_str(),
-            ";",
-            "set-option",
-            "-w",
-            "-u",
-            "-t",
-            target.as_str(),
-            "window-size",
+        self.run_all(&[
+            &[
+                "resize-window",
+                "-t",
+                target.as_str(),
+                "-x",
+                w.as_str(),
+                "-y",
+                h.as_str(),
+            ],
+            &[
+                "set-option",
+                "-w",
+                "-u",
+                "-t",
+                target.as_str(),
+                "window-size",
+            ],
         ])
         .map(drop)
     }
@@ -514,18 +525,9 @@ impl Tmux {
     pub fn label(&self, name: &str, left: &str, right: &str) -> Result<()> {
         let target = pane_target(name);
         let t = target.as_str();
-        self.run([
-            "set-option",
-            "-t",
-            t,
-            "@roster_left",
-            left,
-            ";",
-            "set-option",
-            "-t",
-            t,
-            "@roster_right",
-            right,
+        self.run_all(&[
+            &["set-option", "-t", t, "@roster_left", left],
+            &["set-option", "-t", t, "@roster_right", right],
         ])
         .map(drop)
     }
@@ -571,15 +573,14 @@ fn message_text(text: &str) -> String {
     text.replace('#', "##").replace('%', "%%")
 }
 
-/// `arg` as tmux should read it (see `Tmux::run`); `text`, even a lone `;` is
-/// kept as one, not taken for the end of a command.
-fn literal_end(arg: &OsStr, text: bool) -> std::ffi::OsString {
+/// `arg` as tmux should read it, as text: tmux takes an argument ending in
+/// `;` for the end of a command and drops the `;`, a lone one too, where
+/// `\;` keeps it (`Tmux::run_all` puts tmux's own between commands).
+fn literal_end(arg: &OsStr) -> std::ffi::OsString {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     match arg.as_bytes().strip_suffix(b";") {
-        Some(rest) if text || !rest.is_empty() => {
-            std::ffi::OsString::from_vec([rest, b"\\;"].concat())
-        }
-        _ => arg.to_os_string(),
+        Some(rest) => std::ffi::OsString::from_vec([rest, b"\\;"].concat()),
+        None => arg.to_os_string(),
     }
 }
 
@@ -711,15 +712,12 @@ mod tests {
 
     #[test]
     fn a_last_semicolon_stays_text() {
-        let end = |a: &str| literal_end(OsStr::new(a), false).into_string().unwrap();
+        let end = |a: &str| literal_end(OsStr::new(a)).into_string().unwrap();
         assert_eq!(end("Fix the parser;"), "Fix the parser\\;");
-        // A lone `;` still separates commands.
+        // A lone `;` too: an argument, not the end of a command.
         assert_eq!(
             (end(";"), end("a;b"), end("")),
-            (";".into(), "a;b".into(), "".into())
+            ("\\;".into(), "a;b".into(), "".into())
         );
-        // Unless it's text: a message shown.
-        let text = |a: &str| literal_end(OsStr::new(a), true).into_string().unwrap();
-        assert_eq!((text(";"), text("a;")), ("\\;".into(), "a\\;".into()));
     }
 }

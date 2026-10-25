@@ -97,3 +97,35 @@ fn generic_agents_are_tracked_by_their_screen() {
         t.ok(&["show", "g"]).contains("generic agent ready")
     });
 }
+
+#[test]
+fn an_agents_arguments_reach_it_as_given_semicolons_too() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("args") else {
+        return;
+    };
+    // Shows each argument it got, bracketed, then waits.
+    let agent = t.path("args-agent");
+    fs::write(
+        &agent,
+        "#!/bin/sh\nprintf 'got:'; printf ' [%s]' \"$@\"; echo; exec cat\n",
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[agents.args]\ncommand = \"{}\"\nargs = [\";\", \"a;\", \"b\"]\n",
+        agent.display()
+    ));
+    fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--agent", "args", "--name", "a"]);
+    let shows = |t: &TestEnv| t.ok(&["show", "a"]).contains("got: [;] [a;] [b]");
+    t.wait_for("its arguments", shows);
+    // Started again, by respawning its pane, likewise.
+    t.ok(&["restart", "--yes", "a"]);
+    t.wait_for("its arguments again", |t| {
+        t.ok(&["show", "a"]).matches("got: [;] [a;] [b]").count() == 1 && shows(t)
+    });
+}

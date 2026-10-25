@@ -175,7 +175,7 @@ impl Roster {
                         s.set_state(State::Idle, now);
                     }
                     let adapter = agent::adapter(&s.agent);
-                    if let Some(title) = adapter.title(&pane.title) {
+                    if let Some(title) = adapter.title(&pane.title, s.conversation_id.as_deref()) {
                         s.title = Some(title);
                     }
                     if adapter.reports() {

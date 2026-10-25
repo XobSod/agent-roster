@@ -238,8 +238,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     unless they or their project pick one (default: the agent's own, from its own
     settings, which roster doesn't change), and `title_model`, the model a generated
     title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
-    quicker). pi and Codex name no task themselves, so roster has them make a title
-    after a conversation's first turn; `auto_title = false` turns that off. Any other
+    quicker). pi names no task itself, so roster has it make a title after a
+    conversation's first turn; `auto_title = false` turns that off. Any other
     agent goes in its own table and is then offered for new sessions:
 
     ```toml
@@ -296,12 +296,13 @@ first turn's reports; starting a session again resumes it by id (`codex resume <
 and if Codex can't find it, it says so rather than starting another. Until Codex has reported it (with its hooks not trusted, it never does), roster doesn't know it, so starting the session again asks before beginning a new one. A session's model
 is anything Codex takes as `-c model=` (forms offer what `codex debug models` lists,
 each with the efforts it takes), its effort the reasoning level as
-`-c model_reasoning_effort=` (`none` … `ultra`). Codex names no task itself, so roster
-has it make a title after a conversation's first turn (`title_model`, made by
-`codex exec`, which keeps nothing); `auto_title = false` turns that off.
+`-c model_reasoning_effort=` (`none` … `ultra`). Codex names each conversation itself,
+from its first prompt, and that name is the session's title (as Claude's terminal title
+is Claude's); a title made on request (`s t`, with `title_model`) is made by
+`codex exec`, which keeps nothing.
 
 The statistics come from its rollout, under `~/.codex/sessions` (or wherever
-`CODEX_HOME` says): prompts, tokens, and the context window Codex counts. What a
+`CODEX_HOME` says): prompts, tokens, the context window Codex counts, and the lines its edits changed. What a
 subscription costs it doesn't say, so neither does `roster info`. Its conversations
 started elsewhere can be adopted by their id; a copy is forked with `codex fork`. Codex
 doesn't say which conversation a running Codex has open, so roster can only warn you

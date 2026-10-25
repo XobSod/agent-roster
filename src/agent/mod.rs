@@ -121,8 +121,9 @@ pub trait Adapter: Sync {
         false
     }
 
-    /// The task the agent names in its terminal title, if it names one.
-    fn title(&self, _pane_title: &str) -> Option<String> {
+    /// The task the agent names, if it names one: in its terminal title
+    /// (Claude), or kept with the conversation it's on (codex).
+    fn title(&self, _pane_title: &str, _conversation: Option<&str>) -> Option<String> {
         None
     }
 

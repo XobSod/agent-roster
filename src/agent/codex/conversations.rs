@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
@@ -84,17 +86,73 @@ fn id_of(path: &Path) -> Option<&str> {
 /// What codex calls its threads, by conversation id: names it made itself,
 /// from what you asked first.
 fn names(index: &Path) -> HashMap<String, String> {
-    let Ok(text) = fs::read_to_string(index) else {
-        return HashMap::new();
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|v| {
-            let id = v["id"].as_str()?;
-            let name = v["thread_name"].as_str()?;
-            (!name.is_empty()).then(|| (id.to_string(), name.to_string()))
-        })
-        .collect()
+    let mut names = Names::new(index.to_path_buf());
+    names.update();
+    names.by_id
+}
+
+/// The name codex gave conversation `id`, from its index as it is now.
+pub fn name_of(id: &str) -> Option<String> {
+    static NAMES: OnceLock<Option<Mutex<Names>>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        codex_dir().map(|dir| Mutex::new(Names::new(dir.join("session_index.jsonl"))))
+    });
+    let mut names = names.as_ref()?.lock().ok()?;
+    names.update();
+    names.by_id.get(id).cloned()
+}
+
+/// Codex's index of its threads, read as it grows: a line each time one is
+/// named (or renamed), so the last line for an id is its name.
+struct Names {
+    path: PathBuf,
+    /// How far it's been read, to the end of its last whole line.
+    read: u64,
+    by_id: HashMap<String, String>,
+}
+
+impl Names {
+    fn new(path: PathBuf) -> Names {
+        Names {
+            path,
+            read: 0,
+            by_id: HashMap::new(),
+        }
+    }
+
+    /// Reads what was added since; a file that shrank was rewritten, and is
+    /// read again whole.
+    fn update(&mut self) {
+        let Ok(mut file) = fs::File::open(&self.path) else {
+            return;
+        };
+        let len = file.metadata().map_or(0, |m| m.len());
+        if len < self.read {
+            *self = Names::new(std::mem::take(&mut self.path));
+        }
+        if len == self.read || file.seek(SeekFrom::Start(self.read)).is_err() {
+            return;
+        }
+        let mut added = Vec::new();
+        if file.read_to_end(&mut added).is_err() {
+            return;
+        }
+        // Up to the last whole line: the rest is still being written.
+        let Some(end) = added.iter().rposition(|&b| b == b'\n') else {
+            return;
+        };
+        for line in added[..end].split(|&b| b == b'\n') {
+            let Ok(v) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            if let (Some(id), Some(name)) = (v["id"].as_str(), v["thread_name"].as_str())
+                && !name.is_empty()
+            {
+                self.by_id.insert(id.to_string(), name.to_string());
+            }
+        }
+        self.read += end as u64 + 1;
+    }
 }
 
 /// What one rollout says about itself, from its start and end.
@@ -280,7 +338,10 @@ be brief
         fs::write(
             dir.path().join("session_index.jsonl"),
             format!(
-                r#"{{"id":"{id}","thread_name":"Fix the parser","updated_at":"2026-10-21T10:05:00Z"}}"#,
+                "{}\n",
+                format!(
+                    r#"{{"id":"{id}","thread_name":"Fix the parser","updated_at":"2026-10-21T10:05:00Z"}}"#
+                )
             ),
         )
         .unwrap();
@@ -310,6 +371,50 @@ be brief
             1
         );
         assert!(conversations(dir.path(), |i| i.starts_with("ffff")).is_empty());
+    }
+
+    #[test]
+    fn reads_the_names_codex_gives_as_its_index_grows() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_index.jsonl");
+        let mut index = fs::File::create(&path).unwrap();
+        let mut names = Names::new(path.clone());
+        names.update();
+        assert!(names.by_id.is_empty());
+        writeln!(
+            index,
+            r#"{{"id":"a","thread_name":"Fix the parser","updated_at":"t"}}"#
+        )
+        .unwrap();
+        // Half a line: it waits for the rest.
+        write!(index, r#"{{"id":"b","thread_na"#).unwrap();
+        names.update();
+        assert_eq!(
+            names.by_id.get("a").map(String::as_str),
+            Some("Fix the parser")
+        );
+        assert!(!names.by_id.contains_key("b"));
+        writeln!(index, r#"me":"Add tests","updated_at":"t"}}"#).unwrap();
+        // Renamed: the last line for it wins. An empty name is none.
+        writeln!(
+            index,
+            r#"{{"id":"a","thread_name":"Parse the config","updated_at":"t"}}"#
+        )
+        .unwrap();
+        writeln!(index, r#"{{"id":"c","thread_name":"","updated_at":"t"}}"#).unwrap();
+        names.update();
+        assert_eq!(
+            names.by_id.get("a").map(String::as_str),
+            Some("Parse the config")
+        );
+        assert_eq!(names.by_id.get("b").map(String::as_str), Some("Add tests"));
+        assert!(!names.by_id.contains_key("c"));
+        // Rewritten shorter: read again from its start.
+        fs::write(&path, "{\"id\":\"d\",\"thread_name\":\"Only\"}\n").unwrap();
+        names.update();
+        assert_eq!(names.by_id.len(), 1);
+        assert_eq!(names.by_id.get("d").map(String::as_str), Some("Only"));
     }
 
     #[test]

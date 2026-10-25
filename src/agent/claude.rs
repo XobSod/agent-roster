@@ -153,7 +153,7 @@ impl Adapter for Claude {
     /// "✳ Fix the parser" → "Fix the parser"; None while Claude shows its
     /// default title. Claude's titles start with a glyph; anything else is
     /// tmux's default (the host name).
-    fn title(&self, pane_title: &str) -> Option<String> {
+    fn title(&self, pane_title: &str, _conversation: Option<&str>) -> Option<String> {
         if pane_title.chars().next().is_none_or(char::is_alphanumeric) {
             return None;
         }
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn reads_claudes_task_title() {
-        let title = |t: &str| Claude.title(t);
+        let title = |t: &str| Claude.title(t, None);
         assert_eq!(
             title("✳ tmux pane explanation").as_deref(),
             Some("tmux pane explanation")

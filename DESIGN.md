@@ -90,9 +90,9 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Forms offer the agent's models**: Claude's from roster's own list, since Claude can't list its own; pi's and Codex's from the agent, asked in the background. Any other name can be typed.
 
 ### 3.7 Titles
-- **The agent's own** (Claude's terminal title, pi's session name), or **one of yours**, which wins; taking yours off follows the agent's again.
+- **The agent's own** (Claude's terminal title, pi's session name, the name Codex gives a conversation from its first prompt, in its index of them), or **one of yours**, which wins; taking yours off follows the agent's again.
 - **Generated on request**: the session's own agent, run one-off with no tools (or the fewest it allows, none of them able to act) and nothing kept, names what its recent prompts are about. It's kept as your title, since Claude would overwrite its own. It's made in the background, and kept only if the session is still as it was when asked: the same conversation, and no title of yours given or taken off meanwhile. Generic agents can't get one, as roster can't read their conversations.
-- **Automatic**, for agents that don't name their task (pi, Codex): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
+- **Automatic**, for agents that don't name their task (pi): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
 
 ### 3.8 Notes
 - Free text per session, kept through stops, restarts and archiving, gone only with the session. Cards mark sessions with one.
@@ -186,6 +186,7 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 - It takes no id for a new conversation; it names it, and its hooks report it from its first turn on, `SessionStart` too, saying `startup`, `resume`, `clear` or `fork`, with the model. `resume <id>` gets a conversation back, and says so if it can't find it; `fork <id>` copies one, whose rollout holds only what follows the fork, naming the one it came from (so a copy's prompts count from the fork on); `debug models` lists its models.
 - Esc during a turn fires no hook, `Stop` neither.
 - At a start it may first ask to trust the folder, or offer an update, which Enter installs.
+- It names a conversation from its first prompt, within seconds, keeps the name until it's cleared, and appends it to `session_index.jsonl` (renamed, again); its terminal title shows it too, in a form the user can configure.
 - `--no-daemon` runs its tools in its own environment.
 - Hooks given with `-c hooks.<Event>=[…]` are a layer of their own and fire alongside the user's and the project's, whether those are in `config.toml` or `hooks.json`, though the merged config shows only the `-c` ones.
 - `codex exec` always offers the model `exec` and `request_user_input`, whatever is turned off; with `code_mode_host` off, `exec` fails at once, and in a read-only sandbox `apply_patch` is refused. The user's own `AGENTS.md` comes whatever is turned off; `project_doc_max_bytes=0` keeps out the project's.
@@ -193,3 +194,4 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 - The trust of hooks given with `-c` is kept per event, for whichever command was trusted last: trusting roster at another path untrusts it at the one before.
 - New or changed hooks are reviewed at its start, and a prompt on its command line waits for the answer: trusted, its first turn reports; reviewed one by one or not trusted, it runs without them. Every hook payload names the conversation, so the next turn that reports says it.
 - Its rollout gives the model context as user messages too. Since 0.157 it marks each message's parts with their kinds (`user.text` for a prompt); before, it marked none and wrote each prompt again as a `user_message` event, which 0.124 also wrote beside marked messages. A prompt given on its command line is a prompt like any other.
+- Its rollout records each edit with what it changed, by file (added or deleted with the content, updated with a diff): before 0.157 as a `patch_apply_end`, since 0.163 as an `item_completed` of a `FileChange`, never both.

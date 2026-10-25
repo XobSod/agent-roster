@@ -3,6 +3,8 @@
 //! internal format that may change (it's already kept two ways, as `legacy`
 //! and `paginated` history), so whatever can't be read is simply left out.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::stats::{AgentStats, Jsonl, Prompts, Tally};
@@ -24,6 +26,13 @@ pub struct Totals {
     window: Option<u64>,
     /// Output tokens summed from the per-call records, if there were any.
     counted: bool,
+    /// A compaction was just written: the count codex writes after it is the
+    /// compaction's own call's, of the context before it, so the context
+    /// stays unknown until another call (its record) or a prompt.
+    compacted: bool,
+    /// Lines its edits added and removed.
+    added: u64,
+    removed: u64,
 }
 
 impl Tally for Totals {
@@ -35,7 +44,7 @@ impl Tally for Totals {
             return;
         };
         if entry.kind.as_deref() == Some("compacted") {
-            self.context = None;
+            self.compaction();
             return;
         }
         let Some(payload) = entry.payload else {
@@ -49,10 +58,10 @@ impl Tally for Totals {
                     if self.typed.message(payload.kinds())
                         && let Some(text) = payload.text()
                     {
-                        self.prompts.push(text);
+                        self.prompt(text);
                     }
                 }
-                Some("compaction") => self.context = None,
+                Some("compaction") => self.compaction(),
                 _ => {}
             },
             // The tokens of one model call, summed as they come.
@@ -61,12 +70,14 @@ impl Tally for Totals {
                     self.output += usage.output_tokens.unwrap_or(0);
                     self.counted = true;
                 }
+                self.compacted = false;
             }
             Some("event_msg") => match payload.kind.as_deref() {
                 Some("token_count") => {
                     let info = payload.info.unwrap_or_default();
                     if let Some(usage) = info.last
                         && usage.total_tokens > 0
+                        && !self.compacted
                     {
                         self.context = Some(usage.total_tokens);
                     }
@@ -82,12 +93,23 @@ impl Tally for Totals {
                             .unwrap_or(self.output);
                     }
                 }
-                Some("context_compacted") => self.context = None,
+                Some("context_compacted") => self.compaction(),
+                // An edit, as codex records it: since 0.163 an item it
+                // completed, before a patch it applied.
+                Some("item_completed") => {
+                    if let Some(item) = payload.item.as_deref()
+                        && item.kind.as_deref() == Some("FileChange")
+                        && item.status.as_deref() == Some("completed")
+                    {
+                        self.edited(item);
+                    }
+                }
+                Some("patch_apply_end") if payload.success == Some(true) => self.edited(&payload),
                 Some("user_message") => {
                     if self.typed.event()
                         && let Some(text) = payload.message.filter(|t| !t.trim().is_empty())
                     {
-                        self.prompts.push(text);
+                        self.prompt(text);
                     }
                 }
                 _ => {}
@@ -104,12 +126,50 @@ impl Tally for Totals {
             context_used: self.context,
             context_limit: self.window,
             output_tokens: (self.output > 0).then_some(self.output),
+            lines_added: Some(self.added),
+            lines_removed: Some(self.removed),
             ..AgentStats::default()
         }
     }
 
     fn prompts(&self) -> &Prompts {
         &self.prompts
+    }
+}
+
+impl Totals {
+    fn compaction(&mut self) {
+        self.context = None;
+        self.compacted = true;
+    }
+
+    /// The lines an edit changed: a file's added or deleted whole, an updated
+    /// one's by its diff.
+    fn edited(&mut self, edit: &Payload) {
+        for change in edit.changes.iter().flat_map(HashMap::values) {
+            let lines =
+                |text: &Option<String>| text.as_deref().map_or(0, |t| t.lines().count() as u64);
+            match change.kind.as_deref() {
+                Some("add") => self.added += lines(&change.content),
+                Some("delete") => self.removed += lines(&change.content),
+                Some("update") => {
+                    for line in change.unified_diff.as_deref().unwrap_or("").lines() {
+                        if line.starts_with('+') && !line.starts_with("+++") {
+                            self.added += 1;
+                        } else if line.starts_with('-') && !line.starts_with("---") {
+                            self.removed += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A prompt starts a turn: its calls count again.
+    fn prompt(&mut self, text: String) {
+        self.prompts.push(text);
+        self.compacted = false;
     }
 }
 
@@ -132,8 +192,26 @@ struct Payload {
     info: Option<Info>,
     /// A `user_message` event's text.
     message: Option<String>,
+    /// An edit's: whether it was applied (a patch's, or an item's status),
+    /// and what it changed, by file.
+    success: Option<bool>,
+    status: Option<String>,
+    changes: Option<HashMap<String, Change>>,
+    /// The item an `item_completed` completed.
+    item: Option<Box<Payload>>,
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
     metadata: Option<Metadata>,
+}
+
+/// What an edit did to a file: added or deleted it, with its content, or
+/// updated it, with a diff.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Change {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    content: Option<String>,
+    unified_diff: Option<String>,
 }
 
 /// What codex notes of a message beside it: the kind of each of its parts.
@@ -255,6 +333,8 @@ fn wanted(line: &[u8]) -> bool {
         br#""token_usage_record""#,
         br#""token_count""#,
         br#""compaction""#,
+        br#""FileChange""#,
+        br#""patch_apply_end""#,
         br#""compacted""#,
         br#""context_compacted""#,
     ];
@@ -267,7 +347,7 @@ fn wanted(line: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::stats::Transcript;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -423,6 +503,42 @@ mod tests {
     }
 
     #[test]
+    fn counts_the_lines_its_edits_changed() {
+        let file_change = |status: &str, changes: Value| {
+            json!({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "FileChange", "id": "exec-1", "changes": changes, "status": status}}})
+            .to_string()
+        };
+        let mut lines = turn("make notes", 5, 115, 400_000);
+        // As 0.164 records them: a file added, then updated.
+        lines.push(file_change(
+            "completed",
+            json!({"/w/notes.txt": {"type": "add", "content": "one\ntwo\nthree\n"}}),
+        ));
+        lines.push(file_change(
+            "completed",
+            json!({"/w/notes.txt": {"type": "update", "move_path": null,
+                "unified_diff": "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"}}),
+        ));
+        // One that failed changed nothing.
+        lines.push(file_change(
+            "failed",
+            json!({"/w/x.txt": {"type": "add", "content": "a\nb\n"}}),
+        ));
+        // As before 0.157: a patch applied, deleting a file.
+        lines.push(
+            json!({"type": "event_msg", "payload": {"type": "patch_apply_end", "success": true,
+                "changes": {"/w/old.txt": {"type": "delete", "content": "gone\nalso gone\n"}}}})
+            .to_string(),
+        );
+        let (stats, _) = totals(&lines);
+        assert_eq!((stats.lines_added, stats.lines_removed), (Some(4), Some(3)));
+        // Nothing edited: nothing to show.
+        let (stats, _) = totals(&turn("look", 5, 115, 400_000));
+        assert_eq!((stats.lines_added, stats.lines_removed), (Some(0), Some(0)));
+    }
+
+    #[test]
     fn a_compaction_leaves_the_context_unknown_until_the_next_call() {
         // As codex writes it now (its paged history keeps no
         // `context_compacted` event), and as it did.
@@ -432,6 +548,15 @@ mod tests {
         ] {
             let mut lines = turn("fix it", 5, 115, 400_000);
             lines.push(compacted.to_string());
+            // As 0.164 writes it: the compaction's own call is counted after
+            // it, with the context it compacted.
+            lines.push(
+                json!({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"output_tokens": 9, "total_tokens": 300},
+                    "last_token_usage": {"total_tokens": 300},
+                    "model_context_window": 400_000}}})
+                .to_string(),
+            );
             let (stats, _) = totals(&lines);
             assert_eq!(stats.context_used, None, "{compacted}");
             assert_eq!(stats.output_tokens, Some(5));

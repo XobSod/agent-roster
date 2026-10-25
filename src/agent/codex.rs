@@ -1,10 +1,11 @@
 //! Codex (OpenAI's coding agent): hooks given to each run report its state,
 //! `codex resume` continues a conversation and `codex fork` copies one, and its
-//! rollout file gives the statistics. Codex names neither its conversation nor
-//! the task it's on, so its id arrives with the first report and roster makes
-//! its title (`[agents.codex] auto_title`). Its hooks say nothing before its
-//! first turn, so a first prompt goes on its command line: typed in, it would
-//! land in whatever codex shows first (a folder to trust, an update to run).
+//! rollout file gives the statistics. Codex takes no id for a conversation, so
+//! its id arrives with the first report; it names the conversation itself,
+//! from its first prompt on, in its index of them (`conversations::Names`).
+//! Its hooks say nothing before its first turn, so a first prompt goes on its
+//! command line: typed in, it would land in whatever codex shows first (a
+//! folder to trust, an update to run).
 
 pub mod conversations;
 mod transcript;
@@ -179,6 +180,17 @@ impl Adapter for Codex {
             model: text(payload.get("model")),
             ..Report::default()
         }
+    }
+
+    fn names_its_task(&self) -> bool {
+        true
+    }
+
+    /// The name codex gave the conversation, once it has: from its first
+    /// prompt, kept until it's cleared. (Its terminal title shows it too, but
+    /// that's the user's to configure, `[tui] terminal_title`.)
+    fn title(&self, _pane_title: &str, conversation: Option<&str>) -> Option<String> {
+        conversations::name_of(conversation?)
     }
 
     fn transcript(&self, path: &std::path::Path) -> Option<Box<dyn Transcript>> {

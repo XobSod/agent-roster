@@ -606,6 +606,11 @@ turn() {
   pay="{\"session_id\":\"$id\",\"transcript_path\":\"$file\",\"cwd\":\"$PWD\",\"model\":\"${model:-fake-model-1}\",\"source\":\"$source\"}"
   if [ "$started" = no ]; then report session "$pay"; started=yes; fi
   echo "turn: $1"
+  # Codex names a conversation from its first prompt, in its index.
+  mkdir -p "$CODEX_HOME"
+  if ! grep -qs "\"$id\"" "$CODEX_HOME/session_index.jsonl"; then
+    printf '{"id":"%s","thread_name":"named: %s","updated_at":"t"}\n' "$id" "$1" >> "$CODEX_HOME/session_index.jsonl"
+  fi
   report prompt "$pay"
   printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$PWD" >> "$file"
   printf '{"type":"turn_context","payload":{"model":"%s","effort":"%s"}}\n' "${model:-fake-model-1}" "${effort:-medium}" >> "$file"
@@ -728,11 +733,10 @@ fn codex_reports_through_the_hooks_it_is_given() {
         "{info}"
     );
 
-    // Codex names no task: after its first turn roster has it make a title.
-    t.wait_for("the automatic title", |t| {
-        t.session("c", false).unwrap()["title"]
-            .as_str()
-            .is_some_and(|title| title.starts_with("fake codex: exec"))
+    // Codex names its conversation itself, from its first prompt: that's its
+    // title, and roster makes none.
+    t.wait_for("codex's name for it", |t| {
+        t.session("c", false).unwrap()["title"] == "named: fix the tests"
     });
 
     // It resumes: a restart opens the same conversation, without asking, and
@@ -757,6 +761,10 @@ fn codex_reports_through_the_hooks_it_is_given() {
     t.wait_for("the new conversation", |t| {
         let s = t.session("c", false).unwrap();
         s["conversation_id"] != conversation.as_str() && s["state"] == "idle"
+    });
+    // Named anew, from its own first prompt.
+    t.wait_for("codex's name for the new one", |t| {
+        t.session("c", false).unwrap()["title"] == "named: after clearing"
     });
 
     // Without a first prompt: nothing typed in, nothing known until you give

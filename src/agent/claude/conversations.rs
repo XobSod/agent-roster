@@ -110,19 +110,22 @@ fn read(path: &Path) -> Option<Conversation> {
     Some(c)
 }
 
-/// A prompt the user typed: text, not a tool result, a meta message, or a
-/// command wrapped in tags.
+/// A prompt the user gave, as Claude's transcript reader tells one
+/// (`transcript::is_prompt`): not a meta message, a tool result, or one of
+/// Claude's own; a list (a prompt with an image or a file) only if Claude
+/// marked it as given.
 fn typed_prompt(e: &Value) -> Option<String> {
     if e["isMeta"].as_bool() == Some(true) {
         return None;
     }
+    let given = !e["promptSource"].is_null();
     let content = &e["message"]["content"];
-    let text = match content.as_str() {
-        Some(text) => text,
-        None => content.as_array()?.iter().find(|b| b["type"] == "text")?["text"].as_str()?,
-    };
-    let text = text.trim();
-    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_string())
+    let text = match content {
+        Value::String(text) => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+        Value::Array(_) if given => crate::agent::message_text(content),
+        _ => None,
+    }?;
+    super::transcript::is_prompt(&text, given).then_some(text)
 }
 
 /// Conversations a running Claude has open, by conversation id, with its pid.
@@ -201,8 +204,17 @@ mod tests {
             "c-2",
             &[
                 r#"{"type":"user","cwd":"/work/app","message":{"content":"<command-name>/model</command-name>"}}"#,
-                r#"{"type":"user","message":{"content":[{"type":"text","text":"  review\n the PR "}]}}"#,
+                r#"{"type":"user","promptSource":"typed","message":{"content":[{"type":"text","text":"  review\n the PR "}]}}"#,
                 r#"{"type":"custom-title","customTitle":"Reviews"}"#,
+            ],
+        );
+        // Only a prompt in markup, typed: offered, with it.
+        conversation_file(
+            dir.path(),
+            "c-3",
+            &[
+                r#"{"type":"user","cwd":"/work/app","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+                r#"{"type":"user","promptSource":"typed","message":{"content":"<task>Fix the bug</task>"}}"#,
             ],
         );
         // Nothing in it yet: not offered.
@@ -212,7 +224,9 @@ mod tests {
             &[r#"{"type":"mode","cwd":"/work/app"}"#],
         );
         let found = conversations(dir.path(), |_| true);
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.len(), 3);
+        let c = found.iter().find(|c| c.id == "c-3").unwrap();
+        assert_eq!(c.first_prompt.as_deref(), Some("<task>Fix the bug</task>"));
         let c = found.iter().find(|c| c.id == "c-2").unwrap();
         assert_eq!(c.first_prompt.as_deref(), Some("review\n the PR"));
         assert_eq!(c.label(), "Reviews");

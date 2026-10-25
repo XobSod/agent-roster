@@ -167,6 +167,7 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 
 **Claude Code**
 - Hooks given with `--settings` fire alongside the user's and the project's own.
+- A prompt is written as a string, or as a list when it has an image or a file; since 2.1.283 a prompt carries `promptSource`, and the other lists (tool results, its markers such as an interruption) don't.
 - Every hook payload names the conversation and its transcript; `SessionStart` says whether it started, resumed, cleared or compacted one, and the model only for a new conversation.
 - Esc during a turn fires no hook; an approved permission fires none until the tool has run; `Notification` comes about 6 s after a permission prompt.
 - `--session-id` fails once the conversation has messages, `--resume` gets it back, and `--fork-session` copies it, written with its first message.

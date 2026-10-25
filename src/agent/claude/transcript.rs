@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::IgnoredAny;
+use serde_json::value::RawValue;
 
-use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, leading_type};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text, leading_type};
 
 /// Reads a Claude transcript as it grows.
 pub type ClaudeTranscript = Jsonl<Totals>;
@@ -55,10 +56,9 @@ impl Lines for Totals {
                 }
             }
             Some("user") if entry.is_meta != Some(true) => {
-                // A typed prompt is text; tool results are lists, and local
-                // commands and their output are wrapped in tags.
-                if let Some(PlainText(Some(text))) = message.content
-                    && !text.trim_start().starts_with('<')
+                let given = entry.prompt_source.is_some();
+                if let Some(text) = message.content.and_then(|c| prompt(c, given))
+                    && is_prompt(&text, given)
                 {
                     self.prompts.push(text);
                 }
@@ -107,7 +107,11 @@ struct Entry<'a> {
     kind: Option<std::borrow::Cow<'a, str>>,
     #[serde(rename = "isMeta")]
     is_meta: Option<bool>,
-    message: Option<Message>,
+    /// Where a prompt came from, on prompts alone.
+    #[serde(rename = "promptSource")]
+    prompt_source: Option<IgnoredAny>,
+    #[serde(borrow)]
+    message: Option<Message<'a>>,
     #[serde(rename = "totalCostUSD")]
     total_cost: Option<f64>,
     #[serde(rename = "totalLinesAdded")]
@@ -116,11 +120,14 @@ struct Entry<'a> {
     lines_removed: Option<u64>,
 }
 
+/// A message, its content left unread (often large: replies, tool results)
+/// until it's known to be a prompt.
 #[derive(Default, Deserialize)]
-struct Message {
+struct Message<'a> {
     id: Option<String>,
     usage: Option<Usage>,
-    content: Option<PlainText>,
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
 }
 
 #[derive(Default, Deserialize)]
@@ -131,36 +138,27 @@ struct Usage {
     cache_creation_input_tokens: Option<u64>,
 }
 
-/// A message's content if it's a string (a typed prompt). Claude writes the
-/// rest as lists (tool results, replies, often large; and its own markers,
-/// such as an interruption), so unlike `stats::Text` these are skipped
-/// whole, without being kept.
-struct PlainText(Option<String>);
+/// Whether a user message's text is a prompt the user gave: one Claude marked
+/// as given (`promptSource`, since 2.1.283) whatever it begins with, markup
+/// too; one unmarked (from an older Claude, or Claude's own: its local
+/// commands, shell input and their output) only if it isn't wrapped in tags,
+/// as those are. Both of Claude's readers, transcript and conversations, ask.
+pub(super) fn is_prompt(text: &str, given: bool) -> bool {
+    given || !text.trim_start().starts_with('<')
+}
 
-impl<'de> Deserialize<'de> for PlainText {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<PlainText, D::Error> {
-        struct Content;
-        impl<'de> Visitor<'de> for Content {
-            type Value = PlainText;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a message's content")
-            }
-            fn visit_str<E>(self, text: &str) -> Result<PlainText, E> {
-                Ok(PlainText(Some(text.to_string())))
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<PlainText, A::Error> {
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(PlainText(None))
-            }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<PlainText, A::Error> {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(PlainText(None))
-            }
-            fn visit_unit<E>(self) -> Result<PlainText, E> {
-                Ok(PlainText(None))
-            }
-        }
-        d.deserialize_any(Content)
+/// A prompt's text, from a user message's content: a string, or the text
+/// blocks of a list, which Claude writes for a prompt with an image or a
+/// file. A list is read only if it was `given`: Claude marks the prompts it
+/// was given (`promptSource`: typed, queued, from the SDK), and its other
+/// lists, tool results and its own markers (an interruption), aren't.
+fn prompt(content: &RawValue, given: bool) -> Option<String> {
+    if content.get().starts_with('"') {
+        serde_json::from_str(content.get()).ok()
+    } else if given {
+        serde_json::from_str::<Text>(content.get()).ok()?.0
+    } else {
+        None
     }
 }
 
@@ -237,6 +235,47 @@ mod tests {
 
     fn prompt(text: &str) -> String {
         line(serde_json::json!({"type": "user", "message": {"content": text}}))
+    }
+
+    #[test]
+    fn a_prompt_with_an_image_counts_and_claudes_own_lists_dont() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // As Claude Code 2.1.310 writes them.
+        let text = [
+            serde_json::json!({"type": "user", "promptSource": "typed", "message": {"role": "user",
+                "content": [{"type": "image", "source": {"type": "base64", "data": "…"}},
+                            {"type": "text", "text": "What colour is this?"}]}}),
+            serde_json::json!({"type": "user", "isMeta": true, "message": {"role": "user",
+                "content": [{"type": "text", "text": "[Image: source: /tmp/1.png]"}]}}),
+            serde_json::json!({"type": "user", "message": {"role": "user",
+                "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
+            serde_json::json!({"type": "user", "message": {"role": "user",
+                "content": [{"type": "tool_result", "content": "output"}]}}),
+            serde_json::json!({"type": "user", "promptSource": "typed",
+                "message": {"role": "user", "content": "and now?"}}),
+            // Markup typed is a prompt; Claude's own, in tags and unmarked, isn't.
+            serde_json::json!({"type": "user", "promptSource": "typed",
+                "message": {"role": "user", "content": "<task>Fix the bug</task>"}}),
+            serde_json::json!({"type": "user",
+                "message": {"role": "user", "content": "<bash-input>echo hi</bash-input>"}}),
+            serde_json::json!({"type": "user",
+                "message": {"role": "user", "content": "<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"}}),
+        ]
+        .map(line)
+        .concat();
+        std::fs::write(&path, text).unwrap();
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        assert_eq!(t.stats(None).prompts, Some(3));
+        assert_eq!(
+            t.recent_prompts(),
+            [
+                "What colour is this?",
+                "and now?",
+                "<task>Fix the bug</task>"
+            ]
+        );
     }
 
     #[test]

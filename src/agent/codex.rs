@@ -16,6 +16,7 @@ use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, R
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
+use crate::util::sh_quote;
 use transcript::CodexTranscript;
 
 pub const CODEX: &str = "codex";
@@ -35,6 +36,36 @@ const HOOKS: &[(&str, &str)] = &[
     ("PostToolUse", "working"),
     ("PermissionRequest", "needs-input"),
     ("Stop", "idle"),
+];
+
+/// What a one-off run turns off, as config overrides: every feature that
+/// gives the model a tool, hooks (all of them: a feature, not a layer), web
+/// search, MCP servers, subagents and the project's AGENTS.md. As `-c` rather
+/// than `--disable`, so a feature a later codex drops is a warning, not an
+/// error. Codex still offers `exec` and `request_user_input`, which no
+/// setting takes away; with `code_mode_host` off, `exec` fails at once, and
+/// what it would run the read-only sandbox refuses. The user's own AGENTS.md
+/// still comes, as nothing turns it off.
+const ONEOFF_OFF: &[&str] = &[
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+    "features.code_mode_host=false",
+    "features.multi_agent=false",
+    "features.sleep_tool=false",
+    "features.view_image=false",
+    "features.image_generation=false",
+    "features.apps=false",
+    "features.plugins=false",
+    "features.hooks=false",
+    "features.skill_search=false",
+    "features.tool_suggest=false",
+    "features.browser_use=false",
+    "features.computer_use=false",
+    "features.goals=false",
+    r#"web_search="disabled""#,
+    "mcp_servers={}",
+    "agents.enabled=false",
+    "project_doc_max_bytes=0",
 ];
 
 pub struct Codex;
@@ -134,13 +165,16 @@ impl Adapter for Codex {
     }
 
     /// Codex's payloads name the conversation and the file it's kept in, both
-    /// of which change when it's cleared; `source` says how it started.
+    /// of which change when it's cleared; `source` says how it started:
+    /// `startup` for a new conversation, `resume` and `clear` otherwise.
     fn report(&self, payload: &Value) -> Report {
         let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
+        let source = payload.get("source").and_then(Value::as_str);
         Report {
             conversation_id: text(payload.get("session_id")),
             transcript_path: text(payload.get("transcript_path")),
-            cleared: payload.get("source").and_then(Value::as_str) == Some("clear"),
+            cleared: source == Some("clear"),
+            started: source == Some("startup"),
             model: text(payload.get("model")),
             ..Report::default()
         }
@@ -152,7 +186,9 @@ impl Adapter for Codex {
 
     /// `codex exec`: nothing kept (`--ephemeral`), nothing changed (a read-only
     /// sandbox; exec asks for no approvals), and the answer alone on stdout.
-    /// The model `title_model` (or `model`) picks, else codex's own default.
+    /// Its tools, hooks, MCP servers and the project's AGENTS.md are turned
+    /// off (`ONEOFF_OFF`). The model `title_model` (or `model`) picks, else
+    /// codex's own default.
     fn oneoff(&self, config: &Config) -> Option<Vec<String>> {
         let agent = config.agent(CODEX);
         let mut argv: Vec<String> = vec![
@@ -163,6 +199,9 @@ impl Adapter for Codex {
             "-s".into(),
             "read-only".into(),
         ];
+        for setting in ONEOFF_OFF {
+            argv.extend(["-c".into(), setting.to_string()]);
+        }
         if let Some(model) = agent.titles_by() {
             argv.extend(["-c".into(), format!("model={}", toml_str(&model))]);
         }
@@ -171,7 +210,12 @@ impl Adapter for Codex {
 }
 
 /// The `-c` arguments giving a run its hooks: each event runs
-/// `roster report <kind>` with the payload on its stdin.
+/// `roster report <kind>` with the payload on its stdin, through a shell, so
+/// roster's path is quoted for it.
+///
+/// They add to the user's and the project's hooks rather than replace them:
+/// though `-c hooks.Stop=[…]` replaces `hooks.Stop` in the merged config,
+/// codex gathers hooks layer by layer, and `-c` is a layer of its own.
 ///
 /// Codex runs a hook only once it's trusted, so it asks to review these the
 /// first time (and again if roster moves: the command is part of what's
@@ -181,7 +225,7 @@ impl Adapter for Codex {
 fn hooks(exe: &str) -> Vec<String> {
     let mut argv = Vec::new();
     for (event, kind) in HOOKS {
-        let command = format!("{exe} report {kind}");
+        let command = format!("{} report {kind}", sh_quote(exe));
         argv.extend([
             "-c".to_string(),
             format!(
@@ -277,9 +321,9 @@ mod tests {
         assert!(launch.conversation_id.is_none());
         let argv = argv(&s).join(" ");
         assert!(!argv.contains("resume") && !argv.contains("fork"), "{argv}");
-        assert!(argv.contains(r#"hooks.SessionStart=[{hooks=[{type="command",command="/roster with spaces report session"}]}]"#));
+        assert!(argv.contains(r#"hooks.SessionStart=[{hooks=[{type="command",command="'/roster with spaces' report session"}]}]"#));
         assert!(argv.contains(
-            r#"hooks.Stop=[{hooks=[{type="command",command="/roster with spaces report idle"}]}]"#
+            r#"hooks.Stop=[{hooks=[{type="command",command="'/roster with spaces' report idle"}]}]"#
         ));
         // Its own server, so its tools get the session's environment; and its
         // review of hooks isn't skipped (for every hook, that would be).
@@ -287,6 +331,33 @@ mod tests {
         assert!(!argv.contains("dangerously"), "{argv}");
         // Quoted for the shell once, for TOML inside the value: no double work.
         assert!(!argv.contains("'\"'"), "{argv}");
+    }
+
+    /// Each hook's command, as codex reads it from its `-c` value and runs it
+    /// with `sh -c`, runs roster at a path with a space and a quote in it.
+    #[test]
+    fn its_hooks_run_roster_wherever_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("my tools").join("it's roster");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "#!/bin/sh\necho \"ran $*\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let argv = hooks(&exe.to_string_lossy());
+        for ((event, kind), pair) in HOOKS.iter().zip(argv.chunks(2)) {
+            let value = pair[1].strip_prefix(&format!("hooks.{event}=")).unwrap();
+            let parsed: toml::Value = toml::from_str(&format!("v = {value}")).unwrap();
+            let command = parsed["v"][0]["hooks"][0]["command"].as_str().unwrap();
+            let out = std::process::Command::new("sh")
+                .args(["-c", command])
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("ran report {kind}\n"),
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -360,7 +431,10 @@ mod tests {
                 Some("gpt-6.1-sol")
             )
         );
-        assert!(report.cleared);
+        assert!(report.cleared && !report.started);
+        let source = |source: &str| Codex.report(&serde_json::json!({"source": source}));
+        assert!(source("startup").started && !source("startup").cleared);
+        assert!(!source("resume").started && !source("resume").cleared);
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }
@@ -398,6 +472,16 @@ mod tests {
         );
         assert!(argv.contains("-s read-only"));
         assert!(!argv.contains("model="));
+        for off in [
+            "-c features.shell_tool=false",
+            "-c features.code_mode_host=false",
+            "-c features.hooks=false",
+            "-c mcp_servers={}",
+            "-c agents.enabled=false",
+            "-c project_doc_max_bytes=0",
+        ] {
+            assert!(argv.contains(off), "{off} in {argv}");
+        }
         let config = config_with(
             CODEX,
             AgentConfig {

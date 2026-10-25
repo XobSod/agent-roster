@@ -90,7 +90,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 
 ### 3.7 Titles
 - **The agent's own** (Claude's terminal title, pi's session name), or **one of yours**, which wins; taking yours off follows the agent's again.
-- **Generated on request**: the session's own agent, run one-off with no tools and nothing kept, names what its recent prompts are about. It's kept as your title, since Claude would overwrite its own. It's made in the background, and kept only if the session is still as it was when asked: the same conversation, and no title of yours given or taken off meanwhile. Generic agents can't get one, as roster can't read their conversations.
+- **Generated on request**: the session's own agent, run one-off with no tools (or the fewest it allows, none of them able to act) and nothing kept, names what its recent prompts are about. It's kept as your title, since Claude would overwrite its own. It's made in the background, and kept only if the session is still as it was when asked: the same conversation, and no title of yours given or taken off meanwhile. Generic agents can't get one, as roster can't read their conversations.
 - **Automatic**, for agents that don't name their task (pi): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
 
 ### 3.8 Notes
@@ -149,13 +149,13 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Ignoring parts of a generic agent's screen**: all of it counts, so an agent that redraws while idle (a clock) flips between working and idle.
 - **tmux control mode or file watching**: polling once a second is enough.
 - **macOS and other systems**: roster runs on Linux.
-- **Narrow races, accepted**: a refresh writes the state it observed, so in a narrow window another process's fold can lose to it; a first prompt claimed but not yet typed is lost if roster is killed in between; a resize's redraw may count as activity once for another roster process; a start reported after a quick edit of its model is learned under the edited alias.
+- **Narrow races, accepted**: a refresh writes the state it observed, so in a narrow window another process's fold can lose to it; a first prompt claimed but not yet typed is lost if roster is killed in between; a resize's redraw may count as activity once for another roster process; a start reported after a quick edit of its model is learned under the edited alias; Codex reports its start with its first turn, so a model switched inside it before the first prompt is learned as what its start asked for.
 
 ---
 
 ## Appendix: what roster relies on
 
-Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 1.4.0). A change in one of these can break roster.
+Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 1.4.0, Codex 0.163.0). A change in one of these can break roster.
 
 **tmux**
 - Extended keys and `new-session -e` exist from 3.2.
@@ -180,3 +180,9 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 - `-e <file>` loads an extension for that run, alongside the user's own; `--session-id` opens a conversation or creates it; `--fork` copies one; `--list-models --offline` lists its models.
 - `agent_end` can be followed by retries; `agent_settled` comes once the turn is really over.
 - It leaves no sign that a conversation is open.
+
+**Codex**
+- Hooks given with `-c hooks.<Event>=[…]` are a layer of their own and fire alongside the user's and the project's, whether those are in `config.toml` or `hooks.json`, though the merged config shows only the `-c` ones.
+- `codex exec` always offers the model `exec` and `request_user_input`, whatever is turned off; with `code_mode_host` off, `exec` fails at once, and in a read-only sandbox `apply_patch` is refused. The user's own `AGENTS.md` comes whatever is turned off; `project_doc_max_bytes=0` keeps out the project's.
+- An unknown feature is an error for `--disable`, a warning for `-c features.<name>=false`.
+- Its rollout gives the model context as user messages too. Since 0.157 it marks each message's parts with their kinds (`user.text` for a prompt); before, it marked none and wrote each prompt again as a `user_message` event, which 0.124 also wrote beside marked messages. A prompt given on its command line is a prompt like any other.

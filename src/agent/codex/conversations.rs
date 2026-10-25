@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::CODEX;
+use super::transcript::Typed;
 use crate::agent::Conversation;
 
 /// Codex's directory: `$CODEX_HOME`, else `~/.codex`.
@@ -115,6 +116,13 @@ fn read(path: &Path) -> Option<Conversation> {
         open_in: None,
     };
     let mut cwd = None;
+    let mut typed = Typed::default();
+    let mut prompt = |text: String| {
+        if c.first_prompt.is_none() {
+            c.first_prompt = Some(text.clone());
+        }
+        c.last_prompt = Some(text);
+    };
     for e in &entries {
         let payload = &e["payload"];
         match e["type"].as_str() {
@@ -141,13 +149,30 @@ fn read(path: &Path) -> Option<Conversation> {
                 }
             }
             Some("response_item") if payload["type"] == "message" && payload["role"] == "user" => {
-                let Some(text) = typed_prompt(payload) else {
-                    continue;
-                };
-                if c.first_prompt.is_none() {
-                    c.first_prompt = Some(text.clone());
+                let kinds: Option<Vec<String>> =
+                    payload["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                        .as_array()
+                        .map(|kinds| {
+                            kinds
+                                .iter()
+                                .filter_map(|k| k.as_str().map(String::from))
+                                .collect()
+                        });
+                if typed.message(kinds.as_deref())
+                    && let Some(text) = message_text(payload)
+                {
+                    prompt(text);
                 }
-                c.last_prompt = Some(text);
+            }
+            Some("event_msg") if payload["type"] == "user_message" => {
+                if typed.event()
+                    && let Some(text) = payload["message"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                {
+                    prompt(text.to_string());
+                }
             }
             _ => {}
         }
@@ -159,9 +184,8 @@ fn read(path: &Path) -> Option<Conversation> {
     Some(c)
 }
 
-/// A prompt you typed: a message's text, unless it's context codex gives the
-/// model as one (`transcript::typed`).
-fn typed_prompt(payload: &Value) -> Option<String> {
+/// A message's text: one string, or the text blocks of a list.
+fn message_text(payload: &Value) -> Option<String> {
     match &payload["content"] {
         Value::String(text) => Some(text.clone()),
         Value::Array(blocks) => {
@@ -175,7 +199,7 @@ fn typed_prompt(payload: &Value) -> Option<String> {
         _ => None,
     }
     .map(|text| text.trim().to_string())
-    .filter(|text| super::transcript::typed(text))
+    .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]
@@ -216,15 +240,15 @@ mod tests {
                     r#"{{"timestamp":"2026-10-21T10:00:00Z","type":"session_meta","payload":{{"id":"{id}","cwd":"/work/app","git":{{"branch":"main"}}}}}}"#
                 ),
                 r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol","effort":"high"}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>ignored</environment_context>"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>ignored</environment_context>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["environments.environment_context"]}}}"#,
                 r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work/app
 
 <INSTRUCTIONS>
 be brief
-</INSTRUCTIONS>"}]}}"##,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}]}}"#,
+</INSTRUCTIONS>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions"]}}}"##,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"and the tests"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"and the tests"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}"#,
                 r#"{"type":"turn_context","payload":{"model":"gpt-reserve","effort":"low"}}"#,
             ],
         );
@@ -235,7 +259,22 @@ be brief
             "20",
             &[
                 r#"{"type":"session_meta","payload":{"id":"01a16554-00a8-7983-837e-721a0ace205f","cwd":"/work/app"}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<system>hi</system>"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>hi</environment_context>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["environments.environment_context"]}}}"#,
+            ],
+        );
+        // Nothing but a prompt in markup, from an older codex: offered.
+        let older = "019d880a-44de-7563-a769-7d41f3a34580";
+        rollout(
+            dir.path(),
+            older,
+            "19",
+            &[
+                &format!(
+                    r#"{{"type":"session_meta","payload":{{"id":"{older}","cwd":"/work/app"}}}}"#
+                ),
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>hi</environment_context>"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<task>Fix the bug</task>"}]}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"<task>Fix the bug</task>","images":[]}}"#,
             ],
         );
         fs::write(
@@ -247,8 +286,13 @@ be brief
         .unwrap();
 
         let found = conversations(dir.path(), |_| true);
-        assert_eq!(found.len(), 1, "{found:?}");
-        let c = &found[0];
+        assert_eq!(found.len(), 2, "{found:?}");
+        let by_id = |id: &str| found.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            by_id(older).first_prompt.as_deref(),
+            Some("<task>Fix the bug</task>")
+        );
+        let c = by_id(id);
         assert_eq!(c.id, id);
         assert_eq!(c.agent, CODEX);
         assert_eq!(c.cwd, PathBuf::from("/work/app"));

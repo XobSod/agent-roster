@@ -1275,6 +1275,29 @@ mod tests {
     }
 
     #[test]
+    fn learns_codexs_models_from_its_start_only() {
+        let (mut db, claude) = db_with_session();
+        let mut s = session("c1");
+        s.project_id = claude.project_id;
+        s.agent = "codex".into();
+        db.insert_session(&s).unwrap();
+        // As codex 0.164 reports them: a resume and a clear in it first.
+        for (at, source) in [(10, "resume"), (11, "clear")] {
+            let payload =
+                format!(r#"{{"session_id":"01a1","model":"gpt-6.1-sol","source":"{source}"}}"#);
+            db.insert_event(&s.id, "session", at, Some(&payload))
+                .unwrap();
+        }
+        db.fold_events(100).unwrap();
+        assert!(!db.model_names().unwrap().contains_key("codex:default"));
+        let started = r#"{"session_id":"01a2","model":"gpt-6.1-sol","source":"startup"}"#;
+        db.insert_event(&s.id, "session", 20, Some(started))
+            .unwrap();
+        db.fold_events(100).unwrap();
+        assert!(db.model_names().unwrap().contains_key("codex:default"));
+    }
+
+    #[test]
     fn backfills_models_from_events_processed_earlier() {
         let (mut db, s) = db_with_session();
         db.insert_event(

@@ -14,6 +14,7 @@ pub type CodexTranscript = Jsonl<Totals>;
 #[derive(Debug, Default)]
 pub struct Totals {
     prompts: Prompts,
+    typed: Typed,
     /// Output tokens, counted once per model call.
     output: u64,
     /// What the last call sent: the tokens in context. Unknown after a
@@ -45,10 +46,9 @@ impl Tally for Totals {
             // it that roster counts.
             Some("response_item") => match payload.kind.as_deref() {
                 Some("message") if payload.role.as_deref() == Some("user") => {
-                    // A typed prompt is text; tool results are lists of
-                    // outputs, and codex gives the model context as user
-                    // messages too.
-                    if let Some(text) = payload.text().filter(|t| typed(t)) {
+                    if self.typed.message(payload.kinds())
+                        && let Some(text) = payload.text()
+                    {
                         self.prompts.push(text);
                     }
                 }
@@ -83,6 +83,13 @@ impl Tally for Totals {
                     }
                 }
                 Some("context_compacted") => self.context = None,
+                Some("user_message") => {
+                    if self.typed.event()
+                        && let Some(text) = payload.message.filter(|t| !t.trim().is_empty())
+                    {
+                        self.prompts.push(text);
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -123,6 +130,17 @@ struct Payload {
     content: Option<Content>,
     usage: Option<Usage>,
     info: Option<Info>,
+    /// A `user_message` event's text.
+    message: Option<String>,
+    #[serde(rename = "internal_chat_message_metadata_passthrough")]
+    metadata: Option<Metadata>,
+}
+
+/// What codex notes of a message beside it: the kind of each of its parts.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Metadata {
+    content_item_kinds: Option<Vec<String>>,
 }
 
 /// Tokens, as codex counts them: `output_tokens` of a call, `total_tokens` of
@@ -149,6 +167,10 @@ struct Info {
 }
 
 impl Payload {
+    fn kinds(&self) -> Option<&[String]> {
+        self.metadata.as_ref()?.content_item_kinds.as_deref()
+    }
+
     /// The text of a message: one string, or the text blocks of a list (the
     /// images, files and tool outputs in it are skipped).
     fn text(&self) -> Option<String> {
@@ -186,12 +208,41 @@ struct Block {
     text: Option<String>,
 }
 
-/// Whether a user message's text is a prompt you typed, not context codex
-/// gives the model as one: its fragments wrapped in tags (the environment, a
-/// skill's or a hook's text, an aborted turn) and AGENTS.md's instructions.
-pub(super) fn typed(text: &str) -> bool {
-    let text = text.trim_start();
-    !text.is_empty() && !text.starts_with('<') && !text.starts_with("# AGENTS.md instructions")
+/// Which of a rollout's user messages are prompts you typed, as codex says
+/// itself rather than by their text: codex gives the model context as user
+/// messages too. Since 0.157 it marks each message with the kinds of its parts
+/// (`user.text` for yours; `environments.environment_context`,
+/// `agents_md.instructions` and the like for its own). Before, it marked none,
+/// and wrote what you typed again as a `user_message` event after it, which
+/// 0.124 did beside marked ones too. So a marked message is a prompt by its
+/// kinds, and an event only after an unmarked one: nothing counts twice.
+#[derive(Debug)]
+pub(super) struct Typed {
+    after_unmarked: bool,
+}
+
+impl Default for Typed {
+    /// As if after an unmarked message: an event read first (the end of a
+    /// rollout read without its middle) is the prompt of one not read.
+    fn default() -> Self {
+        Typed {
+            after_unmarked: true,
+        }
+    }
+}
+
+impl Typed {
+    /// A user message, with the kinds codex marked it with: whether it's a
+    /// prompt.
+    pub(super) fn message(&mut self, kinds: Option<&[String]>) -> bool {
+        self.after_unmarked = kinds.is_none();
+        kinds.is_some_and(|kinds| kinds.iter().any(|k| k == "user.text"))
+    }
+
+    /// A `user_message` event: whether it's a prompt not counted already.
+    pub(super) fn event(&mut self) -> bool {
+        std::mem::take(&mut self.after_unmarked)
+    }
 }
 
 /// The lines worth parsing: codex writes a line per thing that happens, and
@@ -200,6 +251,7 @@ pub(super) fn typed(text: &str) -> bool {
 fn wanted(line: &[u8]) -> bool {
     const MARKS: &[&[u8]] = &[
         br#""response_item""#,
+        br#""user_message""#,
         br#""token_usage_record""#,
         br#""token_count""#,
         br#""compaction""#,
@@ -219,13 +271,28 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
 
+    /// A user message as codex writes it, marked with its kinds as since 0.157
+    /// (None: unmarked, as before).
+    fn user(text: &str, kinds: Option<&[&str]>) -> String {
+        let mut payload = json!({"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}, {"type": "image", "image_url": "…"}]});
+        if let Some(kinds) = kinds {
+            payload["internal_chat_message_metadata_passthrough"] =
+                json!({"turn_id": "t1", "content_item_kinds": kinds});
+        }
+        json!({"timestamp": "t", "type": "response_item", "payload": payload}).to_string()
+    }
+
+    /// What codex wrote, before 0.157, of what you typed.
+    fn user_event(text: &str) -> String {
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": text, "images": []}})
+            .to_string()
+    }
+
     /// A turn as codex writes it: your prompt, what it cost, and where it is.
     fn turn(text: &str, output: u64, total: u64, window: u64) -> Vec<String> {
         vec![
-            json!({"timestamp": "t", "type": "response_item", "payload": {"type": "message",
-                "role": "user", "content": [{"type": "input_text", "text": text},
-                                            {"type": "image", "image_url": "…"}]}})
-            .to_string(),
+            user(text, Some(&["user.text"])),
             json!({"timestamp": "t", "type": "response_item", "payload": {"type": "message",
                 "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}})
             .to_string(),
@@ -270,18 +337,22 @@ mod tests {
 
     #[test]
     fn counts_a_prompt_once_and_skips_what_codex_injects() {
-        let mut lines = turn("fix it", 5, 115, 400_000);
-        for injected in [
-            "<environment_context>…</environment_context>",
-            "<model_switch>use another model</model_switch>",
-            "# AGENTS.md instructions for /work/app\n\n<INSTRUCTIONS>\nbe brief\n</INSTRUCTIONS>",
-        ] {
-            lines.push(
-                json!({"type": "response_item", "payload": {"type": "message", "role": "user",
-                    "content": [{"type": "input_text", "text": injected}]}})
-                .to_string(),
-            );
-        }
+        let mut lines = vec![
+            user(
+                "<environment_context>…</environment_context>",
+                Some(&["environments.environment_context"]),
+            ),
+            user(
+                "# AGENTS.md instructions for /work/app\n\n<INSTRUCTIONS>\nbe brief\n</INSTRUCTIONS>",
+                Some(&["agents_md.instructions", "environments.environment_context"]),
+            ),
+        ];
+        lines.extend(turn("fix it", 5, 115, 400_000));
+        // Yours however it begins: codex says it's yours.
+        lines.push(user("<task>Fix the bug</task>", Some(&["user.text"])));
+        // Codex 0.124 wrote the event beside a marked message: still one.
+        lines.push(user("and the docs", Some(&["user.text"])));
+        lines.push(user_event("and the docs"));
         // A developer message, a tool call, and a line that isn't JSON.
         lines.push(
             json!({"type": "response_item", "payload": {"type": "message", "role": "developer",
@@ -291,8 +362,27 @@ mod tests {
         lines.push(json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}"}}).to_string());
         lines.push("{not json".into());
         let (stats, prompts) = totals(&lines);
-        assert_eq!(stats.prompts, Some(1));
-        assert_eq!(prompts, ["fix it"]);
+        assert_eq!(stats.prompts, Some(3));
+        assert_eq!(
+            prompts,
+            ["fix it", "<task>Fix the bug</task>", "and the docs"]
+        );
+    }
+
+    #[test]
+    fn reads_the_prompts_of_an_older_codex_from_its_events() {
+        // Before 0.157 nothing was marked; what you typed came again as an
+        // event. A conversation resumed by a newer codex goes on marked.
+        let lines = [
+            user("<environment_context>…</environment_context>", None),
+            user("<task>Fix the bug</task>", None),
+            user_event("<task>Fix the bug</task>"),
+            user("<turn_aborted>", None),
+            user("go on", Some(&["user.text"])),
+        ];
+        let (stats, prompts) = totals(&lines);
+        assert_eq!(stats.prompts, Some(2));
+        assert_eq!(prompts, ["<task>Fix the bug</task>", "go on"]);
     }
 
     #[test]

@@ -609,7 +609,7 @@ turn() {
   report prompt "$pay"
   printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$PWD" >> "$file"
   printf '{"type":"turn_context","payload":{"model":"%s","effort":"%s"}}\n' "${model:-fake-model-1}" "${effort:-medium}" >> "$file"
-  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$1" >> "$file"
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}\n' "$1" >> "$file"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n' >> "$file"
   printf '{"type":"token_usage_record","payload":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":115}}}\n' >> "$file"
   printf '{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"output_tokens":5,"total_tokens":115},"last_token_usage":{"total_tokens":115},"model_context_window":400000}}}\n' >> "$file"
@@ -696,7 +696,9 @@ fn codex_reports_through_the_hooks_it_is_given() {
     let conversation = s["conversation_id"].as_str().unwrap().to_string();
     // Codex is told no id: it names its conversation and reports it back.
     assert_eq!(conversation.len(), 36, "{conversation}");
-    let screen = t.ok(&["show", "c"]);
+    // Its arguments as the stand-in echoes them, however the screen wraps
+    // them (roster's path is in them, as long as it is).
+    let screen = t.ok(&["show", "c"]).replace('\n', "");
     assert!(
         screen.contains("--no-daemon")
             && screen.contains(r#"-c model="fake-model-1""#)
@@ -797,8 +799,8 @@ fn codex_conversations_can_be_adopted() {
         let lines = [
             serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": t.path("proj"), "git": {"branch": "main"}}}),
             serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-6.1-sol", "effort": "high"}}),
-            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>not a prompt</environment_context>"}]}}),
-            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}]}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>not a prompt</environment_context>"}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["environments.environment_context"]}}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["user.text"]}}}),
         ];
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
         fs::write(

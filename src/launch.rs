@@ -67,11 +67,34 @@ pub fn wrap(
 /// starts ends with it: on a timeout, or as it exits if something it left
 /// running keeps its output open.
 pub fn run_with_timeout(
-    mut cmd: std::process::Command,
+    cmd: std::process::Command,
     what: &str,
     timeout: Duration,
 ) -> Result<std::process::Output> {
-    use std::io::Read;
+    converse(cmd, what, timeout, None)
+}
+
+/// What a command run by `converse` is given to read.
+pub struct Input<'a> {
+    pub text: &'a [u8],
+    /// Whether what it has printed so far answers it: until then its stdin
+    /// stays open, for a command that serves until its input ends (codex's
+    /// server), and then it's ended, as if it had exited with 0. None: its
+    /// stdin closes once it has the text, and it runs to its end.
+    pub answered: Option<&'a Answered>,
+}
+
+/// Whether what a command printed so far answers it (`Input::answered`).
+pub type Answered = dyn Fn(&[u8]) -> bool;
+
+/// `run_with_timeout`, with `input` on the command's stdin.
+pub fn converse(
+    mut cmd: std::process::Command,
+    what: &str,
+    timeout: Duration,
+    input: Option<Input<'_>>,
+) -> Result<std::process::Output> {
+    use std::io::{Read, Write};
     use std::os::unix::process::CommandExt;
     use std::sync::{Arc, Mutex};
     // In a session of its own, so a process group of its own: what it starts
@@ -92,7 +115,23 @@ pub fn run_with_timeout(
             Ok(())
         });
     }
+    if input.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
     let mut child = cmd.spawn().with_context(|| format!("can't run {what}"))?;
+    // Small enough for the pipe; one it doesn't read is its loss, which its
+    // answer shows.
+    let mut stdin = child.stdin.take();
+    let mut answered = None;
+    if let Some(input) = input {
+        if let Some(pipe) = stdin.as_mut() {
+            let _ = pipe.write_all(input.text);
+        }
+        answered = input.answered;
+        if answered.is_none() {
+            stdin = None;
+        }
+    }
     let group = child.id() as libc::pid_t;
     // SAFETY: kill only sends a signal, to the group the child leads.
     let end_group = || unsafe {
@@ -123,13 +162,25 @@ pub fn run_with_timeout(
         if let Some(status) = child.try_wait()? {
             break status;
         }
+        // Answered, it has done what it was run for.
+        if answered.is_some_and(|done| done(&stdout.lock().unwrap())) {
+            use std::os::unix::process::ExitStatusExt;
+            end_group();
+            let _ = child.wait();
+            break std::process::ExitStatus::from_raw(0);
+        }
         if Instant::now() > deadline {
             end_group();
             let _ = child.wait();
             bail!("{what} took longer than {}s", timeout.as_secs());
         }
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(if answered.is_some() {
+            20
+        } else {
+            100
+        }));
     };
+    drop(stdin);
     // What it wrote before exiting is read at once; output held open longer
     // is something it left running, which goes.
     let read = || stdout_reader.is_finished() && stderr_reader.is_finished();
@@ -237,6 +288,38 @@ mod timeout_tests {
         );
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\n");
+    }
+
+    #[test]
+    fn a_command_is_given_its_input_and_ended_once_it_has_answered() {
+        // It reads to its end: its input closes once given.
+        let out = converse(
+            sh("cat"),
+            "it",
+            Duration::from_secs(3),
+            Some(Input {
+                text: b"one\n",
+                answered: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "one\n");
+        // One that serves until its input ends is ended once it answers.
+        let started = Instant::now();
+        let answered = |out: &[u8]| out.ends_with(b"two\n");
+        let out = converse(
+            sh("cat; echo after"),
+            "it",
+            Duration::from_secs(3),
+            Some(Input {
+                text: b"two\n",
+                answered: Some(&answered),
+            }),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "two\n");
+        assert!(out.status.success());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

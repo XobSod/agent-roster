@@ -38,6 +38,7 @@ use serde::{Deserialize, Deserializer};
 use crate::config::Config;
 use crate::model::{QUIET_MS, Session};
 use crate::stats::Transcript;
+use crate::usage::Usage;
 
 pub use claude::CLAUDE;
 pub use codex::CODEX;
@@ -115,6 +116,20 @@ pub trait Adapter: Sync {
     /// it printed (None if it failed); others know theirs.
     fn models(&self, _config: &Config, _ask: &Ask<'_>) -> Vec<Model> {
         Vec::new()
+    }
+
+    /// What the account it runs on has used of its limits, asked of the
+    /// agent's service now (through `ask`, as for `models`); None if it has
+    /// none roster can read (an API key, say).
+    fn usage(&self, _config: &Config, _ask: &Ask<'_>) -> Option<Result<Usage>> {
+        None
+    }
+
+    /// What its transcript at `path` last said of those limits, as of when
+    /// the file last changed, for an agent that writes them as it goes
+    /// (codex, with every response).
+    fn usage_in(&self, _path: &Path) -> Option<Usage> {
+        None
     }
 
     /// The command line that starts `s`, given its command and the config's
@@ -297,8 +312,23 @@ pub struct Model {
     pub note: Option<String>,
 }
 
-/// Runs an agent's command (its argv) and returns what it printed.
-pub type Ask<'a> = dyn Fn(&[String]) -> Option<String> + 'a;
+/// Runs an agent's command and returns what it printed; failing, why (or
+/// what it said as it failed).
+pub type Ask<'a> = dyn Fn(Question<'_>) -> Result<String> + 'a;
+
+/// A command for `Ask` to run.
+pub struct Question<'a> {
+    pub argv: Vec<String>,
+    /// What it reads on its stdin; none, nothing.
+    pub input: Option<crate::launch::Input<'a>>,
+}
+
+impl Question<'_> {
+    /// `argv`, reading nothing.
+    pub fn of(argv: Vec<String>) -> Question<'static> {
+        Question { argv, input: None }
+    }
+}
 
 /// What an agent reported besides its state: `Adapter::report` reads it from
 /// the payload, whatever its agent calls things. An agent whose reports roster

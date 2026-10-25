@@ -3,13 +3,22 @@
 use super::*;
 
 pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
-    let [top, sub, list] = Layout::vertical([
+    let width = area.width as usize;
+    // At the bottom, what the agents' accounts have used, once known.
+    let usage = app
+        .sidebar_usage
+        .then(|| usage_line(app, width, now))
+        .flatten();
+    let [top, sub, list, bottom] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(u16::from(usage.is_some())),
     ])
     .areas(area);
-    let width = area.width as usize;
+    if let Some(usage) = usage {
+        f.render_widget(Paragraph::new(usage), bottom);
+    }
 
     let live: Vec<&Session> = app
         .sessions

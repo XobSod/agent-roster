@@ -19,6 +19,7 @@ mod stats;
 mod title;
 mod tmux;
 mod tui;
+mod usage;
 mod util;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -32,7 +33,9 @@ use clap::{Parser, Subcommand};
 use adopt::{Adopt, RunOn};
 use engine::{Defaults, NewSession, Roster};
 use model::{Session, State};
-use print::{doctor_line, events, list_adoptable, list_projects, list_sessions, print_info};
+use print::{
+    doctor_line, events, list_adoptable, list_projects, list_sessions, print_info, print_usage,
+};
 
 #[derive(Parser)]
 #[command(
@@ -226,6 +229,11 @@ enum Cmd {
         /// defaults if there's none
         #[arg(long, conflicts_with = "defaults")]
         edit: bool,
+    },
+    /// What your Claude and codex accounts have used of their limits: each window, and when it starts over
+    Usage {
+        #[arg(long)]
+        json: bool,
     },
     /// Check roster's tmux server and database against each other
     Doctor {
@@ -835,6 +843,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 return Err(anyhow::anyhow!("{} problem(s)", diagnosis.problems));
             }
         }
+        Cmd::Usage { json } => print_usage(r, json)?,
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } => {}

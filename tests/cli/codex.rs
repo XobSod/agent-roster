@@ -16,7 +16,7 @@ use crate::common::TestEnv;
 const FAKE_CODEX: &str = include_str!("../fakes/codex.sh");
 
 /// A codex stand-in in `t`, as `[agents.codex]`'s command, its agent the default.
-fn with_fake_codex(t: &TestEnv) {
+pub fn with_fake_codex(t: &TestEnv) {
     use std::os::unix::fs::PermissionsExt;
     let codex = t.path("fake-codex");
     fs::write(&codex, FAKE_CODEX).unwrap();

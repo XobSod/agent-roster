@@ -199,6 +199,74 @@ pub fn list_projects(r: &Roster) -> Result<()> {
     Ok(())
 }
 
+/// What each agent's account has used of its limits, asked now: what's left
+/// of each window and when it starts over (with `--json`, also whether it
+/// runs out first at this rate). An error if an agent's couldn't be read.
+pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
+    use crate::usage::Pace;
+    let said = r.usage_reader()();
+    let now = util::now_ms();
+    let failed = said.iter().filter(|(_, u)| u.is_err()).count();
+    if json {
+        let items: Vec<_> = said
+            .iter()
+            .map(|(agent, usage)| match usage {
+                Ok(u) => json!({
+                    "agent": agent, "plan": u.plan, "at": u.at, "notes": u.notes,
+                    "windows": u.windows.iter().map(|w| json!({
+                        "label": w.label(), "minutes": w.minutes, "used": w.used, "left": w.left(),
+                        "resets_at": w.resets_at, "started_over": w.over(now),
+                        "pace": match w.pace(now) { Pace::Fine => "fine", Pace::Short => "short", Pace::Out => "out" },
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(e) => json!({"agent": agent, "error": format!("{e:#}")}),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if said.is_empty() {
+        println!(
+            "No agent here says what its account has used: Claude and codex do, logged in to a subscription."
+        );
+    } else {
+        for (i, (agent, usage)) in said.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            let u = match usage {
+                Ok(u) => u,
+                Err(e) => {
+                    println!("{agent}  can't tell: {e:#}");
+                    continue;
+                }
+            };
+            match &u.plan {
+                Some(plan) => println!("{agent}  {plan}"),
+                None => println!("{agent}"),
+            }
+            let label_w = u.windows.iter().map(|w| w.label().len()).max().unwrap_or(0);
+            for w in &u.windows {
+                let left = if w.over(now) {
+                    "–".into()
+                } else {
+                    w.percent()
+                };
+                let mut line = format!("  {:label_w$}  {left:>4} left", w.label());
+                if let Some(resets) = w.resets(now) {
+                    line.push_str(&format!("  {resets}"));
+                }
+                println!("{line}");
+            }
+            for note in &u.notes {
+                println!("  {note}");
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} agent(s) couldn't say");
+    }
+    Ok(())
+}
+
 pub fn list_sessions(
     r: &Roster,
     query: &str,

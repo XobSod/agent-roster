@@ -1,5 +1,4 @@
-//! What the TUI's actions do: in the session list, the projects view and the
-//! server view.
+//! What the TUI's actions do: in the session list and the views.
 
 use super::*;
 
@@ -14,6 +13,7 @@ impl App {
             Action::Quit => return Some(Op::Quit),
             Action::ShowServer => self.toggle_view(Mode::Server),
             Action::ShowSettings => self.toggle_view(Mode::Settings),
+            Action::ShowUsage => self.toggle_view(Mode::Usage),
             Action::ShowProjects => self.toggle_view(Mode::Projects),
             Action::ToggleGroup => {
                 self.grouped = !self.grouped;
@@ -26,6 +26,7 @@ impl App {
                     Mode::Projects => self.act_in_projects_view(action),
                     Mode::Server => self.act_in_server_view(action),
                     Mode::Settings => self.act_in_settings_view(action),
+                    Mode::Usage => self.act_in_usage_view(action),
                 };
             }
         }
@@ -136,6 +137,17 @@ impl App {
             }
             Action::Confirm => self.flash("No orphaned tmux sessions to remove"),
             _ => self.fail("This is the server view: Esc goes back to the sessions"),
+        }
+        None
+    }
+
+    /// In the usage view: Enter asks the agents again.
+    fn act_in_usage_view(&mut self, action: Action) -> Option<Op> {
+        match action {
+            Action::Confirm if self.limits.asking() => self.flash("Asking them already"),
+            Action::Confirm => self.limits.want(true),
+            Action::Up | Action::Down => {}
+            _ => self.fail("This is the usage view: Esc goes back to the sessions"),
         }
         None
     }

@@ -5,6 +5,7 @@
 mod app;
 mod form;
 mod input;
+mod limits;
 mod list;
 mod note;
 mod op;
@@ -52,6 +53,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
+    app.sidebar_usage = roster.config.sidebar_usage();
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -128,6 +130,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.set_agents(agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
+    app.sidebar_usage = roster.config.sidebar_usage();
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -167,6 +170,12 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         if transcripts_read(app) && heading_shown(app) {
             update_preview(roster, app);
         }
+        // What the agents' accounts have used, asked in the background
+        // while something shows it.
+        if app.limits.due(app.sidebar_usage || app.mode == Mode::Usage) {
+            app.limits.ask(roster.usage_reader());
+        }
+        app.limits.arrived();
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
         if let Some(editor) = app.note.as_mut() {
@@ -191,7 +200,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
         // A title or a transcript coming is looked for more often than a tick.
-        if !app.titling.is_empty() || !app.preview.reading.ids.is_empty() {
+        if !app.titling.is_empty() || !app.preview.reading.ids.is_empty() || app.limits.asking() {
             wait = wait.min(Duration::from_millis(200));
         }
         if event::poll(wait)?
@@ -329,6 +338,10 @@ fn reload(roster: &mut Roster, app: &mut App) {
         app.models.names = names;
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
+    // What codex wrote of its limits since, which costs nothing to read.
+    if app.sidebar_usage || app.mode == Mode::Usage {
+        app.limits.read_transcripts(&app.sessions);
+    }
     // Only the session list shows the preview.
     if app.mode == Mode::Sessions {
         fit(roster, app);

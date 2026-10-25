@@ -1,4 +1,18 @@
 #!/bin/sh
+# Its server, as asked for the account's limits: it answers each request,
+# and serves until its stdin ends.
+if [ "$1" = app-server ]; then
+  in=$(( $(date +%s) + 3600 ))
+  while read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*) echo '{"id":1,"result":{"userAgent":"fake"}}' ;;
+      *'"method":"account/rateLimits/read"'*)
+        echo '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}'
+        printf '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":7,"windowDurationMins":300,"resetsAt":%s},"secondary":{"usedPercent":13,"windowDurationMins":10080,"resetsAt":%s},"planType":"plus"}}}\n' "$in" "$in" ;;
+    esac
+  done
+  exit 0
+fi
 id=; sub=; prev=; model=; effort=; prompt=; rest=no; n=0
 for a in "$@"; do
   if [ "$rest" = yes ]; then prompt=$a; continue; fi

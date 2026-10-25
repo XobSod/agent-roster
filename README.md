@@ -58,7 +58,7 @@ Everything else is in three menus, which pop up their keys:
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
-| `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings |
+| `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
@@ -106,6 +106,19 @@ line as you edit. Ctrl+G hands the note to `$VISUAL` or `$EDITOR` and back; with
 stops, restarts and archiving, and goes only when its session is deleted for good;
 `✎` marks sessions with one.
 
+`v u` shows what's left of your Claude and Codex accounts' limits: the 5-hour and the
+weekly window, each as a bar, full while none of it is used and shrinking as you use
+it, with a mark where as much of the window's time is left (a bar ending short of it
+is used faster than the window lasts), and when it starts over. The sidebar's last
+line has the same, briefly (`claude 69% · 48%  codex 93% · 87%` left, the 5-hour
+window first): dim while they last, louder once a window, at least half used,
+is on its way to run out before it starts over, and red when one has. Roster asks
+Claude.ai's usage service with Claude's login (through `curl`; the login is Claude's
+to renew, so once it expires roster waits for Claude to), and Codex's own server
+(`codex app-server`): at the start, every 5 minutes while the figures show, and when
+the view opens; `Enter` there asks again. Codex also writes them into its rollouts as it
+works, which roster reads as they change. pi and other agents say nothing of the kind.
+
 Everything is also available from the CLI:
 
 ```sh
@@ -133,6 +146,7 @@ roster stop api && roster start api     # start resumes the conversation
 roster archive api && roster restore api   # archived sessions keep their conversation
 roster rm api                           # delete an archived session for good (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
+roster usage                            # what your Claude and Codex accounts have used of their limits
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
 roster config                           # every setting: its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
@@ -166,6 +180,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     a row from the agent). It's set as you attach, so a title the agent picks
     meanwhile shows from the next attach. Turning it on or off changes sessions'
     height by a row on their next attach.
+  - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
+    Codex accounts have used of their limits (`v u` still shows it).
   - `[notes]`: `editor`, where `s o` opens a session's note: `"builtin"` (default),
     roster's own editor with vim's keys, or `"external"`, `$VISUAL` or `$EDITOR`;
     `escape`, keys that leave insert mode when typed quickly, as vim's `inoremap jk
@@ -229,6 +245,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     projects = "p"            # the projects view
     server = "t"              # the tmux server and the database
     settings = "s"            # every setting, to see and change
+    usage = "u"               # what the agents' accounts have used of their limits
     ```
 
   - `[agents.claude]`, `[agents.pi]` and `[agents.codex]`: `command`, `args` (added to

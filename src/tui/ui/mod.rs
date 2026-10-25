@@ -6,6 +6,7 @@ mod popups;
 mod sidebar;
 mod spans;
 mod text;
+mod usage;
 mod views;
 
 use ratatui::Frame;
@@ -26,6 +27,7 @@ pub(crate) use spans::{agent_spans, badge, glyph};
 // For the previews of headings (app::texts).
 use text::*;
 pub(crate) use text::{fit, truncate, wrap};
+use usage::*;
 use views::*;
 
 use super::app::{App, Dialog, Mode};
@@ -54,6 +56,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_projects(f, app, main);
     } else if app.mode == Mode::Settings {
         draw_settings(f, app, main);
+    } else if app.mode == Mode::Usage {
+        draw_usage(f, app, main);
     } else {
         draw_sidebar(f, app, side, now);
         f.render_widget(

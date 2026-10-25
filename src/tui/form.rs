@@ -143,7 +143,7 @@ impl Models {
     /// What's known without asking the agents: the lists roster has itself
     /// (Claude's).
     pub fn known() -> Models {
-        let unasked: &agent::Ask<'_> = &|_| None;
+        let unasked: &agent::Ask<'_> = &|_| anyhow::bail!("not asked");
         let config = crate::config::Config::default();
         Models {
             offered: agent::BUILT_IN

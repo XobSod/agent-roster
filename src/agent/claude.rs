@@ -2,6 +2,7 @@
 //! conversations resume, and its transcript gives the statistics.
 
 pub mod conversations;
+mod limits;
 mod transcript;
 
 use std::fs;
@@ -14,6 +15,7 @@ use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, R
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
+use crate::usage::Usage;
 use crate::util::sh_quote;
 use transcript::ClaudeTranscript;
 
@@ -85,6 +87,11 @@ impl Adapter for Claude {
             note: Some(crate::util::model_name(id)),
         });
         aliases.chain(pinned).collect()
+    }
+
+    /// As Claude.ai's usage service says, asked with Claude's login.
+    fn usage(&self, _config: &Config, ask: &Ask<'_>) -> Option<Result<Usage>> {
+        limits::ask(ask)
     }
 
     /// A new conversation, or its existing one resumed.

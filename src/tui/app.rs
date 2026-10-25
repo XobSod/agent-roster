@@ -41,6 +41,8 @@ pub enum Mode {
     Server,
     /// Every setting, to see and change.
     Settings,
+    /// What the agents' accounts have used of their limits.
+    Usage,
 }
 
 pub struct Message {
@@ -169,6 +171,10 @@ pub struct App {
     pub titling: Vec<Titling>,
     /// Where notes open, and the editor's keys (config.toml).
     pub notes: crate::config::Notes,
+    /// What the agents' accounts have used of their limits, and whether the
+    /// sidebar shows it (config.toml).
+    pub limits: super::limits::Limits,
+    pub sidebar_usage: bool,
 }
 
 impl App {
@@ -215,6 +221,8 @@ impl App {
             note: None,
             titling: Vec::new(),
             notes: Default::default(),
+            limits: Default::default(),
+            sidebar_usage: true,
         }
     }
 
@@ -380,6 +388,10 @@ impl App {
                 && let Some(p) = self.selected_project()
             {
                 self.project_row = self.projects.iter().position(|q| q.id == p.id).unwrap_or(0);
+            }
+            // The usage view asks again, unless it just did.
+            if mode == Mode::Usage {
+                self.limits.want(false);
             }
             self.mode = mode;
             self.report_scroll = 0;

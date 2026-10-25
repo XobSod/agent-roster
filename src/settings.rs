@@ -447,6 +447,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         agents: configured,
         fit_preview,
         status_line,
+        sidebar_usage,
         default_agent,
         notes,
     } = config;
@@ -484,6 +485,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &["auto", "never"],
                 fit(fit_preview),
                 "agents drawing full screen are sized to the preview while you're not attached",
+            ),
+            bool_setting(
+                &["sidebar_usage"],
+                sidebar_usage.unwrap_or(true),
+                "under the session list, what your Claude and codex accounts have used of their limits",
             ),
             text_setting(
                 &["shell"],
@@ -789,6 +795,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         projects,
         server,
         settings,
+        usage,
     } = view;
     let v =
         |name: &str, list: &KeyList, doc: &str| keys_setting(&["keys", "view", name], list, doc);
@@ -802,6 +809,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             v("projects", projects, "the projects view"),
             v("server", server, "the tmux server and the database"),
             v("settings", settings, "every setting, to see and change"),
+            v(
+                "usage",
+                usage,
+                "what the agents' accounts have used of their limits",
+            ),
         ],
     });
     sections

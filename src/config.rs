@@ -9,6 +9,8 @@
 //!                                 # with the project, session and title
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
 //!                                 # sized to the TUI's preview while no one's attached
+//! sidebar_usage = false           # default true: under the session list, what your
+//!                                 # Claude and codex accounts have used of their limits
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -66,6 +68,9 @@ pub struct Config {
     pub fit_preview: Option<FitPreview>,
     /// While attached, a line at the top saying where you are (default on).
     pub status_line: Option<bool>,
+    /// Under the session list, a line with what the agents' accounts have
+    /// used of their limits (default on).
+    pub sidebar_usage: Option<bool>,
     /// The agent new sessions get unless the project or the user picks one.
     pub default_agent: Option<String>,
     pub notes: Notes,
@@ -217,6 +222,8 @@ pub struct ViewKeys {
     pub server: KeyList,
     /// Every setting, to see and change.
     pub settings: KeyList,
+    /// What the agents' accounts have used of their limits.
+    pub usage: KeyList,
 }
 
 fn keys(names: &[&str]) -> KeyList {
@@ -283,6 +290,7 @@ impl Default for ViewKeys {
             projects: keys(&["p"]),
             server: keys(&["t"]),
             settings: keys(&["s"]),
+            usage: keys(&["u"]),
         }
     }
 }
@@ -407,6 +415,10 @@ impl Config {
 
     pub fn status_line(&self) -> bool {
         self.status_line.unwrap_or(true)
+    }
+
+    pub fn sidebar_usage(&self) -> bool {
+        self.sidebar_usage.unwrap_or(true)
     }
 
     /// The agent sessions get unless their project picks one: `default_agent`

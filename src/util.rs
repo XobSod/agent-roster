@@ -175,6 +175,94 @@ pub fn local_time(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// When `ms` is in local time, to the nearest minute: "19:20" today, else
+/// with its day, "Sun 1 Nov 10:34" (as of `now`).
+pub fn local_when(ms: i64, now: i64) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let tm = |ms: i64| {
+        let secs = ms.div_euclid(1000) as libc::time_t;
+        // SAFETY: localtime_r only writes into the tm struct we pass.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        (!unsafe { libc::localtime_r(&secs, &mut tm) }.is_null()).then_some(tm)
+    };
+    let (Some(at), Some(today)) = (tm(ms + 30_000), tm(now)) else {
+        return "??:??".into();
+    };
+    let time = format!("{:02}:{:02}", at.tm_hour, at.tm_min);
+    if (at.tm_year, at.tm_yday) == (today.tm_year, today.tm_yday) {
+        return time;
+    }
+    format!(
+        "{} {} {} {time}",
+        DAYS[at.tm_wday.rem_euclid(7) as usize],
+        at.tm_mday,
+        MONTHS[at.tm_mon.rem_euclid(12) as usize]
+    )
+}
+
+/// An ISO 8601 time with its offset (`2026-10-25T18:20:00.47+00:00`, or
+/// `…Z`), in ms since the epoch.
+pub fn iso_ms(text: &str) -> Option<i64> {
+    let number = |s: &str| -> Option<i64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    let (date, rest) = text.split_once('T')?;
+    let mut ymd = date.split('-');
+    let (y, m, d) = (
+        number(ymd.next()?)?,
+        number(ymd.next()?)?,
+        number(ymd.next()?)?,
+    );
+    let zone_at = rest.find(['Z', '+', '-'])?;
+    let (time, zone) = rest.split_at(zone_at);
+    let (hms, fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut hms = hms.split(':');
+    let (h, min, sec) = (
+        number(hms.next()?)?,
+        number(hms.next()?)?,
+        number(hms.next()?)?,
+    );
+    let ms = match fraction {
+        "" => 0,
+        f => number(&format!("{f:0<3}")[..3])?,
+    };
+    let offset = match zone {
+        "Z" => 0,
+        _ => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let (oh, om) = zone[1..].split_once(':')?;
+            sign * (number(oh)? * 60 + number(om)?)
+        }
+    };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days since the epoch of a civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + min - offset) * 60_000 + sec * 1000 + ms)
+}
+
+/// How long until, briefly: `25m`, `3h 25m`, `6d 18h`.
+pub fn until(ms: i64) -> String {
+    let mins = ms.max(0) / 60_000;
+    match mins {
+        0..60 => format!("{mins}m"),
+        60..1440 => format!("{}h {}m", mins / 60, mins % 60),
+        _ => format!("{}d {}h", mins / 1440, mins % 1440 / 60),
+    }
+}
+
 /// How long ago, briefly: `now`, `5m`, `3h`, `2d`.
 pub fn ago(elapsed_ms: i64) -> String {
     let secs = elapsed_ms.max(0) / 1000;
@@ -229,6 +317,37 @@ mod tests {
         assert_eq!(ago(50 * 3_600_000), "2d");
         assert_eq!(clock(12_000), "12s");
         assert_eq!(clock(62 * 60_000), "1h 2m");
+        assert_eq!(until(25 * 60_000 + 59_000), "25m");
+        assert_eq!(until(205 * 60_000), "3h 25m");
+        assert_eq!(until((6 * 24 + 18) * 3_600_000), "6d 18h");
+    }
+
+    #[test]
+    fn local_times_are_to_the_minute_with_their_day_unless_today() {
+        let now = iso_ms("2026-10-25T12:00:00Z").unwrap();
+        let at = |t| local_when(iso_ms(t).unwrap(), now);
+        // As near the minute as the times services give: a moment before
+        // it is that minute.
+        assert_eq!(at("2026-10-25T12:19:59.600Z"), at("2026-10-25T12:20:00Z"));
+        assert_ne!(at("2026-10-25T12:20:29Z"), at("2026-10-25T12:21:00Z"));
+        // (In whatever time zone the tests run, noon UTC is that day there.)
+        assert_eq!(at("2026-10-25T12:20:00Z").len(), "12:20".len());
+        assert!(at("2026-11-01T12:00:00Z").starts_with("Sun 1 Nov "));
+    }
+
+    #[test]
+    fn iso_times() {
+        assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
+        // `date -d 2026-10-25T18:20:00Z +%s`
+        assert_eq!(
+            iso_ms("2026-10-25T18:20:00.471005+00:00"),
+            Some(1_792_952_400_471)
+        );
+        assert_eq!(iso_ms("2026-10-25T20:20:00+02:00"), Some(1_792_952_400_000));
+        assert_eq!(iso_ms("2024-02-29T00:00:00.5Z"), Some(1_709_164_800_500));
+        assert_eq!(iso_ms("2026-10-25"), None);
+        assert_eq!(iso_ms("2026-13-01T00:00:00Z"), None);
+        assert_eq!(iso_ms("soon"), None);
     }
 
     #[test]

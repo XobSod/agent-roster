@@ -937,3 +937,88 @@ fn a_blank_pinned_line_shows_the_next() {
         "{lines:#?}"
     );
 }
+
+/// What `agent` said of its account's limits: a five-hour and a weekly window.
+fn said(agent: &str, five_hour: f64, weekly: f64) -> crate::tui::limits::Said {
+    use crate::usage::{Usage, Window};
+    let now = now_ms();
+    let window = |minutes, used, resets_in| Window {
+        minutes,
+        used,
+        resets_at: Some(now + resets_in),
+    };
+    crate::tui::limits::Said {
+        agent: agent.into(),
+        usage: Some(Usage {
+            plan: Some("pro".into()),
+            windows: vec![
+                window(300, five_hour, 3_600_000),
+                window(10_080, weekly, 86_400_000),
+            ],
+            notes: vec!["2 full resets left".into()],
+            at: now,
+        }),
+        error: None,
+    }
+}
+
+#[test]
+fn the_sidebar_ends_with_whats_left_of_the_accounts_limits() {
+    let mut app = app();
+    // Nothing said yet: no line.
+    let screen = render(&app, 100, 12);
+    assert!(!screen.contains('%'), "{screen}");
+    app.limits.agents = vec![said("claude", 31.0, 52.0), said("codex", 7.0, 13.0)];
+    let screen = render(&app, 100, 12);
+    let last = screen.lines().nth(10).unwrap();
+    assert!(
+        last.starts_with(" claude 69% · 48%  codex 93% · 87%"),
+        "{screen}"
+    );
+    // Too long for their names: their marks.
+    app.limits.agents = vec![said("claude", 0.0, 0.0), said("codex", 0.0, 0.0)];
+    let screen = render(&app, 100, 12);
+    let last = screen.lines().nth(10).unwrap();
+    assert!(
+        last.starts_with(" ✱ 100% · 100%  ⬡ 100% · 100%"),
+        "{screen}"
+    );
+    // Turned off.
+    app.sidebar_usage = false;
+    let screen = render(&app, 100, 12);
+    assert!(!screen.contains('%'), "{screen}");
+}
+
+#[test]
+fn the_usage_view_shows_each_window_and_why_an_agent_couldnt_say() {
+    let mut app = app();
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Usage);
+    // An agent asked once, which couldn't say this time.
+    let mut codex = said("codex", 7.0, 13.0);
+    codex.error = Some("codex's server didn't answer".into());
+    app.limits.agents = vec![said("claude", 31.0, 52.0), codex];
+    let screen = render(&app, 100, 20);
+    for shown in [
+        "roster  usage",
+        "✱ Claude  pro",
+        "5 hours  ",
+        "Weekly   ",
+        " 69% left",
+        " 48% left",
+        "resets ",
+        ", in ",
+        "2 full resets left",
+        "⬡ Codex  pro",
+        "can't tell now: codex's server didn't answer",
+        "Enter ask again",
+        "Esc back",
+    ] {
+        assert!(screen.contains(shown), "{shown:?} in\n{screen}");
+    }
+    assert!(!screen.contains("Needs input"), "{screen}");
+    // Enter asks again.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.limits.due(false));
+}

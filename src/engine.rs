@@ -704,36 +704,80 @@ impl Roster {
     }
 
     /// What lists each agent's models (`Adapter::models`), to run anywhere,
-    /// a thread included: an agent's own command runs as its sessions would,
-    /// the global env file sourced (in roster's state directory, away from
-    /// any project's settings), for at most 10 seconds.
+    /// a thread included (see `asker`).
     pub fn model_lister(&self) -> impl Fn(&str) -> Vec<agent::Model> + Send + 'static {
-        let config = Config {
+        let config = self.agents_config();
+        let ask = self.asker();
+        move |name: &str| agent::adapter(name).models(&config, &|q| ask(name, q))
+    }
+
+    /// What asks every agent that can be started what its account has used
+    /// of its limits (`Adapter::usage`), all at once, to run anywhere, a
+    /// thread included (see `asker`): those that say, in the order agents are
+    /// offered (the default first).
+    pub fn usage_reader(
+        &self,
+    ) -> impl Fn() -> Vec<(String, Result<crate::usage::Usage>)> + Send + 'static {
+        let config = self.agents_config();
+        let agents = agent::available(&self.config);
+        let ask = self.asker();
+        move || {
+            std::thread::scope(|scope| {
+                let asking: Vec<_> = agents
+                    .iter()
+                    .map(|name| {
+                        let (config, ask) = (&config, &ask);
+                        let said = scope
+                            .spawn(move || agent::adapter(name).usage(config, &|q| ask(name, q)));
+                        (name, said)
+                    })
+                    .collect();
+                asking
+                    .into_iter()
+                    .filter_map(|(name, said)| Some((name.clone(), said.join().ok()??)))
+                    .collect()
+            })
+        }
+    }
+
+    /// The config's agents alone, for a thread.
+    fn agents_config(&self) -> Config {
+        Config {
             agents: self.config.agents.clone(),
             ..Config::default()
-        };
+        }
+    }
+
+    /// What runs agent `name`'s commands (`agent::Ask`) as its sessions
+    /// would, to run anywhere, a thread included: the global env file
+    /// sourced (in roster's state directory, away from any project's
+    /// settings), for at most 10 seconds.
+    fn asker(
+        &self,
+    ) -> impl Fn(&str, agent::Question<'_>) -> Result<String> + Send + Sync + 'static {
         let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
         let global_env = self.paths.global_env();
         let dir = self.paths.state_dir.clone();
-        move |name: &str| {
-            let ask = |argv: &[String]| -> Option<String> {
-                let argv = launch::wrap(&shell, &global_env, Path::new(""), argv);
-                let mut cmd = std::process::Command::new(&argv[0]);
-                cmd.args(&argv[1..])
-                    .current_dir(&dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null());
-                for var in crate::tmux::LEAKY_ENV {
-                    cmd.env_remove(var);
+        move |name: &str, question: agent::Question<'_>| {
+            let argv = launch::wrap(&shell, &global_env, Path::new(""), &question.argv);
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..])
+                .current_dir(&dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            for var in crate::tmux::LEAKY_ENV {
+                cmd.env_remove(var);
+            }
+            let output = launch::converse(cmd, name, Duration::from_secs(10), question.input)?;
+            if !output.status.success() {
+                let said = String::from_utf8_lossy(&output.stderr);
+                match said.lines().rfind(|l| !l.trim().is_empty()) {
+                    Some(line) => bail!("{}", line.trim()),
+                    None => bail!("{} exited with {}", question.argv[0], output.status),
                 }
-                let output = launch::run_with_timeout(cmd, name, Duration::from_secs(10)).ok()?;
-                output
-                    .status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-            };
-            agent::adapter(name).models(&config, &ask)
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         }
     }
 

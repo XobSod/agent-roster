@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Question, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
@@ -72,7 +72,7 @@ impl Adapter for Pi {
     fn models(&self, config: &Config, ask: &Ask<'_>) -> Vec<Model> {
         let command = config.agent(PI).command.unwrap_or_else(|| PI.to_string());
         let argv = [command, "--list-models".into(), "--offline".into()];
-        ask(&argv).map_or_else(Vec::new, |table| listed_models(&table))
+        ask(Question::of(argv.into())).map_or_else(|_| Vec::new(), |table| listed_models(&table))
     }
 
     /// `--session-id` opens the conversation, or creates it the first time;
@@ -298,9 +298,9 @@ anthropic  claude-haiku-4-5   200K     64K      yes       yes
 openai     gpt-5              400K     128K     yes       yes
 openrouter gpt-5              400K     128K     yes       yes
 ";
-        let ask = |argv: &[String]| {
-            assert_eq!(argv[1..], ["--list-models", "--offline"]);
-            Some(table.to_string())
+        let ask = |q: Question<'_>| {
+            assert_eq!(q.argv[1..], ["--list-models", "--offline"]);
+            Ok(table.to_string())
         };
         let models = Pi.models(&config(), &ask);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
@@ -315,8 +315,11 @@ openrouter gpt-5              400K     128K     yes       yes
         );
         assert_eq!(models[0].note.as_deref(), Some("1M context"));
         // It failed, or printed nothing: none to offer, any can be typed.
-        assert!(Pi.models(&config(), &|_| None).is_empty());
-        assert!(Pi.models(&config(), &|_| Some(String::new())).is_empty());
+        assert!(
+            Pi.models(&config(), &|_| anyhow::bail!("failed"))
+                .is_empty()
+        );
+        assert!(Pi.models(&config(), &|_| Ok(String::new())).is_empty());
     }
 
     #[test]

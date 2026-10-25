@@ -66,6 +66,7 @@ pub enum Action {
     ShowProjects,
     ShowServer,
     ShowSettings,
+    ShowUsage,
 }
 
 impl Action {
@@ -108,6 +109,7 @@ impl Action {
             Action::ShowProjects => "projects",
             Action::ShowServer => "tmux server",
             Action::ShowSettings => "settings",
+            Action::ShowUsage => "usage",
         }
     }
 }
@@ -356,6 +358,7 @@ impl Keymap {
             Action::ShowSettings,
             &mut labels,
         )?;
+        view.bind(t, "usage", &k.usage, Action::ShowUsage, &mut labels)?;
 
         let menus = HashMap::from([
             (Menu::Session, session),

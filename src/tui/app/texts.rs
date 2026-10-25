@@ -36,13 +36,16 @@ impl App {
             }
             Mode::Server => self.labelled([(Action::Down, "scroll")]),
             Mode::Settings => self.settings_view_hints(),
+            Mode::Usage => self.labelled([(Action::Confirm, "ask again")]),
         };
         // Then the same everywhere: Esc, help, and in the session list quit (in a
         // view the quit key goes back, like Esc).
         match self.mode {
             Mode::Sessions if !self.search.is_empty() => hints.push(("Esc".into(), "clear filter")),
             Mode::Sessions => {}
-            Mode::Projects | Mode::Server | Mode::Settings => hints.push(("Esc".into(), "back")),
+            Mode::Projects | Mode::Server | Mode::Settings | Mode::Usage => {
+                hints.push(("Esc".into(), "back"))
+            }
         }
         hints.extend(self.labelled([(Action::Help, "help")]));
         if self.mode == Mode::Sessions {
@@ -482,7 +485,7 @@ impl App {
                 self.chord(Menu::Session, Action::NewSession),
                 self.chord(Menu::Session, Action::NewChat)
             )),
-            Mode::Projects | Mode::Server | Mode::Settings => Text::default(),
+            Mode::Projects | Mode::Server | Mode::Settings | Mode::Usage => Text::default(),
         }
     }
 }

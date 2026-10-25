@@ -8,15 +8,17 @@
 //! folder to trust, an update to run).
 
 pub mod conversations;
+mod limits;
 mod transcript;
 
 use anyhow::{Context as _, Result};
 use serde_json::Value;
 
-use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
+use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Question, Report};
 use crate::config::Config;
 use crate::model::Session;
 use crate::stats::Transcript;
+use crate::usage::Usage;
 use crate::util::sh_quote;
 use transcript::CodexTranscript;
 
@@ -129,7 +131,20 @@ impl Adapter for Codex {
             .command
             .unwrap_or_else(|| CODEX.to_string());
         let argv = [command, "debug".into(), "models".into()];
-        ask(&argv).map_or_else(Vec::new, |json| catalog_models(&json))
+        ask(Question::of(argv.into())).map_or_else(|_| Vec::new(), |json| catalog_models(&json))
+    }
+
+    /// As codex's own server says, which codex's login is enough for.
+    fn usage(&self, config: &Config, ask: &Ask<'_>) -> Option<Result<Usage>> {
+        let command = config
+            .agent(CODEX)
+            .command
+            .unwrap_or_else(|| CODEX.to_string());
+        limits::ask(command, ask)
+    }
+
+    fn usage_in(&self, path: &std::path::Path) -> Option<Usage> {
+        transcript::last_limits(path)
     }
 
     /// A new conversation, or `resume` on the one it has; an adopted copy

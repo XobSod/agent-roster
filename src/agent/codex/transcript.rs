@@ -258,10 +258,34 @@ impl Payload {
 }
 
 /// The effort codex last ran a turn with, as the rollout at `path` says at
-/// its end: each turn starts with a `turn_context` that names it. Looked for
-/// in the last MB only, the line alone parsed; a turn that wrote more since
-/// leaves it unknown.
+/// its end: each turn starts with a `turn_context` that names it.
 pub(super) fn last_effort(path: &std::path::Path) -> Option<String> {
+    let entry = last_entry(path, br#""type":"turn_context""#, |_| true)?;
+    entry["payload"]["effort"].as_str().map(String::from)
+}
+
+/// What the account had used of its limits as the rollout at `path` last
+/// said, as of when it said so (the entry's `timestamp`, which codex gives
+/// every line: the file changes with whatever codex writes after): codex
+/// writes them with every response's `token_count`.
+pub(super) fn last_limits(path: &std::path::Path) -> Option<crate::usage::Usage> {
+    let limits = |entry: &serde_json::Value| {
+        let at = crate::util::iso_ms(entry["timestamp"].as_str()?)?;
+        super::limits::limits(&entry["payload"]["rate_limits"], at)
+    };
+    limits(&last_entry(path, br#""rate_limits":{"#, |e| {
+        limits(e).is_some()
+    })?)
+}
+
+/// The rollout at `path`'s last entry holding `needle` that `wanted` takes,
+/// looked for in its last MB only, each such line alone parsed: a turn that
+/// wrote more since leaves it unknown.
+fn last_entry(
+    path: &std::path::Path,
+    needle: &[u8],
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 1024 * 1024;
     let mut file = std::fs::File::open(path).ok()?;
@@ -269,11 +293,13 @@ pub(super) fn last_effort(path: &std::path::Path) -> Option<String> {
     file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail).ok()?;
-    let at = memchr::memmem::rfind(&tail, br#""type":"turn_context""#)?;
-    let start = memchr::memrchr(b'\n', &tail[..at]).map_or(0, |i| i + 1);
-    let end = memchr::memchr(b'\n', &tail[at..]).map_or(tail.len(), |i| at + i);
-    let entry: serde_json::Value = serde_json::from_slice(&tail[start..end]).ok()?;
-    entry["payload"]["effort"].as_str().map(String::from)
+    memchr::memmem::rfind_iter(&tail, needle).find_map(|at| {
+        let start = memchr::memrchr(b'\n', &tail[..at]).map_or(0, |i| i + 1);
+        let end = memchr::memchr(b'\n', &tail[at..]).map_or(tail.len(), |i| at + i);
+        serde_json::from_slice(&tail[start..end])
+            .ok()
+            .filter(|entry| wanted(entry))
+    })
 }
 
 /// Which of a rollout's user messages are prompts you typed, as codex says
@@ -509,6 +535,48 @@ mod tests {
         lines.extend(turn("second", 7, 230, 400_000));
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         assert_eq!(last_effort(&path).as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn the_limits_are_the_last_the_account_was_said_to_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        assert_eq!(last_limits(&path), None);
+        let count = |id: &str, used: f64, at: &str| {
+            json!({"timestamp": at, "type": "event_msg", "payload": {"type": "token_count", "info": null,
+                "rate_limits": {"limit_id": id,
+                    "primary": {"used_percent": used, "window_minutes": 300, "resets_at": 100},
+                    "secondary": {"used_percent": 3.0, "window_minutes": 10_080, "resets_at": 200},
+                    "plan_type": "plus"}}})
+            .to_string()
+        };
+        let mut lines = turn("first", 5, 115, 400_000);
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(last_limits(&path), None);
+        lines.push(count("codex", 11.0, "2026-10-25T09:34:21.383Z"));
+        lines.push(count("codex", 17.0, "2026-10-25T09:35:00.000Z"));
+        // Another kind of limit's, after them, isn't the account's.
+        lines.push(count("premium", 90.0, "2026-10-25T09:36:00.000Z"));
+        lines.extend(turn("second", 7, 230, 400_000));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let usage = last_limits(&path).unwrap();
+        assert_eq!(usage.windows[0].used, 17.0);
+        assert_eq!(usage.windows[0].resets_at, Some(100_000));
+        // As of when it was said, whatever codex wrote since.
+        let said = crate::util::iso_ms("2026-10-25T09:35:00.000Z");
+        assert_eq!(Some(usage.at), said);
+        lines.push(
+            json!({"timestamp": "2026-10-25T10:00:00.000Z", "type": "event_msg", "payload": {"type": "task_started"}})
+                .to_string(),
+        );
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(Some(last_limits(&path).unwrap().at), said);
+        // One with no time isn't taken: when it held isn't known.
+        let mut untimed: Value = serde_json::from_str(&count("codex", 50.0, "")).unwrap();
+        untimed.as_object_mut().unwrap().remove("timestamp");
+        lines.push(untimed.to_string());
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(last_limits(&path).unwrap().windows[0].used, 17.0);
     }
 
     #[test]

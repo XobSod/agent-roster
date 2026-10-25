@@ -54,10 +54,13 @@ pub trait Tally: Lines {
 
 /// Reads a JSONL file as it grows (a transcript, say): each read takes only
 /// what was added since, a line still being written waits for the next, and
-/// a file that got shorter (rewritten) is read again from the start.
+/// a file that got shorter (rewritten) or another one at its path (replaced,
+/// renamed over it) is read again from the start.
 #[derive(Debug, Default)]
 pub struct Jsonl<T> {
     path: PathBuf,
+    /// The file read so far, as its device and inode.
+    file: Option<(u64, u64)>,
     offset: u64,
     /// An incomplete last line, finished by the next read.
     rest: Vec<u8>,
@@ -68,6 +71,7 @@ impl<T: Lines> Jsonl<T> {
     pub fn new(path: &Path) -> Jsonl<T> {
         Jsonl {
             path: path.to_path_buf(),
+            file: None,
             offset: 0,
             rest: Vec::new(),
             tally: T::default(),
@@ -81,11 +85,14 @@ impl<T: Lines> Jsonl<T> {
 
     /// Reads what was added since the last read (all of it the first time).
     pub fn read(&mut self) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
         let mut file = File::open(&self.path)?;
-        let len = file.metadata()?.len();
-        if len < self.offset {
+        let meta = file.metadata()?;
+        let (len, identity) = (meta.len(), Some((meta.dev(), meta.ino())));
+        if len < self.offset || (self.file.is_some() && self.file != identity) {
             *self = Jsonl::new(&self.path.clone());
         }
+        self.file = identity;
         if len == self.offset {
             return Ok(());
         }
@@ -257,6 +264,54 @@ pub fn tokens(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every line read, for what `Jsonl` hands on.
+    #[derive(Default)]
+    struct Seen(Vec<String>);
+
+    impl Lines for Seen {
+        fn line(&mut self, line: &[u8]) {
+            self.0.push(String::from_utf8_lossy(line).into_owned());
+        }
+    }
+
+    #[test]
+    fn a_file_replaced_is_read_again_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let replace = |text: &str| {
+            let new = dir.path().join("new.jsonl");
+            std::fs::write(&new, text).unwrap();
+            std::fs::rename(&new, &path).unwrap();
+        };
+        let mut file = Jsonl::<Seen>::new(&path);
+        std::fs::write(&path, "old\n").unwrap();
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["old"]);
+        // Replaced by one as long, then by a longer one: each read whole.
+        replace("new\n");
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["new"]);
+        replace("one\ntwo\n");
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["one", "two"]);
+        // Appended to, and a line still being written: read on as before.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, "three\nfo").unwrap();
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["one", "two", "three"]);
+        writeln!(f, "ur").unwrap();
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["one", "two", "three", "four"]);
+        // Cut shorter in place: read again from its start.
+        std::fs::write(&path, "x\n").unwrap();
+        file.read().unwrap();
+        assert_eq!(file.tally().0, ["x"]);
+    }
 
     #[test]
     fn a_messages_text_is_its_string_or_its_text_blocks() {

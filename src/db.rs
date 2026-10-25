@@ -235,28 +235,21 @@ impl Db {
             .optional()?)
     }
 
-    /// The archived sessions removing `project` would delete for good; an
-    /// error if it still has live ones.
+    /// The archived sessions removing `project` deletes for good; an error if
+    /// it has a live one.
     pub fn purged_with(&self, project: &Project) -> Result<Vec<Session>> {
-        let sessions: Vec<Session> = self
-            .sessions(true)?
-            .into_iter()
-            .filter(|s| s.project_id == project.id)
-            .collect();
-        if let Some(live) = sessions.iter().find(|s| s.deleted_at.is_none()) {
-            bail!(
-                "project {:?} still has session {:?}; archive its sessions first",
-                project.name,
-                live.name
-            );
-        }
-        Ok(sessions)
+        purged_with(&self.conn, project)
     }
 
     /// Removes a project and its archived sessions. Returns the purged sessions.
+    /// Checked again in the transaction that removes them, which no other
+    /// process writes in meanwhile: one restored (or started) since it was
+    /// asked about stops it.
     pub fn remove_project(&mut self, project: &Project) -> Result<Vec<Session>> {
-        let sessions = self.purged_with(project)?;
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sessions = purged_with(&tx, project)?;
         // Their events go too, as when a session is deleted.
         tx.execute(
             "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
@@ -884,6 +877,27 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
     })
 }
 
+/// A project's sessions, all archived, which removing it deletes for good;
+/// an error if one is live.
+fn purged_with(conn: &Connection, project: &Project) -> Result<Vec<Session>> {
+    let sql = format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+         WHERE s.project_id = ?1 ORDER BY s.created_at, s.id"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let sessions: Vec<Session> = stmt
+        .query_map([project.id], session_from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    if let Some(live) = sessions.iter().find(|s| s.deleted_at.is_none()) {
+        bail!(
+            "project {:?} still has session {:?}; archive its sessions first",
+            project.name,
+            live.name
+        );
+    }
+    Ok(sessions)
+}
+
 /// A row of `SESSION_COLUMNS`, read by column name.
 fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -1360,6 +1374,43 @@ mod tests {
             (names["haiku"].as_str(), names["opus"].as_str()),
             ("Haiku 5.5", "Opus 5.5")
         );
+    }
+
+    #[test]
+    fn a_project_isnt_removed_with_a_session_restored_or_started_meanwhile() {
+        let restored = "UPDATE sessions SET deleted_at = NULL WHERE id = 'a1'";
+        let started =
+            "INSERT INTO sessions (id, project_id, name, agent, workdir, state, created_at)
+             VALUES ('b1', 1, 'new', 'claude', '/tmp', 'working', 2)";
+        for meanwhile in [restored, started] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("roster.db");
+            let mut db = Db::open(&path).unwrap();
+            let demo = db.add_project(&project("demo"), 0).unwrap();
+            let mut s = session("a1");
+            s.project_id = demo.id;
+            db.insert_session(&s).unwrap();
+            s.deleted_at = Some(1);
+            db.save_session(&s).unwrap();
+            db.insert_event(&s.id, "idle", 1, None).unwrap();
+            // Asked to confirm: only an archived session goes with it.
+            assert_eq!(db.purged_with(&demo).unwrap().len(), 1);
+            // Meanwhile another roster writes, committing a moment later.
+            let other = Connection::open(&path).unwrap();
+            other
+                .execute_batch(&format!("BEGIN IMMEDIATE; {meanwhile}"))
+                .unwrap();
+            let committing = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                other.execute_batch("COMMIT").unwrap();
+            });
+            let removed = db.remove_project(&demo);
+            committing.join().unwrap();
+            assert!(removed.is_err(), "{meanwhile}: {removed:?}");
+            assert!(db.project("demo").unwrap().is_some(), "{meanwhile}");
+            assert!(db.session("a1").is_ok(), "{meanwhile}");
+            assert_eq!(db.events_after(0, Some("a1"), 10).unwrap().len(), 1);
+        }
     }
 
     #[test]

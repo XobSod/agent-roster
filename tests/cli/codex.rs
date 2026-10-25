@@ -176,6 +176,11 @@ fn codex_reports_through_the_hooks_it_is_given() {
         let s = t.session("quiet", false).unwrap();
         s["conversation_id"].is_string() && s["state"] == "idle" && s["unread"] == true
     });
+    // Started on codex's own effort, it shows what codex says it ran with.
+    assert_eq!(
+        t.session("quiet", false).unwrap()["running_effort"],
+        "medium"
+    );
     // Known, it resumes without asking (idle: a working one would ask).
     t.ok(&["restart", "quiet"]);
 }

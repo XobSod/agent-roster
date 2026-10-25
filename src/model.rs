@@ -279,7 +279,7 @@ impl Session {
 
     /// The effort to show: what the agent runs with, reported or asked for at
     /// its start. One started on its default runs on it whatever an edit says
-    /// meanwhile (codex doesn't say which); stopped, it's what starts next.
+    /// meanwhile, unknown until it's reported; stopped, it's what starts next.
     pub fn effort_label(&self) -> Option<String> {
         self.running_effort
             .clone()

@@ -178,10 +178,17 @@ impl Adapter for Codex {
         })
     }
 
-    /// A hook's payload, as Claude's are (`super::hook_report`); codex's
-    /// don't say the effort.
+    /// A hook's payload, as Claude's are (`super::hook_report`). Codex's
+    /// don't say the effort, which its rollout, named in them, does.
     fn report(&self, payload: &Value) -> Report {
-        super::hook_report(payload)
+        let effort = payload
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .and_then(|path| transcript::last_effort(std::path::Path::new(path)));
+        Report {
+            effort,
+            ..super::hook_report(payload)
+        }
     }
 
     fn names_its_task(&self) -> bool {
@@ -447,6 +454,17 @@ mod tests {
             )
         );
         assert!(report.cleared && !report.started);
+        // The effort, from the rollout it names, where codex says it.
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-01a1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-6-luna\",\"effort\":\"low\"}}\n",
+        )
+        .unwrap();
+        let report =
+            Codex.report(&serde_json::json!({"session_id": "01a1", "transcript_path": rollout}));
+        assert_eq!(report.effort.as_deref(), Some("low"));
         let source = |source: &str| Codex.report(&serde_json::json!({"source": source}));
         assert!(source("startup").started && !source("startup").cleared);
         assert!(!source("resume").started && !source("resume").cleared);

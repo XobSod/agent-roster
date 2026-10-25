@@ -257,6 +257,25 @@ impl Payload {
     }
 }
 
+/// The effort codex last ran a turn with, as the rollout at `path` says at
+/// its end: each turn starts with a `turn_context` that names it. Looked for
+/// in the last MB only, the line alone parsed; a turn that wrote more since
+/// leaves it unknown.
+pub(super) fn last_effort(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let at = memchr::memmem::rfind(&tail, br#""type":"turn_context""#)?;
+    let start = memchr::memrchr(b'\n', &tail[..at]).map_or(0, |i| i + 1);
+    let end = memchr::memchr(b'\n', &tail[at..]).map_or(tail.len(), |i| at + i);
+    let entry: serde_json::Value = serde_json::from_slice(&tail[start..end]).ok()?;
+    entry["payload"]["effort"].as_str().map(String::from)
+}
+
 /// Which of a rollout's user messages are prompts you typed, as codex says
 /// itself rather than by their text: codex gives the model context as user
 /// messages too. Since 0.157 it marks each message with the kinds of its parts
@@ -471,6 +490,25 @@ mod tests {
         assert_eq!(stats.output_tokens, Some(17));
         assert_eq!(stats.context_used, Some(230));
         assert_eq!(t.recent_prompts(), ["first", "second"]);
+    }
+
+    #[test]
+    fn the_effort_is_the_last_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        assert_eq!(last_effort(&path), None);
+        let context = |effort: &str| {
+            json!({"timestamp": "t", "type": "turn_context", "payload": {"model": "gpt-6-luna", "effort": effort}})
+                .to_string()
+        };
+        let mut lines = turn("first", 5, 115, 400_000);
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(last_effort(&path), None);
+        lines.insert(0, context("medium"));
+        lines.push(context("xhigh"));
+        lines.extend(turn("second", 7, 230, 400_000));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(last_effort(&path).as_deref(), Some("xhigh"));
     }
 
     #[test]

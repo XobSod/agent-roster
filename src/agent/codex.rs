@@ -115,7 +115,7 @@ impl Adapter for Codex {
     /// Its knot, in OpenAI's teal.
     fn mark(&self) -> Option<Mark> {
         Some(Mark {
-            glyph: "⬡",
+            glyph: "⌬",
             rgb: Some((16, 163, 127)),
         })
     }

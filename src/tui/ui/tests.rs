@@ -982,7 +982,7 @@ fn the_sidebar_ends_with_whats_left_of_the_accounts_limits() {
     app.limits.agents = vec![said("claude", 100.0, 0.0), said("codex", 0.0, 0.0)];
     let screen = render(&app, 100, 12);
     let last = screen.lines().nth(10).unwrap();
-    assert!(last.starts_with(" ✱ 0%✕ 100%▼  ⬡ 100%▼ 100%▼"), "{screen}");
+    assert!(last.starts_with(" ✱ 0%✕ 100%▼  ⌬ 100%▼ 100%▼"), "{screen}");
     // Turned off.
     app.sidebar_usage = false;
     let screen = render(&app, 100, 12);
@@ -1010,7 +1010,7 @@ fn the_usage_view_shows_each_window_and_why_an_agent_couldnt_say() {
         "resets ",
         ", in ",
         "2 full resets left",
-        "⬡ Codex  pro",
+        "⌬ Codex  pro",
         "can't tell now: codex's server didn't answer",
         "Enter ask again",
         "Esc back",

@@ -887,12 +887,7 @@ fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> 
     if r.can_resume(s) {
         return Ok(true);
     }
-    let question = format!(
-        "{} ({}) can't resume its conversation. Start a new one?",
-        s.label(),
-        s.agent
-    );
-    confirm(&question, yes)
+    confirm(&crate::agent::new_conversation_question(s), yes)
 }
 
 /// `roster config --edit` when roster couldn't open (`why`): if config.toml

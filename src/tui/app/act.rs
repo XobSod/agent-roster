@@ -172,7 +172,7 @@ impl App {
             Entry::Card(s) | Entry::Row(s) if s.deleted_at.is_some() => self.restore(s),
             Entry::Card(s) | Entry::Row(s) => {
                 // Starting an agent that can't resume loses its conversation: ask.
-                if s.state == State::Stopped && !self.resumes(&s.agent) {
+                if s.state == State::Stopped && !crate::agent::resumes(&s) {
                     self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
                     return None;
                 }
@@ -235,7 +235,7 @@ impl App {
                 self.open_form(Form::edit_session(&s));
                 None
             }
-            Action::Start | Action::Restart if !self.resumes(&s.agent) => {
+            Action::Start | Action::Restart if !crate::agent::resumes(&s) => {
                 let op = if action == Action::Start {
                     Op::Start(s.id.clone())
                 } else {

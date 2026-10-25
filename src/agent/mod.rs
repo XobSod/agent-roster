@@ -358,6 +358,32 @@ pub(crate) fn offered(name: &str, config: &Config) -> bool {
         || (BUILT_IN.contains(&name) && crate::util::on_path(name))
 }
 
+/// Whether starting `s` goes on with its conversation: its agent resumes, and
+/// roster knows the conversation, or the one an adopted copy forks. An agent
+/// that names its conversation only from its first turn on (codex) may not
+/// have yet, or never will if its hooks don't run: then it starts a new one.
+pub fn resumes(s: &Session) -> bool {
+    adapter(&s.agent).resumes() && (s.conversation_id.is_some() || s.fork_from.is_some())
+}
+
+/// What the CLI and TUI ask before starting `s`, which begins a new
+/// conversation (`resumes`).
+pub fn new_conversation_question(s: &Session) -> String {
+    if adapter(&s.agent).resumes() {
+        format!(
+            "{} ({}) hasn't said which conversation it's on, so it can't resume it. Start a new one?",
+            s.label(),
+            s.agent
+        )
+    } else {
+        format!(
+            "{} ({}) can't resume its conversation. Start a new one?",
+            s.label(),
+            s.agent
+        )
+    }
+}
+
 /// The key under which what a model asked of `agent` (or "default") turned
 /// out to be is learned: Claude's as it is, as before there were other
 /// agents; another's after its name ("pi:default").
@@ -495,6 +521,25 @@ mod tests {
             Some("aider")
         );
         assert!(available(&config).contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn resumes_only_a_conversation_roster_knows() {
+        let mut s = session("a");
+        s.agent = "codex".into();
+        // Codex hasn't said which it's on (its hooks not run, say).
+        assert!(!resumes(&s));
+        assert!(new_conversation_question(&s).contains("hasn't said which conversation"));
+        // A copy forks the one it was adopted from until it has its own.
+        s.fork_from = Some("01a1".into());
+        assert!(resumes(&s));
+        s.fork_from = None;
+        s.conversation_id = Some("01a2".into());
+        assert!(resumes(&s));
+        // An agent that can't resume doesn't, whatever roster knows.
+        s.agent = "aider".into();
+        assert!(!resumes(&s));
+        assert!(new_conversation_question(&s).contains("can't resume its conversation"));
     }
 
     #[test]

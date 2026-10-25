@@ -768,10 +768,21 @@ fn codex_reports_through_the_hooks_it_is_given() {
     let s = t.session("quiet", false).unwrap();
     assert_eq!(s["conversation_id"], Value::Null);
     assert!(!t.ok(&["show", "quiet"]).contains("turn:"));
+    // Not knowing its conversation, a restart would begin a new one: it asks.
+    let out = t.run(&["restart", "quiet"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("hasn't said which conversation")
+            && err.contains("--yes"),
+        "{err}"
+    );
     type_into(&t, "quiet", "now a task");
     t.wait_for("its conversation, from its first turn", |t| {
         t.session("quiet", false).unwrap()["conversation_id"].is_string()
     });
+    // Known, it resumes without asking.
+    t.ok(&["restart", "quiet"]);
 }
 
 #[test]

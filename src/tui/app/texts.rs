@@ -142,11 +142,7 @@ impl App {
     }
 
     pub(super) fn new_conversation_question(&self, s: &Session) -> String {
-        format!(
-            "{} ({}) can't resume its conversation. Start a new one?",
-            s.label(),
-            s.agent
-        )
+        crate::agent::new_conversation_question(s)
     }
 
     /// Preview for a project heading.

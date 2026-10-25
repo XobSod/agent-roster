@@ -1131,7 +1131,7 @@ impl Roster {
     /// Whether starting `s` again resumes its conversation; if not, the CLI and
     /// TUI ask first.
     pub fn can_resume(&self, s: &Session) -> bool {
-        agent::adapter(&s.agent).resumes()
+        agent::resumes(s)
     }
 
     /// Whether an agent is waiting for its first prompt: for one with hooks,

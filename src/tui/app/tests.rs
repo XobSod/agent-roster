@@ -21,6 +21,8 @@ fn with(id: &str, project: (i64, &str), state: State, unread: bool, since: i64) 
     s.state = state;
     s.unread = unread;
     s.state_since = Some(since);
+    // As every Claude session has, roster having picked it.
+    s.conversation_id = Some(format!("conversation-{id}"));
     s
 }
 

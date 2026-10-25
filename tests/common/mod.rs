@@ -18,18 +18,7 @@ use serde_json::Value;
 /// Stand-in for `claude`: shows its arguments and environment, then echoes what
 /// it's sent. In a directory with a `.fullscreen` file it draws full screen
 /// instead (the alternate screen), redrawing its size whenever it changes.
-const FAKE_AGENT: &str = r#"#!/bin/sh
-if [ -e .fullscreen ]; then
-  printf '\033[?1049h'
-  draw() { printf '\033[2J\033[Hfull screen %s\n' "$(stty size)"; }
-  trap draw WINCH
-  draw
-  while :; do sleep 0.1; done
-fi
-echo "fake agent: $*"
-echo "TOKEN=${TOKEN-unset} GLOBAL=${GLOBAL-unset} SESSION=${ROSTER_SESSION-unset}"
-exec cat
-"#;
+const FAKE_AGENT: &str = include_str!("../fakes/claude.sh");
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 

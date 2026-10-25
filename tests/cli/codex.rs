@@ -1,0 +1,271 @@
+//! Codex: reporting through the hooks it's given, and its conversations adopted.
+
+use std::fs;
+use std::process::Command;
+
+use serde_json::Value;
+
+use crate::common::TestEnv;
+
+/// Stand-in for codex, as codex's source says it behaves: its hooks report
+/// nothing before its first turn, which reports `SessionStart` first; a
+/// prompt after `--` starts that turn at once; `resume` keeps the id given,
+/// `fork` and a new conversation get one of their own; a `clear` line starts
+/// a new conversation, reported with its first turn. It keeps a rollout like
+/// codex's.
+const FAKE_CODEX: &str = include_str!("../fakes/codex.sh");
+
+/// A codex stand-in in `t`, as `[agents.codex]`'s command, its agent the default.
+fn with_fake_codex(t: &TestEnv) {
+    use std::os::unix::fs::PermissionsExt;
+    let codex = t.path("fake-codex");
+    fs::write(&codex, FAKE_CODEX).unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "default_agent = \"codex\"\n{text}\n[agents.codex]\ncommand = \"{}\"\n",
+            codex.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// Types `text` into session `name`'s agent and presses Enter, as you would.
+fn type_into(t: &TestEnv, name: &str, text: &str) {
+    let id = t.session(name, false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let target = format!("=r-{id}:");
+    for keys in [vec!["-l", text], vec!["Enter"]] {
+        Command::new("tmux")
+            .args(["-L", &t.socket, "send-keys", "-t", &target])
+            .args(keys)
+            .output()
+            .unwrap();
+    }
+}
+
+#[test]
+fn codex_reports_through_the_hooks_it_is_given() {
+    let Some(t) = TestEnv::new("codex") else {
+        return;
+    };
+    with_fake_codex(&t);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // An effort codex has no word for.
+    assert!(
+        !t.run(&["new", "demo", "--agent", "codex", "--effort", "extreme"])
+            .status
+            .success()
+    );
+
+    // The first prompt goes on its command line, never typed in.
+    t.ok(&[
+        "new",
+        "demo",
+        "--name",
+        "c",
+        "--model",
+        "fake-model-1",
+        "--effort",
+        "ultra",
+        "--prompt",
+        "fix the tests",
+    ]);
+    t.wait_for("the first prompt's turn", |t| {
+        let s = t.session("c", false).unwrap();
+        s["state"] == "idle" && s["unread"] == true
+    });
+    let s = t.session("c", false).unwrap();
+    assert_eq!(s["pending_prompt"], false);
+    let conversation = s["conversation_id"].as_str().unwrap().to_string();
+    // Codex is told no id: it names its conversation and reports it back.
+    assert_eq!(conversation.len(), 36, "{conversation}");
+    // Its arguments as the stand-in echoes them, however the screen wraps
+    // them (roster's path is in them, as long as it is).
+    let screen = t.ok(&["show", "c"]).replace('\n', "");
+    assert!(
+        screen.contains("--no-daemon")
+            && screen.contains(r#"-c model="fake-model-1""#)
+            && screen.contains(r#"-c model_reasoning_effort="ultra""#)
+            && screen.contains("hooks.SessionStart=")
+            && screen.contains("-- fix the tests")
+            && screen.contains("turn: fix the tests"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("got: fix the tests") && !screen.contains("dangerously"),
+        "{screen}"
+    );
+    assert_eq!(
+        (&s["agent"], &s["running_model"], &s["effort"]),
+        (
+            &Value::from("codex"),
+            &Value::from("fake-model-1"),
+            &Value::from("ultra")
+        )
+    );
+
+    // Statistics from its rollout; what a subscription costs it doesn't say.
+    let info = t.ok(&["info", "c"]);
+    assert!(
+        info.contains("1 prompt") && info.contains("context 115/400k") && info.contains("5 out"),
+        "{info}"
+    );
+
+    // Codex names its conversation itself, from its first prompt: that's its
+    // title, and roster makes none.
+    t.wait_for("codex's name for it", |t| {
+        t.session("c", false).unwrap()["title"] == "named: fix the tests"
+    });
+
+    // It resumes: a restart opens the same conversation, without asking, and
+    // by its id even when its file isn't where it was (codex finds it, or
+    // says it can't): never a new conversation instead.
+    t.ok(&["restart", "--yes", "c"]);
+    t.wait_for("the restart", |t| {
+        t.ok(&["show", "c"])
+            .contains(&format!("resume {conversation}"))
+    });
+    fs::remove_file(s["transcript_path"].as_str().unwrap()).unwrap();
+    t.ok(&["restart", "--yes", "c"]);
+    t.wait_for("the restart without its file", |t| {
+        let screen = t.ok(&["show", "c"]);
+        screen.contains(&format!("resume {conversation}")) && !screen.contains("turn:")
+    });
+
+    // Cleared, codex starts a conversation of its own, reported with its
+    // first turn: the session follows.
+    type_into(&t, "c", "clear");
+    type_into(&t, "c", "after clearing");
+    t.wait_for("the new conversation", |t| {
+        let s = t.session("c", false).unwrap();
+        s["conversation_id"] != conversation.as_str() && s["state"] == "idle"
+    });
+    // Named anew, from its own first prompt.
+    t.wait_for("codex's name for the new one", |t| {
+        t.session("c", false).unwrap()["title"] == "named: after clearing"
+    });
+
+    // Without a first prompt: nothing typed in, nothing known until you give
+    // it one; it settles to idle from its screen.
+    t.ok(&["new", "demo", "--name", "quiet"]);
+    t.wait_for("idle, untouched", |t| {
+        t.session("quiet", false).unwrap()["state"] == "idle"
+    });
+    let s = t.session("quiet", false).unwrap();
+    assert_eq!(s["conversation_id"], Value::Null);
+    assert!(!t.ok(&["show", "quiet"]).contains("turn:"));
+    // Not knowing its conversation, a restart would begin a new one: it asks.
+    let out = t.run(&["restart", "quiet"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("hasn't said which conversation")
+            && err.contains("--yes"),
+        "{err}"
+    );
+    type_into(&t, "quiet", "now a task");
+    t.wait_for("its conversation, from its first turn", |t| {
+        t.session("quiet", false).unwrap()["conversation_id"].is_string()
+    });
+    // Known, it resumes without asking.
+    t.ok(&["restart", "quiet"]);
+}
+
+#[test]
+fn codex_conversations_can_be_adopted() {
+    let Some(t) = TestEnv::new("codex-adopt") else {
+        return;
+    };
+    with_fake_codex(&t);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+
+    // Two conversations codex kept, started outside roster in the project's
+    // directory, dated the way it files them.
+    let folder = t
+        .codex_dir()
+        .join("sessions")
+        .join("2026")
+        .join("10")
+        .join("21");
+    fs::create_dir_all(&folder).unwrap();
+    let (one, two) = (
+        "01a10001-0000-4000-8000-000000000001",
+        "01a10002-0000-4000-8000-000000000002",
+    );
+    for id in [one, two] {
+        let lines = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": t.path("proj"), "git": {"branch": "main"}}}),
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-6.1-sol", "effort": "high"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>not a prompt</environment_context>"}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["environments.environment_context"]}}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix it"}], "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["user.text"]}}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        fs::write(
+            folder.join(format!("rollout-2026-10-21T06-00-00-{id}.jsonl")),
+            text,
+        )
+        .unwrap();
+    }
+    fs::write(
+        t.codex_dir().join("session_index.jsonl"),
+        format!(
+            r#"{{"id":"{one}","thread_name":"Fixing it","updated_at":"2026-10-21T06:05:00Z"}}"#,
+        ) + "\n",
+    )
+    .unwrap();
+
+    let list = t.ok(&["adopt", "--list"]);
+    // Listed by the short id `roster adopt` takes.
+    assert!(
+        list.contains(&one[..8]) && list.contains(" codex ") && list.contains("Fixing it"),
+        "{list}"
+    );
+
+    // Adopted, it's a codex session in its project that resumes it.
+    t.ok(&["adopt", one, "--name", "a"]);
+    let s = t.session("a", false).unwrap();
+    assert_eq!(
+        (&s["agent"], &s["conversation_id"]),
+        (&Value::from("codex"), &Value::from(one))
+    );
+    t.wait_for("codex started", |t| {
+        t.ok(&["show", "a"]).contains(&format!("resume {one}"))
+    });
+    assert!(!t.ok(&["show", "a"]).contains("fork"));
+    assert!(!t.ok(&["adopt", "--list"]).contains(&one[..8]));
+
+    // A copy forks the original, and does again until codex has reported the
+    // copy's own conversation, which it resumes from then on.
+    t.ok(&["adopt", two, "--fork", "--name", "b"]);
+    // No id for it until codex reports the copy's: codex names it.
+    assert_eq!(
+        t.session("b", false).unwrap()["conversation_id"],
+        Value::Null
+    );
+    t.wait_for("the fork", |t| {
+        t.ok(&["show", "b"]).contains(&format!("fork {two}"))
+    });
+    t.ok(&["restart", "--yes", "b"]);
+    t.wait_for("the fork again", |t| {
+        t.ok(&["show", "b"]).contains(&format!("fork {two}"))
+    });
+    type_into(&t, "b", "carry on");
+    t.wait_for("the copy's own conversation", |t| {
+        t.session("b", false).unwrap()["conversation_id"].is_string()
+    });
+    let copy = t.session("b", false).unwrap()["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(copy != two, "{copy}");
+    t.ok(&["restart", "--yes", "b"]);
+    t.wait_for("the copy resumed", |t| {
+        t.ok(&["show", "b"]).contains(&format!("resume {copy}"))
+    });
+}

@@ -170,10 +170,13 @@ fn codex_reports_through_the_hooks_it_is_given() {
         "{err}"
     );
     type_into(&t, "quiet", "now a task");
+    // Its id comes with the turn's first report; the turn's end, which marks
+    // it unread, comes after (its start, codex's SessionStart, doesn't).
     t.wait_for("its conversation, from its first turn", |t| {
-        t.session("quiet", false).unwrap()["conversation_id"].is_string()
+        let s = t.session("quiet", false).unwrap();
+        s["conversation_id"].is_string() && s["state"] == "idle" && s["unread"] == true
     });
-    // Known, it resumes without asking.
+    // Known, it resumes without asking (idle: a working one would ask).
     t.ok(&["restart", "quiet"]);
 }
 

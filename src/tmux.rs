@@ -589,6 +589,8 @@ fn pane_target(name: &str) -> String {
 
 /// Whether tmux said there's no such server or session: at the start of what
 /// it said, so a config file's mistake that mentions one isn't taken for it.
+/// A server that exited while answering (killed, or its last session gone)
+/// is no server either.
 fn is_missing(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     let said = msg.strip_prefix("tmux: ").unwrap_or(&msg);
@@ -596,6 +598,7 @@ fn is_missing(e: &anyhow::Error) -> bool {
         "can't find session",
         "no server running",
         "error connecting",
+        "server exited unexpectedly",
     ]
     .iter()
     .any(|m| said.starts_with(m))
@@ -672,6 +675,7 @@ mod tests {
             "error connecting to /tmp/tmux-1000/agent-roster (No such file or directory)"
         ));
         assert!(missing("can't find session: r-1234"));
+        assert!(missing("server exited unexpectedly"));
         // A config file's mistake that mentions one (tmux says those on stdout).
         assert!(!missing(
             "/home/u/.config/agent-roster/tmux.conf:3: can't find session: x"

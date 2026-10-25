@@ -293,7 +293,7 @@ prompt goes on its command line, as Codex's own, instead of being typed in: what
 Codex shows first (a folder to trust, an update to install) is yours to answer. It
 names its conversation itself, so roster learns it, and the file it's kept in, from the
 first turn's reports; starting a session again resumes it by id (`codex resume <id>`),
-and if Codex can't find it, it says so rather than starting another. A session's model
+and if Codex can't find it, it says so rather than starting another. Until Codex has reported it (with its hooks not trusted, it never does), roster doesn't know it, so starting the session again asks before beginning a new one. A session's model
 is anything Codex takes as `-c model=` (forms offer what `codex debug models` lists,
 each with the efforts it takes), its effort the reasoning level as
 `-c model_reasoning_effort=` (`none` … `ultra`). Codex names no task itself, so roster

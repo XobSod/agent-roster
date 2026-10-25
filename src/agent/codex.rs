@@ -28,8 +28,9 @@ const EFFORTS: &[&str] = &[
 ];
 
 /// The hook events roster listens to, and the kind of state each one is.
-/// `Interrupt` and `SessionEnd` are left alone: an interrupted turn reports
-/// `Stop` too, and a closing session leaves its pane, which roster notices.
+/// `Interrupt` and `SessionEnd` are left alone: an interrupted turn, which
+/// reports no `Stop`, ends on the screen as Claude's does, and a closing
+/// session leaves its pane, which roster notices.
 const HOOKS: &[(&str, &str)] = &[
     ("SessionStart", "session"),
     ("UserPromptSubmit", "prompt"),

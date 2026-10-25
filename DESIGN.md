@@ -2,13 +2,13 @@
 
 How roster should behave, and why. The code is the truth about how it does it; this file is the truth about what it should do. Where the two disagree, one of them is wrong, and which one is decided case by case: this file changes to match the code, or the code to match this file. It stays at the level of features and the decisions behind them; keys, commands and settings are in the README and `roster --help`. It says nothing about what was before or what may come.
 
-Roster is a small, keyboard-first terminal manager for AI coding-agent sessions, written in Rust. One screen: the sessions on the left with their state, the selected one's screen on the right. Enter takes you into the agent, full screen, where you type to it directly; a back key (Ctrl+Q) brings you back. The agents are the real CLIs (Claude Code, pi, any other), running on roster's own tmux server.
+Roster is a small, keyboard-first terminal manager for AI coding-agent sessions, written in Rust. One screen: the sessions on the left with their state, the selected one's screen on the right. Enter takes you into the agent, full screen, where you type to it directly; a back key (Ctrl+Q) brings you back. The agents are the real CLIs (Claude Code, pi, Codex, any other), running on roster's own tmux server.
 
 ---
 
 ## 1. Requirements
 
-1. **Several agents.** Claude Code and pi have adapters; any other CLI agent runs as a generic one, tracked by its screen. Tracking can't rely on one agent's hooks.
+1. **Several agents.** Claude Code, pi and Codex have adapters; any other CLI agent runs as a generic one, tracked by its screen. Tracking can't rely on one agent's hooks.
 2. **TUI and CLI parity.** Whatever the TUI does, a command does too, so scripts, and agents themselves, can use roster.
 3. **Keyboard-first, no mouse capture**, in the TUI and in roster's tmux.
 4. **Keys reach the agent unchanged.** While attached, roster's tmux takes only the back key, in a plain terminal and inside the user's own tmux. So roster's tmux never loads the user's `~/.tmux.conf`: nested inside the user's tmux, its prefix and bindings would take keys meant for the agent.
@@ -18,7 +18,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 8. **Restarting keeps the conversation**, for agents that can resume, and nothing starts a fresh one silently.
 9. **Archiving is recoverable**, and deleting for good is a separate, confirmed step.
 10. **Low coupling.** Roster never changes an agent's own config or the user's tmux config: whatever it adds to an agent, it adds for that run, at launch. What it writes lives only in its own XDG directories, and of its own config it writes only what is changed in its settings.
-11. **What an agent lacks, roster adds per run, and only that**: pi doesn't report its state, so roster loads an extension of its own into the sessions it starts. Nothing it adds changes how the agent behaves for the user.
+11. **What an agent lacks, roster adds per run, and only that**: pi doesn't report its state, so roster loads an extension of its own into the sessions it starts; Codex gets hooks of its own the same way. Nothing it adds changes how the agent behaves for the user.
 12. **Several roster processes at once, without lost work.** The TUI, commands and agents calling roster share one database, and none undoes what another saved meanwhile. One TUI runs at a time: one is enough, and commands run alongside it.
 13. **Small scope.** Features come when they're needed.
 
@@ -27,7 +27,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Project**: a name, a directory, and defaults for its sessions (agent, model, effort). Every session belongs to one.
 - **Session**: one agent at work in a project: its agent, name, directory, conversation, state, title, model and effort, note.
 - **Name**: unique among the project's live sessions, made up as `<agent>-<n>` unless you give one. A given name is often a role (`tester`) reused task after task, so it shows next to the title; a made-up one only stands in for a missing title.
-- **Agent**: Claude, pi, or any other CLI configured by its command. Claude is always offered, pi once it's installed, others once configured.
+- **Agent**: Claude, pi, Codex, or any other CLI configured by its command. Claude is always offered, pi and Codex once installed, others once configured.
 - **Conversation**: what the agent keeps of the exchange, in its own files; roster knows its id and resumes it.
 - **State**: working, needs input, idle, stopped; plus unread (§3.3).
 - **Archived**: put away with the agent stopped, kept with its conversation and note until restored or deleted for good.
@@ -50,9 +50,9 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 
 ### 3.2 Launching
 - Every start, restart included, runs the whole launch: a POSIX shell (the user's, if it is one; not login, not interactive, so no rc files) sources the global env file, then the project's (`.agent-roster.env` in its directory), then runs the agent. Values are exported, and a failing command stops the start (unless an `export` in front hides its failure): its error stays on the screen and the session shows stopped. A running agent keeps the environment it started with, so credentials that expire mid-session need a helper the agent calls itself.
-- Roster picks the session's id, and for agents that take one the conversation's, up front. The session's identity and roster's own path reach the agent through its environment, so its hooks can report.
+- Roster picks the session's id, and for agents that take one the conversation's, up front. Codex takes none: it names its conversation, and reports it from its first turn on. The session's identity and roster's own path reach the agent through its environment, so its hooks can report.
 - Arguments: the configured ones, then the session's model and effort, so the session wins, then what the adapter needs.
-- **Claude** gets roster's hooks through `--settings` for that run, alongside the user's and the project's, and resumes its conversation once there is one. **pi** gets roster's extension through `-e` for that run.
+- **Claude** gets roster's hooks through `--settings` for that run, alongside the user's and the project's, and resumes its conversation once there is one. **pi** gets roster's extension through `-e` for that run. **Codex** gets roster's hooks as `-c` arguments for that run, alongside the user's and the project's, and resumes its conversation by id once it has reported one. It runs without its shared server, so its tools get the session's environment, the env files' included, rather than the server's.
 
 ### 3.3 State
 | State | Meaning | From |
@@ -63,15 +63,16 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 | **stopped** | no agent running, for whatever reason | tmux |
 
 - **Reports first, the screen second.** An agent with an adapter reports a turn's start and end, a question, its conversation and model; its screen only corrects an end that went unreported. A generic agent is tracked by its screen alone: changing means working, still for a few seconds means idle.
-- **Esc fires no hook**, so a reporting agent that's working, with no new report and its screen unchanged for 4 s, turns idle, and not unread: you interrupted it yourself. This is reliable for Claude, whose spinner changes the screen as long as it works.
+- **Esc fires no hook**, so a reporting agent that's working, with no new report and its screen unchanged for 4 s, turns idle, and not unread: you interrupted it yourself. This is reliable for Claude, whose spinner changes the screen as long as it works. Codex fires none either.
 - **Unread** is set when a session turns idle or needs input, and cleared when you come back from it, when you start or restore it, or by hand. Looking at the preview doesn't clear it.
 - Claude's `Notification` hook isn't used for needs input: it comes about 6 s after the permission prompt, maybe after it was answered.
-- On its first start in a directory, Claude asks whether to trust it before any hook fires, so the session shows working, then idle once its screen is still.
+- On its first start in a directory, Claude asks whether to trust it before any hook fires, so the session shows working, then idle once its screen is still. Codex reports nothing before its first turn, so until then it's tracked the same way.
 - **The reporter never fails**: it's silent and exits 0 even when the database is locked or broken, since for Claude a hook exiting with 2 means "keep going". An event it can't store is dropped; a missed end of a turn is caught from the screen.
 
 ### 3.4 First prompt
 - A new session can get a first prompt, typed into the agent once it's ready: for an agent that reports, once it's idle and has reported its conversation; for others, once its screen is still.
 - **Typed as a bracketed paste, a pause, then Enter**: typed as keys with Enter straight after, Claude didn't submit a long prompt. **Not on Claude's command line**: a one-word prompt would run a subcommand.
+- **Codex gets it on its command line** instead: it reports nothing before its first turn, so it never says it's ready, and what it may show first takes typed keys (a folder to trust, roster's hooks to review, an update, which Enter installs). On its command line the prompt waits for those to be answered, then starts its first turn.
 - **Typed once**, by whichever roster process gets to it. One that couldn't be pasted is tried again a few times, then left to another roster process or the next start; one pasted whose Enter failed isn't, since typing it twice is worse. Failures are said. While you're attached nothing refreshes, so a hidden roster process types it.
 
 ### 3.5 Start, stop, archive, delete
@@ -86,12 +87,12 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - Per session. A new session takes its own, else its project's (if the project runs the same agent), else the agent's from the config, else none, leaving it to the agent's own settings. "Default", wherever it's chosen, is the agent's from the config, else the agent's own. Changes apply on the next start. Generic agents take neither.
 - **What shows is what the agent runs with**: what it reported, else what its start asked for, so an edit shows from the next start.
 - **Roster learns what each alias and "default" turned out to be** (`opus · Opus 5.5`), only from the agent's own start, with what that start asked for: not from a conversation cleared or resumed inside it, which may have switched model meanwhile, and not from the session's model as it is now, which an edit may have changed since.
-- **Forms offer the agent's models**: Claude's from roster's own list, since Claude can't list its own; pi's from pi, asked in the background. Any other name can be typed.
+- **Forms offer the agent's models**: Claude's from roster's own list, since Claude can't list its own; pi's and Codex's from the agent, asked in the background. Any other name can be typed.
 
 ### 3.7 Titles
 - **The agent's own** (Claude's terminal title, pi's session name), or **one of yours**, which wins; taking yours off follows the agent's again.
 - **Generated on request**: the session's own agent, run one-off with no tools (or the fewest it allows, none of them able to act) and nothing kept, names what its recent prompts are about. It's kept as your title, since Claude would overwrite its own. It's made in the background, and kept only if the session is still as it was when asked: the same conversation, and no title of yours given or taken off meanwhile. Generic agents can't get one, as roster can't read their conversations.
-- **Automatic**, for agents that don't name their task (pi): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
+- **Automatic**, for agents that don't name their task (pi, Codex): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
 
 ### 3.8 Notes
 - Free text per session, kept through stops, restarts and archiving, gone only with the session. Cards mark sessions with one.
@@ -104,9 +105,9 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - The conversation is read incrementally, and the first read must be quick: an 80 MB Claude transcript is normal.
 
 ### 3.10 Adopting conversations
-- Taking over a Claude or pi conversation started outside roster (plain `claude` or `pi`, an IDE, another session manager), so it goes on as a session here. They're picked from the agents' own files, newest first, with a search: those in your projects' directories, or all of them.
+- Taking over a Claude, pi or Codex conversation started outside roster (plain `claude`, `pi` or `codex`, an IDE, another session manager), so it goes on as a session here. They're picked from the agents' own files, newest first, with a search: those in your projects' directories, or all of them.
 - **Move** (the default): into the project holding its directory, else a new project for that directory; the session runs there and resumes it. **Copy**: a fork, leaving the original untouched.
-- **Open elsewhere**: a running Claude leaves a sign, and moving its conversation asks first, since two agents would write one conversation; a copy doesn't. pi leaves none, so roster can't warn.
+- **Open elsewhere**: a running Claude leaves a sign, and moving its conversation asks first, since two agents would write one conversation; a copy doesn't. pi and Codex leave none roster can read, so roster can't warn.
 - Model and effort: what it last ran with, the defaults, or ones you pick.
 - Conversations of live sessions aren't offered; an archived session's is, for restoring.
 
@@ -155,7 +156,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 
 ## Appendix: what roster relies on
 
-Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 1.4.0, Codex 0.163.0). A change in one of these can break roster.
+Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 1.4.0, Codex 0.163.0 and 0.164.0). A change in one of these can break roster.
 
 **tmux**
 - Extended keys and `new-session -e` exist from 3.2.
@@ -182,8 +183,13 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 - It leaves no sign that a conversation is open.
 
 **Codex**
+- It takes no id for a new conversation; it names it, and its hooks report it from its first turn on, `SessionStart` too, saying `startup`, `resume`, `clear` or `fork`, with the model. `resume <id>` gets a conversation back, and says so if it can't find it; `fork <id>` copies one, whose rollout holds only what follows the fork, naming the one it came from (so a copy's prompts count from the fork on); `debug models` lists its models.
+- Esc during a turn fires no hook, `Stop` neither.
+- At a start it may first ask to trust the folder, or offer an update, which Enter installs.
+- `--no-daemon` runs its tools in its own environment.
 - Hooks given with `-c hooks.<Event>=[…]` are a layer of their own and fire alongside the user's and the project's, whether those are in `config.toml` or `hooks.json`, though the merged config shows only the `-c` ones.
 - `codex exec` always offers the model `exec` and `request_user_input`, whatever is turned off; with `code_mode_host` off, `exec` fails at once, and in a read-only sandbox `apply_patch` is refused. The user's own `AGENTS.md` comes whatever is turned off; `project_doc_max_bytes=0` keeps out the project's.
 - An unknown feature is an error for `--disable`, a warning for `-c features.<name>=false`.
+- The trust of hooks given with `-c` is kept per event, for whichever command was trusted last: trusting roster at another path untrusts it at the one before.
 - New or changed hooks are reviewed at its start, and a prompt on its command line waits for the answer: trusted, its first turn reports; reviewed one by one or not trusted, it runs without them. Every hook payload names the conversation, so the next turn that reports says it.
 - Its rollout gives the model context as user messages too. Since 0.157 it marks each message's parts with their kinds (`user.text` for a prompt); before, it marked none and wrote each prompt again as a `user_message` event, which 0.124 also wrote beside marked messages. A prompt given on its command line is a prompt like any other.

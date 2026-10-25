@@ -29,17 +29,42 @@ pub struct Window {
     pub resets_at: Option<i64>,
 }
 
-/// How a window is going, from least to most worrying.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// How a window is used against its time going by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pace {
-    /// It lasts until it starts over, at the rate it's used.
-    Fine,
-    /// At least half used, faster than its time goes by: at this rate it runs
-    /// out before it starts over. Earlier, one busy hour would say so of a
-    /// week.
-    Short,
+    /// Slower: more of it could be used before it starts over.
+    Slow,
+    /// About as fast.
+    Even,
+    /// Faster: at this rate it runs out before it starts over.
+    Fast,
     /// Used up.
     Out,
+}
+
+/// How far, in points, use may be ahead of or behind the window's time and
+/// still be even with it: five hours' 15 minutes, a week's 8 hours.
+const EVEN: f64 = 5.0;
+
+impl Pace {
+    /// Its mark: the rate it's used at up or down, or used up.
+    pub fn mark(self) -> &'static str {
+        match self {
+            Pace::Slow => "▼",
+            Pace::Even => "◆",
+            Pace::Fast => "▲",
+            Pace::Out => "✕",
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Pace::Slow => "slow",
+            Pace::Even => "on pace",
+            Pace::Fast => "fast",
+            Pace::Out => "used up",
+        }
+    }
 }
 
 impl Window {
@@ -68,17 +93,23 @@ impl Window {
         Some((1.0 - left / length).clamp(0.0, 1.0))
     }
 
-    pub fn pace(&self, now: i64) -> Pace {
+    /// How it's used against its time; None once it has started over, or
+    /// not knowing when it does, unless it's used up.
+    pub fn pace(&self, now: i64) -> Option<Pace> {
         if self.over(now) {
-            return Pace::Fine;
+            return None;
         }
         if self.used >= 100.0 {
-            return Pace::Out;
+            return Some(Pace::Out);
         }
-        match self.elapsed(now) {
-            Some(gone) if self.used >= 50.0 && self.used > gone * 100.0 => Pace::Short,
-            _ => Pace::Fine,
-        }
+        let ahead = self.used - self.elapsed(now)? * 100.0;
+        Some(if ahead > EVEN {
+            Pace::Fast
+        } else if ahead < -EVEN {
+            Pace::Slow
+        } else {
+            Pace::Even
+        })
     }
 
     /// How much of it is left, in percent.
@@ -100,33 +131,6 @@ impl Window {
         } else {
             format!("resets {}, in {}", local_when(at, now), until(at - now))
         })
-    }
-}
-
-impl Usage {
-    /// How its worst window is going.
-    pub fn pace(&self, now: i64) -> Pace {
-        self.windows
-            .iter()
-            .map(|w| w.pace(now))
-            .max()
-            .unwrap_or(Pace::Fine)
-    }
-
-    /// What's left of its windows, shortest first: "68% · 48%"; "–" for one
-    /// that has started over since.
-    pub fn brief(&self, now: i64) -> String {
-        self.windows
-            .iter()
-            .map(|w| {
-                if w.over(now) {
-                    "–".into()
-                } else {
-                    w.percent()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" · ")
     }
 }
 
@@ -156,45 +160,31 @@ mod tests {
     }
 
     #[test]
-    fn a_window_runs_short_when_half_used_faster_than_its_time_goes() {
-        // A five-hour window, an hour gone.
+    fn a_window_is_used_slower_or_faster_than_its_time_goes() {
+        // A five-hour window, an hour (20%) gone.
         let at = |used| window(300, used, 4 * HOUR).pace(0);
-        assert_eq!(at(10.0), Pace::Fine);
-        // Ahead of its time, but not half used: too early to tell.
-        assert_eq!(at(40.0), Pace::Fine);
-        assert_eq!(at(55.0), Pace::Short);
-        assert_eq!(at(100.0), Pace::Out);
-        // Half its time gone, about as much used.
+        assert_eq!(at(14.9), Some(Pace::Slow));
+        // Within five points of its time: even with it.
+        assert_eq!(at(15.1), Some(Pace::Even));
+        assert_eq!(at(20.0), Some(Pace::Even));
+        assert_eq!(at(24.9), Some(Pace::Even));
+        assert_eq!(at(25.1), Some(Pace::Fast));
+        assert_eq!(at(100.0), Some(Pace::Out));
         let half = window(300, 50.0, 150 * 60_000);
         assert_eq!(half.elapsed(0), Some(0.5));
-        assert_eq!(half.pace(0), Pace::Fine);
         // Started over since: what it said no longer holds.
         let over = window(300, 100.0, 0);
         assert!(over.over(0));
-        assert_eq!(over.pace(0), Pace::Fine);
-        // Not knowing when it starts over, only used up counts.
-        let unknown = Window {
-            resets_at: None,
-            ..window(300, 90.0, 0)
+        assert_eq!(over.pace(0), None);
+        // Not knowing when it starts over, only used up tells.
+        let unknown = |used| {
+            Window {
+                resets_at: None,
+                ..window(300, used, 0)
+            }
+            .pace(0)
         };
-        assert_eq!(unknown.pace(0), Pace::Fine);
-    }
-
-    #[test]
-    fn usage_is_as_bad_as_its_worst_window_and_briefly_whats_left() {
-        let usage = Usage {
-            plan: None,
-            windows: vec![window(300, 31.4, HOUR), window(10_080, 99.9, -HOUR)],
-            notes: Vec::new(),
-            at: 0,
-        };
-        assert_eq!(usage.brief(0), "68% · –");
-        assert_eq!(usage.pace(0), Pace::Fine);
-        let usage = Usage {
-            windows: vec![window(300, 31.0, HOUR), window(10_080, 100.0, HOUR)],
-            ..usage
-        };
-        assert_eq!(usage.brief(0), "69% · 0%");
-        assert_eq!(usage.pace(0), Pace::Out);
+        assert_eq!(unknown(90.0), None);
+        assert_eq!(unknown(100.0), Some(Pace::Out));
     }
 }

@@ -200,8 +200,8 @@ pub fn list_projects(r: &Roster) -> Result<()> {
 }
 
 /// What each agent's account has used of its limits, asked now: what's left
-/// of each window and when it starts over (with `--json`, also whether it
-/// runs out first at this rate). An error if an agent's couldn't be read.
+/// of each window, whether it's used slower or faster than its time goes,
+/// and when it starts over. An error if an agent's couldn't be read.
 pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
     use crate::usage::Pace;
     let said = r.usage_reader()();
@@ -216,7 +216,9 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
                     "windows": u.windows.iter().map(|w| json!({
                         "label": w.label(), "minutes": w.minutes, "used": w.used, "left": w.left(),
                         "resets_at": w.resets_at, "started_over": w.over(now),
-                        "pace": match w.pace(now) { Pace::Fine => "fine", Pace::Short => "short", Pace::Out => "out" },
+                        "pace": w.pace(now).map(|p| match p {
+                            Pace::Slow => "slow", Pace::Even => "even", Pace::Fast => "fast", Pace::Out => "out",
+                        }),
                     })).collect::<Vec<_>>(),
                 }),
                 Err(e) => json!({"agent": agent, "error": format!("{e:#}")}),
@@ -244,6 +246,7 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
                 None => println!("{agent}"),
             }
             let label_w = u.windows.iter().map(|w| w.label().len()).max().unwrap_or(0);
+            let paced = u.windows.iter().any(|w| w.pace(now).is_some());
             for w in &u.windows {
                 let left = if w.over(now) {
                     "–".into()
@@ -251,6 +254,11 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
                     w.percent()
                 };
                 let mut line = format!("  {:label_w$}  {left:>4} left", w.label());
+                match w.pace(now) {
+                    Some(pace) => line.push_str(&format!("  {} {:7}", pace.mark(), pace.word())),
+                    None if paced => line.push_str(&" ".repeat(11)),
+                    None => {}
+                }
                 if let Some(resets) = w.resets(now) {
                     line.push_str(&format!("  {resets}"));
                 }

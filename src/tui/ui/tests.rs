@@ -968,21 +968,21 @@ fn the_sidebar_ends_with_whats_left_of_the_accounts_limits() {
     // Nothing said yet: no line.
     let screen = render(&app, 100, 12);
     assert!(!screen.contains('%'), "{screen}");
-    app.limits.agents = vec![said("claude", 31.0, 52.0), said("codex", 7.0, 13.0)];
+    // Each window with its pace: four fifths of five hours gone, and six
+    // sevenths of a week; Claude's used faster, then about as fast, codex's
+    // slower.
+    app.limits.agents = vec![said("claude", 90.0, 85.0), said("codex", 7.0, 13.0)];
     let screen = render(&app, 100, 12);
     let last = screen.lines().nth(10).unwrap();
     assert!(
-        last.starts_with(" claude 69% · 48%  codex 93% · 87%"),
+        last.starts_with(" claude 10%▲ 15%◆  codex 93%▼ 87%▼"),
         "{screen}"
     );
     // Too long for their names: their marks.
-    app.limits.agents = vec![said("claude", 0.0, 0.0), said("codex", 0.0, 0.0)];
+    app.limits.agents = vec![said("claude", 100.0, 0.0), said("codex", 0.0, 0.0)];
     let screen = render(&app, 100, 12);
     let last = screen.lines().nth(10).unwrap();
-    assert!(
-        last.starts_with(" ✱ 100% · 100%  ⬡ 100% · 100%"),
-        "{screen}"
-    );
+    assert!(last.starts_with(" ✱ 0%✕ 100%▼  ⬡ 100%▼ 100%▼"), "{screen}");
     // Turned off.
     app.sidebar_usage = false;
     let screen = render(&app, 100, 12);
@@ -1005,8 +1005,8 @@ fn the_usage_view_shows_each_window_and_why_an_agent_couldnt_say() {
         "✱ Claude  pro",
         "5 hours  ",
         "Weekly   ",
-        " 69% left",
-        " 48% left",
+        " 69% left  ▼ slow",
+        " 48% left  ▼ slow",
         "resets ",
         ", in ",
         "2 full resets left",

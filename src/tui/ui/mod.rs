@@ -34,7 +34,10 @@ use super::app::{App, Dialog, Mode};
 use super::form::{Form, Kind};
 use super::list::{Entry, Group};
 use super::picker::Picker;
-use super::theme::{self, ACCENT, ERROR, FAINT, INPUT, MUTED, SELECTED_BG, UNREAD, WORKING};
+use super::theme::{
+    self, ACCENT, ERROR, FAINT, INPUT, MUTED, PACE_EVEN, PACE_FAST, PACE_SLOW, SELECTED_BG, UNREAD,
+    WORKING,
+};
 use crate::keys::{Action, Menu};
 use crate::model::{Session, State};
 use crate::search::Hit;

@@ -15,6 +15,12 @@ pub const WORKING: Color = Color::Rgb(100, 160, 240);
 pub const INPUT: Color = Color::Rgb(240, 180, 80);
 pub const UNREAD: Color = Color::Rgb(90, 210, 150);
 pub const ERROR: Color = Color::Rgb(235, 105, 105);
+/// A limit's window used slower than its time goes, about as fast, and
+/// faster or used up (`▲` and `✕` tell those apart): saturated, and blue
+/// against red, so they're told apart with deuteranopia too.
+pub const PACE_SLOW: Color = Color::Rgb(60, 160, 255);
+pub const PACE_EVEN: Color = Color::Rgb(150, 150, 150);
+pub const PACE_FAST: Color = Color::Rgb(255, 32, 32);
 
 /// Badge colours; a project gets one by a hash of its name.
 const PROJECT_COLORS: [Color; 12] = [

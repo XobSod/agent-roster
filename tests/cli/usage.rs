@@ -60,13 +60,25 @@ fn usage_is_asked_of_each_agents_service() {
     // serving until its stdin ends, is ended once it has answered.
     let (codex, claude) = out.split_once("\n\n").unwrap();
     assert!(codex.starts_with("codex  plus\n"), "{out}");
-    assert!(codex.contains("5 hours   93% left  resets "), "{out}");
-    assert!(codex.contains("Weekly    87% left  resets "), "{out}");
+    assert!(
+        codex.contains("5 hours   93% left  ▼ slow     resets "),
+        "{out}"
+    );
+    assert!(
+        codex.contains("Weekly    87% left  ▼ slow     resets "),
+        "{out}"
+    );
     assert!(claude.starts_with("claude  pro\n"), "{out}");
-    assert!(claude.contains("5 hours   69% left  resets "), "{out}");
-    // 95% of a week, its day only beginning: it runs out first at this
-    // rate, which its colour says in the TUI, and `--json` below.
-    assert!(claude.contains("Weekly     5% left  resets "), "{out}");
+    assert!(
+        claude.contains("5 hours   69% left  ▲ fast     resets "),
+        "{out}"
+    );
+    // 95% of a week, its day only beginning: used faster than its time
+    // goes, as `--json` says below too.
+    assert!(
+        claude.contains("Weekly     5% left  ▲ fast     resets "),
+        "{out}"
+    );
     assert!(!claude.contains(" · "), "{out}");
     let args = fs::read_to_string(bin.join("curl-args")).unwrap();
     assert!(args.contains("@-") && !args.contains("t0k"), "{args}");
@@ -74,7 +86,7 @@ fn usage_is_asked_of_each_agents_service() {
     let json: Value = serde_json::from_str(&t.ok(&["usage", "--json"])).unwrap();
     assert_eq!(json[0]["agent"], "codex");
     assert_eq!(json[0]["windows"][1]["minutes"], 10_080);
-    assert_eq!(json[1]["windows"][1]["pace"], "short");
+    assert_eq!(json[1]["windows"][1]["pace"], "fast");
 
     // Claude's sessions are given another account by the env file: that's
     // the one asked about.

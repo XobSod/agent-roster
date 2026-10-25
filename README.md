@@ -109,10 +109,13 @@ stops, restarts and archiving, and goes only when its session is deleted for goo
 `v u` shows what's left of your Claude and Codex accounts' limits: the 5-hour and the
 weekly window, each as a bar, full while none of it is used and shrinking as you use
 it, with a mark where as much of the window's time is left (a bar ending short of it
-is used faster than the window lasts), and when it starts over. The sidebar's last
-line has the same, briefly (`claude 69% · 48%  codex 93% · 87%` left, the 5-hour
-window first): dim while they last, louder once a window, at least half used,
-is on its way to run out before it starts over, and red when one has. Roster asks
+is used faster than the window lasts), and when it starts over. Beside each, its
+pace: `▼ slow` (used slower than its time goes, so there's more to use), `◆ on pace`
+(within 5 points of its time), `▲ fast` (at this rate it runs out before it starts
+over), or `✕ used up`; the bar and what's left are blue, grey or red to match.
+The sidebar's last line has the same, briefly (`claude 69%▲
+48%◆  codex 93%▼ 87%▼`, the 5-hour window first; the agents' marks in place of their
+names where those don't fit), dim when old. Roster asks
 Claude.ai's usage service with Claude's login (through `curl`; the login is Claude's
 to renew, so once it expires roster waits for Claude to), and Codex's own server
 (`codex app-server`): at the start, every 5 minutes while the figures show, and when

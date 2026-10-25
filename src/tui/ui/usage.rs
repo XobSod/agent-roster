@@ -6,12 +6,14 @@ use crate::tokens::{Counts, Period, Report, Spent, amount, dollars};
 use crate::tui::limits::STALE_MS;
 use crate::usage::{Pace, Usage, Window};
 
-/// What a window's pace shows in: `quiet` while it lasts, then louder.
-fn pace_color(pace: Pace, quiet: ratatui::style::Color) -> ratatui::style::Color {
+/// What a window's bar, what's left of it and its pace show in: its pace's
+/// colour, `quiet` without one.
+fn pace_color(pace: Option<Pace>, quiet: ratatui::style::Color) -> ratatui::style::Color {
     match pace {
-        Pace::Fine => quiet,
-        Pace::Short => INPUT,
-        Pace::Out => ERROR,
+        Some(Pace::Slow) => PACE_SLOW,
+        Some(Pace::Even) => PACE_EVEN,
+        Some(Pace::Fast | Pace::Out) => PACE_FAST,
+        None => quiet,
     }
 }
 
@@ -19,10 +21,10 @@ fn stale(usage: &Usage, now: i64) -> bool {
     now - usage.at > STALE_MS
 }
 
-/// The sidebar's line: what's left of each agent's windows, shortest first
-/// (`claude 69% · 48%  codex 93% · 87%`), by its mark instead of its name
-/// where names don't fit; dim if old, louder as it runs short. None until
-/// an agent has said.
+/// The sidebar's line: what's left of each agent's windows, shortest first,
+/// each with its pace (`claude 69%▲ 48%◆  codex 93%▼ 87%▼`) in its colour,
+/// by its mark instead of its name where names don't fit; dim if old. None
+/// until an agent has said.
 pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'static>> {
     let said: Vec<(&str, &Usage)> = app
         .limits
@@ -39,20 +41,26 @@ pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'stat
             if i > 0 {
                 spans.push(Span::raw("  "));
             }
-            let color = if stale(usage, now) {
-                FAINT
-            } else {
-                pace_color(usage.pace(now), MUTED)
-            };
+            let dim = stale(usage, now);
             spans.push(if named {
                 Span::styled(agent.to_string(), Style::new().fg(FAINT))
             } else {
                 glyph(agent)
             });
-            spans.push(Span::styled(
-                format!(" {}", usage.brief(now)),
-                Style::new().fg(color),
-            ));
+            for w in &usage.windows {
+                let pace = w.pace(now);
+                let color = if dim { FAINT } else { pace_color(pace, MUTED) };
+                let left = if w.over(now) {
+                    "–".into()
+                } else {
+                    w.percent()
+                };
+                let mark = pace.map_or("", Pace::mark);
+                spans.push(Span::styled(
+                    format!(" {left}{mark}"),
+                    Style::new().fg(color),
+                ));
+            }
         }
         spans
     };
@@ -222,8 +230,10 @@ fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
         .flat_map(|u| u.windows.iter().map(|w| w.label().width()))
         .max()
         .unwrap_or(0);
-    // Indent, label, a space, the bar, what's left.
-    let bar_w = width.saturating_sub(2 + label_w + 2 + 10).clamp(10, 50);
+    // Indent, label, a space, the bar, what's left and its pace.
+    let bar_w = width
+        .saturating_sub(2 + label_w + 2 + 10 + 11)
+        .clamp(10, 50);
     let indent = " ".repeat(2 + label_w + 2);
     for said in &app.limits.agents {
         if !lines.is_empty() {
@@ -261,14 +271,13 @@ fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
                 } else {
                     w.percent()
                 };
-                spans.push(Span::styled(
-                    format!("{left:>5} left"),
-                    Style::new().fg(if dim {
-                        FAINT
-                    } else {
-                        pace_color(w.pace(now), ACCENT)
-                    }),
-                ));
+                let pace = w.pace(now);
+                let mut text = format!("{left:>5} left");
+                if let Some(pace) = pace {
+                    text.push_str(&format!("  {} {}", pace.mark(), pace.word()));
+                }
+                let color = if dim { FAINT } else { pace_color(pace, ACCENT) };
+                spans.push(Span::styled(text, Style::new().fg(color)));
                 lines.push(Line::from(spans));
                 if let Some(when) = w.resets(now) {
                     lines.push(Line::styled(

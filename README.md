@@ -58,13 +58,14 @@ Everything else is in three menus, which pop up their keys:
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
-| `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
+| `v` view | `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
 what you've handed off or finished: *Working* (dimmed) and *Archived* (folded;
 `Enter` restores one, `s D` deletes it for good). Within a shelf it's first come,
-first served (configurable). Coming back from an agent you gave a task, the cursor
+first served (configurable). `group_by = "project"` puts them under each project
+instead, archived ones still on their shelf. Coming back from an agent you gave a task, the cursor
 stays where it was, on the next one waiting; after only reading, it stays on that
 agent. A stopped or archived session's preview says what it was: when it stopped or
 was archived, its project, title, note and last prompts, and whether starting it
@@ -211,6 +212,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     height by a row on their next attach.
   - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
     Codex accounts have used of their limits (`v u` still shows it).
+  - `group_by`: `"attention"` (default), the session list on shelves by what waits
+    for you, or `"project"`, under each project's heading.
   - `[notes]`: `editor`, where `s o` and `p o` open a note: `"builtin"` (default),
     roster's own editor with vim's keys, or `"external"`, `$VISUAL` or `$EDITOR`;
     `escape`, keys that leave insert mode when typed quickly, as vim's `inoremap jk
@@ -272,7 +275,6 @@ All files are optional and live in `~/.config/agent-roster/`:
 
     [keys.view]
     menu = "v"
-    group = "g"               # by project, or by shelf
     projects = "p"            # the projects view
     server = "t"              # the tmux server and the database
     settings = "s"            # every setting, to see and change

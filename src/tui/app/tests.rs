@@ -281,7 +281,7 @@ fn archive_and_working_stop_or_restart_ask_first() {
 fn archived_sessions_restore_or_go_for_good() {
     let mut app = app();
     // Grouped by project, the archived ones still come last, on their shelf.
-    keys(&mut app, "vg");
+    app.set_grouped(true);
     assert!(app.grouped);
     assert_eq!(shown(&app)[0], EntryKey::Group(Group::Project(1)));
     let archived = EntryKey::Group(Group::Shelf(Shelf::Archived));

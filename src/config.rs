@@ -11,6 +11,8 @@
 //!                                 # sized to the TUI's preview while no one's attached
 //! sidebar_usage = false           # default true: under the session list, what your
 //!                                 # Claude and codex accounts have used of their limits
+//! group_by = "project"            # "attention" (default): the list on shelves, by what
+//!                                 # waits for you; "project": under each project
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -75,6 +77,18 @@ pub struct Config {
     /// The agent new sessions get unless the project or the user picks one.
     pub default_agent: Option<String>,
     pub notes: Notes,
+    /// How the session list is grouped (default: by attention, on shelves).
+    pub group_by: Option<GroupBy>,
+}
+
+/// How the session list is grouped: on shelves by what waits for you, or
+/// under each project.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    #[default]
+    Attention,
+    Project,
 }
 
 /// Sessions' and projects' notes: where they open, and the editor's keys.
@@ -230,7 +244,6 @@ pub struct ProjectKeys {
 #[serde(default, deny_unknown_fields)]
 pub struct ViewKeys {
     pub menu: KeyList,
-    pub group: KeyList,
     /// The projects view (also in the project menu).
     pub projects: KeyList,
     pub server: KeyList,
@@ -301,7 +314,6 @@ impl Default for ViewKeys {
     fn default() -> Self {
         ViewKeys {
             menu: keys(&["v"]),
-            group: keys(&["g"]),
             projects: keys(&["p"]),
             server: keys(&["t"]),
             settings: keys(&["s"]),
@@ -439,6 +451,11 @@ impl Config {
 
     pub fn sidebar_usage(&self) -> bool {
         self.sidebar_usage.unwrap_or(true)
+    }
+
+    /// Whether the session list is grouped by project.
+    pub fn grouped(&self) -> bool {
+        self.group_by.unwrap_or_default() == GroupBy::Project
     }
 
     /// The agent sessions get unless their project picks one: `default_agent`
@@ -642,6 +659,16 @@ mod tests {
         ] {
             assert!(detach(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_list_is_on_shelves_unless_grouped_by_project() {
+        assert!(!Config::default().grouped());
+        assert!(Config::parse("group_by = \"project\"").unwrap().grouped());
+        assert!(!Config::parse("group_by = \"attention\"").unwrap().grouped());
+        assert!(Config::parse("group_by = \"shelf\"").is_err());
+        // Its key is gone: a config still setting it says so.
+        assert!(Config::parse("[keys.view]\ngroup = \"g\"").is_err());
     }
 
     #[test]

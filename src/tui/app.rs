@@ -261,6 +261,14 @@ impl App {
     }
 
     /// Replaces the data, keeping the selection on the same entry.
+    /// Grouped by project, or on shelves (`group_by` in config.toml).
+    pub fn set_grouped(&mut self, grouped: bool) {
+        if self.grouped != grouped {
+            self.grouped = grouped;
+            self.rebuild();
+        }
+    }
+
     pub fn set_data(&mut self, projects: Vec<Project>, sessions: Vec<Session>) {
         self.projects = projects;
         self.sessions = sessions;

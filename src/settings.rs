@@ -18,8 +18,8 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 
 use crate::agent;
 use crate::config::{
-    AgentConfig, Config, First, FitPreview, KeyList, Keys, NoteEditor, Notes, Order, ProjectKeys,
-    SessionKeys, ViewKeys,
+    AgentConfig, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor, Notes, Order,
+    ProjectKeys, SessionKeys, ViewKeys,
 };
 
 impl crate::engine::Roster {
@@ -452,6 +452,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         sidebar_usage,
         default_agent,
         notes,
+        group_by,
     } = config;
     let fit = |f: &Option<FitPreview>| match f.unwrap_or(FitPreview::Auto) {
         FitPreview::Auto => "auto",
@@ -492,6 +493,15 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &["sidebar_usage"],
                 sidebar_usage.unwrap_or(true),
                 "under the session list, what your Claude and codex accounts have used of their limits",
+            ),
+            choice(
+                &["group_by"],
+                &["attention", "project"],
+                match group_by.unwrap_or_default() {
+                    GroupBy::Attention => "attention",
+                    GroupBy::Project => "project",
+                },
+                "the session list on shelves by what waits for you, or under each project",
             ),
             text_setting(
                 &["shell"],
@@ -810,7 +820,6 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
     });
     let ViewKeys {
         menu,
-        group,
         projects,
         server,
         settings,
@@ -824,7 +833,6 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         table: Some(path(&["keys", "view"])),
         settings: vec![
             v("menu", menu, "opens the menu; the keys below act in it"),
-            v("group", group, "group by project, or by shelf"),
             v("projects", projects, "the projects view"),
             v("server", server, "the tmux server and the database"),
             v("settings", settings, "every setting, to see and change"),

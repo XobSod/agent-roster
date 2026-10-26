@@ -173,8 +173,7 @@ fn the_text_filter_shows_under_the_title_and_marks_what_matched() {
 #[test]
 fn grouped_cards_leave_the_project_to_its_heading() {
     let mut app = app();
-    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-    app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    app.set_grouped(true);
     let screen = render(&app, 120, 16);
     // The heading and the header; no project line in the cards.
     assert_eq!(screen.matches("RO roster").count(), 2, "{screen}");
@@ -1203,8 +1202,7 @@ fn a_projects_note_is_marked_after_its_name() {
     assert_eq!(screen.matches("RO roster ▤").count(), 2, "{screen}");
     assert!(screen.contains("✎ 2d"), "{screen}");
     // Grouped by project: its heading, the cards having no project line.
-    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-    app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    app.set_grouped(true);
     let screen = render(&app, 120, 16);
     assert!(screen.contains("RO roster ▤ (2)"), "{screen}");
     assert_eq!(screen.matches('▤').count(), 2, "heading and box: {screen}");

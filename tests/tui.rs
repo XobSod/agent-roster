@@ -634,7 +634,7 @@ fn a_title_is_made_while_the_tui_goes_on() {
     // Meanwhile the TUI takes keys: a menu opens; the same session again is
     // already being asked; the other one is asked too, both runs going at once.
     term.keys(&["v"]);
-    term.wait_for("the view menu", "group by project");
+    term.wait_for("the view menu", "tmux server");
     term.keys(&["Escape", "s", "t"]);
     term.wait_for(
         "the same asked again",
@@ -765,5 +765,5 @@ fn a_title_for_a_session_deleted_meanwhile_is_let_go() {
     );
     // The TUI goes on.
     term.keys(&["v"]);
-    term.wait_for("the view menu", "group by project");
+    term.wait_for("the view menu", "tmux server");
 }

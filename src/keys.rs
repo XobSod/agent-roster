@@ -64,7 +64,6 @@ pub enum Action {
     EditProject,
     RemoveProject,
     FilterProject,
-    ToggleGroup,
     ShowProjects,
     ShowServer,
     ShowSettings,
@@ -107,7 +106,6 @@ impl Action {
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
-            Action::ToggleGroup => "group by project / shelves",
             Action::ShowProjects => "projects",
             Action::ShowServer => "tmux server",
             Action::ShowSettings => "settings",
@@ -345,7 +343,6 @@ impl Keymap {
 
         let mut view = Table::default();
         let (t, k) = ("keys.view", &keys.view);
-        view.bind(t, "group", &k.group, Action::ToggleGroup, &mut labels)?;
         view.bind(
             t,
             "projects",
@@ -482,7 +479,6 @@ mod tests {
             map.menu(Menu::Project, &chr('d')),
             Some(Action::RemoveProject)
         );
-        assert_eq!(map.menu(Menu::View, &chr('g')), Some(Action::ToggleGroup));
         // One action in two menus, under its key in each.
         assert_eq!(map.menu(Menu::View, &chr('p')), Some(Action::ShowProjects));
         assert_eq!(

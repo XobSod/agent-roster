@@ -56,6 +56,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.set_grouped(roster.config.grouped());
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -133,6 +134,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.set_grouped(roster.config.grouped());
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));

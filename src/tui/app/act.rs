@@ -15,11 +15,6 @@ impl App {
             Action::ShowSettings => self.toggle_view(Mode::Settings),
             Action::ShowUsage => self.toggle_view(Mode::Usage),
             Action::ShowProjects => self.toggle_view(Mode::Projects),
-            Action::ToggleGroup => {
-                self.grouped = !self.grouped;
-                self.set_mode(Mode::Sessions);
-                self.rebuild();
-            }
             _ => {
                 return match self.mode {
                     Mode::Sessions => self.act_in_list(action),

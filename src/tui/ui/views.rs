@@ -61,7 +61,9 @@ pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     let widest = |of: &dyn Fn(usize) -> usize, cap: usize| {
         (0..app.projects.len()).map(of).max().unwrap_or(0).min(cap)
     };
-    let name_w = widest(&|i| app.projects[i].name.width(), 24).max(7);
+    // A name and its note's mark.
+    let named = |p: &crate::model::Project| p.name.width() + if p.note.is_some() { 2 } else { 0 };
+    let name_w = widest(&|i| named(&app.projects[i]), 24).max(7);
     let dir_w = widest(&|i| rows[i][0].width(), width * 2 / 5).max(9);
     let sessions_w = widest(&|i| rows[i][1].width(), 24).max(8);
     let pad = |s: &str, w: usize| pad(s, w) + "  ";
@@ -79,25 +81,16 @@ pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec![header];
     for (i, p) in app.projects.iter().enumerate().skip(first).take(height) {
         let [dir, sessions, defaults] = &rows[i];
-        let content = vec![
-            badge(&p.name),
-            Span::raw(" "),
-            Span::styled(
-                pad(&p.name, name_w),
-                Style::new().fg(theme::project_color(&p.name)),
-            ),
+        // Its badge and a space before the name.
+        let mut content = project_name(&p.name, &[], p.note.is_some(), name_w + 3);
+        let used: usize = content.iter().map(Span::width).sum();
+        content.extend([
+            Span::raw(" ".repeat(name_w + 5 - used)),
             Span::styled(pad(dir, dir_w), Style::new().fg(MUTED)),
             Span::raw(pad(sessions, sessions_w)),
             Span::styled(defaults.clone(), Style::new().fg(MUTED)),
-        ];
-        let mark = match p.note {
-            Some(_) => vec![Span::styled(
-                format!("{PROJECT_NOTE} "),
-                Style::new().fg(MUTED),
-            )],
-            None => Vec::new(),
-        };
-        let content = fit(width.saturating_sub(1), content, mark);
+        ]);
+        let content = fit(width.saturating_sub(1), content, Vec::new());
         lines.push(framed(content, i == app.project_row, width));
     }
     f.render_widget(Paragraph::new(lines), table);

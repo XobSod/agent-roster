@@ -116,8 +116,8 @@ the project's and `]` the session's, as the preview has them, left and right. Ea
 keeps what you changed while the other shows, as vim's buffers do: `:wa` saves both,
 `:wqa` (`:xa`) saves both and closes, `:qa!` closes leaving both; `:q`, `:wq` and `:x`
 don't close while the other has unsaved changes. In the editor too, the pinned line is
-marked `▤` in the project's note. `▤` marks projects with a note on their headings and
-in the projects view. It goes when the project is removed.
+marked `▤` in the project's note. `▤` after a project's name marks it having a note,
+on cards and headings and in the projects view. It goes when the project is removed.
 
 `v u` shows what's left of your Claude and Codex accounts' limits: the 5-hour and the
 weekly window, each as a bar, full while none of it is used and shrinking as you use

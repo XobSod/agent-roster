@@ -197,6 +197,37 @@ fn stopped_rows_name_their_project_too() {
 }
 
 #[test]
+fn rows_keep_their_projects_note_mark_with_a_long_name() {
+    let mut app = app();
+    let mut projects = app.projects.clone();
+    projects[0].name = "customer-portal-frontend".into();
+    projects[0].note = Some(crate::note::Note {
+        text: "backlog".into(),
+        pin: None,
+        at: 0,
+    });
+    let mut sessions = app.sessions.clone();
+    for s in &mut sessions {
+        s.project = "customer-portal-frontend".into();
+        s.state = State::Stopped;
+        s.note = None;
+    }
+    sessions[1].deleted_at = Some(now_ms());
+    app.set_data(projects, sessions);
+    let now = now_ms();
+    // As wide as a sidebar's: the name is cut, its mark and the state stay.
+    for (s, state) in app.sessions.iter().zip(["stopped", "archived"]) {
+        let line: String = row(&app, s, 33, now)
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(line.contains("… ▤"), "{line}");
+        assert!(line.contains(state), "{line}");
+        assert!(line.width() <= 33, "{line}");
+    }
+}
+
+#[test]
 fn working_and_archived_sit_at_the_bottom_while_all_fits() {
     let mut app = app();
     let mut sessions = app.sessions.clone();
@@ -472,10 +503,10 @@ fn long_project_names_keep_their_count_and_fold_mark() {
         plain.contains("… (3) ") && plain.ends_with(" ⌄ "),
         "{plain}"
     );
-    // With a note, its mark too.
+    // With a note, its mark after the name, which is cut for it.
     assert_eq!(noted.width(), 34, "{noted}");
     assert!(
-        noted.contains("… (3) ") && noted.ends_with(" ▤ ⌄ "),
+        noted.contains("… ▤ (3) ") && noted.ends_with(" ⌄ "),
         "{noted}"
     );
 }
@@ -1150,4 +1181,36 @@ fn notes_are_boxed_side_by_side_or_stacked_with_a_line_between() {
     );
     let one = text(note_bands(Some(&project), Some(&session), 65, 1));
     assert_eq!(one.len(), 3, "{one:?}");
+}
+
+#[test]
+fn a_projects_note_is_marked_after_its_name() {
+    let mut app = app();
+    let note = || {
+        Some(crate::note::Note {
+            text: "backlog".into(),
+            pin: None,
+            at: 0,
+        })
+    };
+    let mut projects = app.projects.clone();
+    projects[0].note = note();
+    let mut sessions = app.sessions.clone();
+    sessions[0].note = note();
+    app.set_data(projects, sessions);
+    // On shelves, each card's project line; the session's own by its age.
+    let screen = render(&app, 120, 16);
+    assert_eq!(screen.matches("RO roster ▤").count(), 2, "{screen}");
+    assert!(screen.contains("✎ 2d"), "{screen}");
+    // Grouped by project: its heading, the cards having no project line.
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("RO roster ▤ (2)"), "{screen}");
+    assert_eq!(screen.matches('▤').count(), 2, "heading and box: {screen}");
+    // In the projects view, in its column, the directory after it.
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("RO roster ▤  /r"), "{screen}");
 }

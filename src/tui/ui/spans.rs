@@ -3,12 +3,29 @@
 
 use super::*;
 
-/// The project's badge and name, in its colour (`marks` matched the filter).
-pub(super) fn project_name(project: &str, marks: &[usize]) -> Vec<Span<'static>> {
+/// The project's badge and name, in its colour (`marks` matched the filter),
+/// then `▤` if it has a note (`noted`), the name cut so both fit in `width`.
+pub(super) fn project_name(
+    project: &str,
+    marks: &[usize],
+    noted: bool,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let mark = match noted {
+        true => vec![Span::styled(
+            format!(" {PROJECT_NOTE}"),
+            Style::new().fg(MUTED),
+        )],
+        false => Vec::new(),
+    };
+    let badge = badge(project);
+    let room =
+        width.saturating_sub(badge.width() + 1 + mark.iter().map(Span::width).sum::<usize>());
     let style = Style::new().fg(theme::project_color(project));
     [
-        vec![badge(project), Span::raw(" ")],
-        marked(project, marks, style),
+        vec![badge, Span::raw(" ")],
+        marked(&truncate(project, room), marks, style),
+        mark,
     ]
     .concat()
 }

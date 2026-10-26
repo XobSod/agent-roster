@@ -154,7 +154,10 @@ pub(super) fn list_lines(
                 };
                 vec![heading(*group, label, *count, *open, noted, content)]
             }
-            Entry::Card(s) => card(s, hit(app, s), !app.grouped, content, now),
+            Entry::Card(s) => {
+                let noted = !app.grouped && project_noted(app, s);
+                card(s, hit(app, s), !app.grouped, noted, content, now)
+            }
             Entry::Row(s) => vec![row(app, s, content, now)],
         };
         spans.push((lines.len(), rows.len()));
@@ -193,22 +196,24 @@ pub(super) fn heading(
     noted: bool,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let mark = match noted {
-        true => format!(" {PROJECT_NOTE}"),
-        false => String::new(),
-    };
-    let chevron = Span::styled(
-        format!("{mark}{}", if open { " ⌄ " } else { " › " }),
-        Style::new().fg(MUTED),
-    );
+    let chevron = Span::styled(if open { " ⌄ " } else { " › " }, Style::new().fg(MUTED));
     let count = Span::styled(format!(" ({count}) "), Style::new().fg(MUTED));
-    // A long name is cut, so the count, the mark and the chevron always show.
+    // A long name is cut, so its note's mark, the count and the chevron
+    // always show.
     let room = width.saturating_sub(count.width() + chevron.width());
     let mut left = match group {
         Group::Project(_) => {
+            let mark = match noted {
+                true => vec![Span::styled(
+                    format!(" {PROJECT_NOTE}"),
+                    Style::new().fg(MUTED),
+                )],
+                false => Vec::new(),
+            };
             let badge = badge(label);
-            let name = truncate(label, room.saturating_sub(badge.width() + 1));
-            vec![badge, Span::raw(" "), name.bold(), count]
+            let mark_width: usize = mark.iter().map(Span::width).sum();
+            let name = truncate(label, room.saturating_sub(badge.width() + 1 + mark_width));
+            [vec![badge, Span::raw(" "), name.bold()], mark, vec![count]].concat()
         }
         Group::Shelf(_) => vec![
             Span::styled(
@@ -256,12 +261,14 @@ pub(super) fn marked(text: &str, marks: &[usize], style: Style) -> Vec<Span<'sta
     spans
 }
 
-/// A session's lines: its project (badge and name) unless the project's heading
-/// is right above; the title and state; name, model and effort, age and agent.
+/// A session's lines: its project (badge and name, and `project_noted`, its
+/// note's mark) unless the project's heading is right above; the title and
+/// state; name, model and effort, age and agent, and its note's mark.
 pub(super) fn card(
     s: &Session,
     hit: Option<&Hit>,
     with_project: bool,
+    project_noted: bool,
     width: usize,
     now: i64,
 ) -> Vec<Vec<Span<'static>>> {
@@ -278,7 +285,7 @@ pub(super) fn card(
     if with_project {
         lines.push(fit(
             width,
-            project_name(&s.project, &hit.project),
+            project_name(&s.project, &hit.project, project_noted, width),
             Vec::new(),
         ));
     }
@@ -334,9 +341,16 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
     } else {
         let slash = Span::styled(" / ", Style::new().fg(FAINT));
         let mark = vec![glyph(&s.agent), Span::raw(" ")];
+        // The name fits what the right side and the agent's mark leave
+        // (`fit` keeps a space before the right side), so its note's mark
+        // isn't cut off after it; the title goes first.
+        let right_width: usize = right.iter().map(Span::width).sum();
+        let mark_width: usize = mark.iter().map(Span::width).sum();
+        let room = width.saturating_sub(mark_width + right_width + 1);
+        let noted = project_noted(app, s);
         [
             mark,
-            project_name(&s.project, &hit.project),
+            project_name(&s.project, &hit.project, noted, room),
             vec![slash],
             title,
         ]
@@ -351,4 +365,9 @@ fn note_mark(s: &Session) -> Vec<Span<'static>> {
         Some(_) => vec![Span::styled("✎ ", Style::new().fg(MUTED))],
         None => Vec::new(),
     }
+}
+
+/// Whether `s`'s project has a note.
+fn project_noted(app: &App, s: &Session) -> bool {
+    app.project(s.project_id).is_some_and(|p| p.note.is_some())
 }

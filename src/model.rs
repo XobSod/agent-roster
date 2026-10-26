@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::note::{Note, Noted, Whose};
+
 /// How long a "working" session must go without hook events and without screen
 /// changes before it counts as idle. Claude reports no event when a turn is
 /// interrupted with Esc; while it really works, its spinner changes the screen
@@ -46,9 +48,19 @@ pub struct Project {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub note: Option<Note>,
 }
 
 impl Project {
+    /// Its note, as `Roster`'s note functions take it.
+    pub fn noted(&self) -> Noted {
+        Noted {
+            whose: Whose::Project(self.id),
+            label: format!("project {}", self.name),
+            note: self.note.clone(),
+        }
+    }
+
     /// Its defaults for new sessions, e.g. "claude · opus (Opus 5.5) · high": an
     /// alias with what it last turned out to be (`models`); without an agent
     /// of its own, `default_agent`.
@@ -135,7 +147,7 @@ pub struct Session {
     pub fork_from: Option<String>,
     /// What the user wrote about it (saved apart from the rest, so a save of
     /// the session doesn't overwrite a note saved meanwhile).
-    pub note: Option<crate::note::Note>,
+    pub note: Option<Note>,
 }
 
 /// The kind of event roster records with a title it made for a session's
@@ -207,6 +219,15 @@ impl Session {
     /// `project/name`, how sessions are shown and addressed.
     pub fn label(&self) -> String {
         format!("{}/{}", self.project, self.name)
+    }
+
+    /// Its note, as `Roster`'s note functions take it.
+    pub fn noted(&self) -> Noted {
+        Noted {
+            whose: Whose::Session(self.id.clone()),
+            label: self.label(),
+            note: self.note.clone(),
+        }
     }
 
     /// Changes the state, noting when it changed, the time spent working, and
@@ -469,6 +490,7 @@ pub mod tests {
             agent: None,
             model: None,
             effort: None,
+            note: None,
         };
         let mut s = Session::new(id, &demo, &format!("s-{id}"), "claude", 0);
         s.state = State::Working;

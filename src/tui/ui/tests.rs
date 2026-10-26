@@ -51,6 +51,7 @@ fn app() -> App {
             agent: None,
             model: None,
             effort: None,
+            note: None,
         }],
         vec![a, b],
     );
@@ -237,6 +238,7 @@ fn the_projects_view_shows_each_project() {
         agent: None,
         model: None,
         effort: None,
+        note: None,
     });
     app.set_data(projects, app.sessions.clone());
     app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
@@ -459,16 +461,23 @@ fn long_titles_are_cut_with_an_ellipsis() {
 
 #[test]
 fn long_project_names_keep_their_count_and_fold_mark() {
-    let spans = heading(
-        Group::Project(1),
-        "customer-portal-frontend-migration-2026",
-        3,
-        true,
-        34,
+    let line = |noted| -> String {
+        let name = "customer-portal-frontend-migration-2026";
+        let spans = heading(Group::Project(1), name, 3, true, noted, 34);
+        spans.iter().map(|s| s.content.to_string()).collect()
+    };
+    let (plain, noted) = (line(false), line(true));
+    assert_eq!(plain.width(), 34, "{plain}");
+    assert!(
+        plain.contains("… (3) ") && plain.ends_with(" ⌄ "),
+        "{plain}"
     );
-    let line: String = spans.iter().map(|s| s.content.to_string()).collect();
-    assert_eq!(line.width(), 34, "{line}");
-    assert!(line.contains("… (3) ") && line.ends_with(" ⌄ "), "{line}");
+    // With a note, its mark too.
+    assert_eq!(noted.width(), 34, "{noted}");
+    assert!(
+        noted.contains("… (3) ") && noted.ends_with(" ▤ ⌄ "),
+        "{noted}"
+    );
 }
 
 #[test]
@@ -636,9 +645,12 @@ fn a_note_shows_its_pinned_lines_above_the_screen() {
         .iter()
         .position(|l| l.contains("✎ - [ ] two"))
         .unwrap_or_else(|| panic!("{screen}"));
+    // In its box, from the row under the statistics.
+    assert!(lines[at - 1].contains("╭────"), "{screen}");
+    assert!(lines[at - 2].contains("created 2d"), "{screen}");
     assert!(lines[at + 1].contains("  - [ ] three"), "{screen}");
-    assert!(lines[at + 1].ends_with("3–4 of 4"), "{screen}");
-    assert!(lines[at + 2].contains("────"), "{screen}");
+    assert!(lines[at + 1].ends_with("3–4 of 4 │"), "{screen}");
+    assert!(lines[at + 2].contains("╰────"), "{screen}");
     assert!(lines[at + 3].contains("agent screen line"), "{screen}");
     // The card says it has one.
     assert!(screen.contains("✎ 2d"), "{screen}");
@@ -661,13 +673,18 @@ fn the_note_editor_sits_above_the_screen() {
     app.set_data(app.projects.clone(), app.sessions.clone());
     app.selected = 1;
     let s = app.selected_session().unwrap().clone();
-    app.note = Some(crate::tui::note::NoteEditor::new(&s, None));
+    let editor = crate::tui::note::NoteEditor::new(&s.noted(), None);
+    let side = crate::tui::note::Side::Session;
+    let open = crate::tui::note::OpenNotes::new(Some(s.id.clone()), s.project_id, side, editor);
+    app.note = Some(open);
     app.preview.screen = true;
     let screen = render(&app, 120, 16);
-    assert!(screen.contains("╭ Note "), "{screen}");
+    // Whose it is, and the project's to show with ].
+    assert!(screen.contains(&format!("╭ ✎ {} ", s.label())), "{screen}");
+    assert!(screen.contains(" [ ▤ project "), "{screen}");
     assert!(screen.contains(" NORMAL "), "{screen}");
     // The pinned line marked; the cursor starts on it.
-    assert!(screen.contains("│▸ second"), "{screen}");
+    assert!(screen.contains("│✎ second"), "{screen}");
     assert!(screen.contains(" 2/3 "), "{screen}");
     assert!(screen.contains("agent screen line"), "{screen}");
     assert!(screen.contains(":wq save and close"), "{screen}");
@@ -675,6 +692,7 @@ fn the_note_editor_sits_above_the_screen() {
     app.note
         .as_mut()
         .unwrap()
+        .shown_mut()
         .on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
     assert!(render(&app, 120, 16).contains("╰ : "), "{screen}");
 }
@@ -1078,4 +1096,58 @@ fn the_usage_views_tabs_show_what_was_spent_in_each_period() {
     assert_eq!(app.usage_period, None);
     let screen = render(&app, 100, 30);
     assert!(screen.contains("Enter ask again"), "{screen}");
+}
+
+#[test]
+fn notes_are_boxed_side_by_side_or_stacked_with_a_line_between() {
+    let note = |text: &str| crate::note::Note {
+        text: text.into(),
+        pin: None,
+        at: 0,
+    };
+    let (project, session) = (note("backlog\nnext"), note("fix it"));
+    let text = |lines: Vec<Line>| -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect())
+            .collect()
+    };
+    // Side by side: the project's left, the line between them meeting the
+    // box; each line as wide as the preview.
+    let both = text(note_bands(Some(&project), Some(&session), 65, 2));
+    assert_eq!(both.len(), 4, "{both:?}");
+    assert!(both[0].starts_with("╭──") && both[0].contains('┬') && both[0].ends_with('╮'));
+    assert!(
+        both[1].starts_with("│ ▤ backlog") && both[1].contains(" │ ✎ fix it"),
+        "{both:?}"
+    );
+    assert!(
+        both[2].starts_with("│   next") && both[2].ends_with(" │"),
+        "{both:?}"
+    );
+    assert!(both[3].starts_with("╰──") && both[3].contains('┴') && both[3].ends_with('╯'));
+    assert!(both.iter().all(|l| l.width() == 65), "{both:?}");
+    let at = |l: &str, c: char| l.chars().position(|x| x == c);
+    assert_eq!(at(&both[0], '┬'), at(&both[1].replacen('│', " ", 1), '│'));
+    // Too narrow: stacked, the line between them across the box.
+    let stacked = text(note_bands(Some(&project), Some(&session), 40, 2));
+    assert_eq!(stacked.len(), 6, "{stacked:?}");
+    assert_eq!(stacked[3], format!("├{}┤", "─".repeat(38)));
+    assert!(stacked[4].starts_with("│ ✎ fix it"), "{stacked:?}");
+    assert!(stacked.iter().all(|l| l.width() == 40), "{stacked:?}");
+    // One alone: the whole width.
+    let alone = text(note_bands(None, Some(&session), 65, 2));
+    assert_eq!(alone.len(), 3);
+    assert!(alone[1].starts_with("│ ✎ fix it") && alone[1].width() == 65);
+    assert!(note_bands(None, None, 65, 2).is_empty());
+    // As many lines of each as notes.lines says, the box as tall as the
+    // longer.
+    let three = text(note_bands(Some(&note("a\nb\nc\nd")), Some(&session), 65, 3));
+    assert_eq!(three.len(), 5, "{three:?}");
+    assert!(
+        three[3].starts_with("│   c ") && three[3].contains("1–3 of 4"),
+        "{three:?}"
+    );
+    let one = text(note_bands(Some(&project), Some(&session), 65, 1));
+    assert_eq!(one.len(), 3, "{one:?}");
 }

@@ -1,6 +1,7 @@
 //! Notes: what you write about a session, kept with it until it's deleted for
-//! good. One line can be pinned: the preview shows it and the one below, so a
-//! list of things to do shows where you are in it.
+//! good, or about a project, kept with it until it's removed. One line can be
+//! pinned: the preview shows it and the ones below (`notes.lines` in all), so
+//! a list of things to do shows where you are in it.
 
 use std::fs;
 use std::io::Write;
@@ -19,6 +20,24 @@ pub struct Note {
     pub at: i64,
 }
 
+/// Whose a note is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Whose {
+    /// A session's, by its id.
+    Session(String),
+    /// A project's, by its id.
+    Project(i64),
+}
+
+/// A note as read, with whose it is and what to call that.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Noted {
+    pub whose: Whose,
+    /// "api/fix", or "project api".
+    pub label: String,
+    pub note: Option<Note>,
+}
+
 /// What the preview shows of a note: `lines` from line `first`, of `total`.
 #[derive(Debug, PartialEq)]
 pub struct Shown<'a> {
@@ -28,17 +47,17 @@ pub struct Shown<'a> {
 }
 
 impl Note {
-    /// The pinned line and the one below it (unless that's blank), or without a
-    /// pin the first two lines, past blank ones.
-    pub fn shown(&self) -> Shown<'_> {
+    /// `count` lines from the pinned one on, or without a pin from the first
+    /// not blank; blank ones at the end left out.
+    pub fn shown(&self, count: usize) -> Shown<'_> {
         let lines: Vec<&str> = self.text.lines().collect();
         let total = lines.len();
         let first = match self.pin {
             Some(pin) => pin.min(total.saturating_sub(1)),
             None => lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(0),
         };
-        let mut shown: Vec<&str> = lines.iter().skip(first).take(2).copied().collect();
-        if shown.len() == 2 && shown[1].trim().is_empty() {
+        let mut shown: Vec<&str> = lines.iter().skip(first).take(count).copied().collect();
+        while shown.len() > 1 && shown.last().is_some_and(|l| l.trim().is_empty()) {
             shown.pop();
         }
         Shown {
@@ -177,18 +196,25 @@ mod tests {
     fn the_preview_shows_the_pinned_line_and_the_next() {
         let todo = "TODO\n- [x] one\n- [ ] two\n- [ ] three\n";
         let pinned = note(todo, Some(2));
-        let shown = pinned.shown();
+        let shown = pinned.shown(2);
         assert_eq!(shown.lines, ["- [ ] two", "- [ ] three"]);
         assert_eq!((shown.first, shown.total), (2, 4));
         // The last line, alone; without a pin, the start past blank lines.
-        assert_eq!(note(todo, Some(3)).shown().lines, ["- [ ] three"]);
+        assert_eq!(note(todo, Some(3)).shown(2).lines, ["- [ ] three"]);
         assert_eq!(
-            note("\n\nfirst\nsecond\nthird", None).shown().lines,
+            note("\n\nfirst\nsecond\nthird", None).shown(2).lines,
             ["first", "second"]
         );
         // A blank line below isn't shown; a pin past the end is the last line.
-        assert_eq!(note("one\n\ntwo", Some(0)).shown().lines, ["one"]);
-        assert_eq!(note("one\ntwo", Some(9)).shown().lines, ["two"]);
+        assert_eq!(note("one\n\ntwo", Some(0)).shown(2).lines, ["one"]);
+        assert_eq!(note("one\ntwo", Some(9)).shown(2).lines, ["two"]);
+        // As many as asked for (notes.lines), none blank at the end.
+        assert_eq!(pinned.shown(1).lines, ["- [ ] two"]);
+        assert_eq!(
+            note(todo, Some(0)).shown(3).lines,
+            ["TODO", "- [x] one", "- [ ] two"]
+        );
+        assert_eq!(note("a\nb\n\n\nc", Some(0)).shown(4).lines, ["a", "b"]);
     }
 
     #[test]

@@ -147,7 +147,13 @@ pub(super) fn list_lines(
                 count,
                 open,
                 group,
-            } => vec![heading(*group, label, *count, *open, content)],
+            } => {
+                let noted = match group {
+                    Group::Project(id) => app.project(*id).is_some_and(|p| p.note.is_some()),
+                    Group::Shelf(_) => false,
+                };
+                vec![heading(*group, label, *count, *open, noted, content)]
+            }
             Entry::Card(s) => card(s, hit(app, s), !app.grouped, content, now),
             Entry::Row(s) => vec![row(app, s, content, now)],
         };
@@ -177,16 +183,26 @@ pub(super) fn framed(content: Vec<Span<'static>>, selected: bool, width: usize) 
     line
 }
 
+/// A group's heading: a project's (`noted`: with its note's mark) or a
+/// shelf's, with how many it holds, and whether it's folded.
 pub(super) fn heading(
     group: Group,
     label: &str,
     count: usize,
     open: bool,
+    noted: bool,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let chevron = Span::styled(if open { " ⌄ " } else { " › " }, Style::new().fg(MUTED));
+    let mark = match noted {
+        true => format!(" {PROJECT_NOTE}"),
+        false => String::new(),
+    };
+    let chevron = Span::styled(
+        format!("{mark}{}", if open { " ⌄ " } else { " › " }),
+        Style::new().fg(MUTED),
+    );
     let count = Span::styled(format!(" ({count}) "), Style::new().fg(MUTED));
-    // A long name is cut, so the count and the chevron always show.
+    // A long name is cut, so the count, the mark and the chevron always show.
     let room = width.saturating_sub(count.width() + chevron.width());
     let mut left = match group {
         Group::Project(_) => {

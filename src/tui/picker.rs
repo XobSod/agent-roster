@@ -137,6 +137,7 @@ pub mod tests {
                 agent: None,
                 model: None,
                 effort: None,
+                note: None,
             }),
             new_project: "elsewhere".into(),
             archived: None,

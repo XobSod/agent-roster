@@ -19,11 +19,12 @@
 //! working = "oldest"              # (the one working longest on top)
 //! archived = "newest"             # and the most recently archived on top
 //!
-//! [notes]                         # a session's note (s o)
+//! [notes]                         # a session's note (s o), a project's (p o)
 //! editor = "external"             # "builtin" (default): roster's own editor, with
 //!                                 # vim's keys; "external": $VISUAL or $EDITOR
 //! escape = "jk"                   # typed quickly in insert mode: as Esc (default none)
 //! escape_ms = 300                 # how quickly: at most this long between the keys
+//! lines = 2                       # of each note the preview shows, from the pinned one
 //!
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
@@ -76,7 +77,7 @@ pub struct Config {
     pub notes: Notes,
 }
 
-/// Sessions' notes: where they open, and the editor's keys.
+/// Sessions' and projects' notes: where they open, and the editor's keys.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Notes {
@@ -86,14 +87,25 @@ pub struct Notes {
     pub escape: Option<String>,
     /// How quickly: at most this many milliseconds from one key to the next.
     pub escape_ms: Option<u64>,
+    /// How many of a note's lines the preview shows, from the pinned one.
+    pub lines: Option<usize>,
 }
 
 /// `escape_ms` unless set.
 pub const ESCAPE_MS: u64 = 300;
 
+/// `lines` unless set, and the most it can be: more would push the agent's
+/// screen out of the preview.
+pub const NOTE_LINES: usize = 2;
+pub const MAX_NOTE_LINES: usize = 10;
+
 impl Notes {
     pub fn editor(&self) -> NoteEditor {
         self.editor.unwrap_or_default()
+    }
+
+    pub fn lines(&self) -> usize {
+        self.lines.unwrap_or(NOTE_LINES)
     }
 
     /// The keys that leave insert mode, and how soon each must follow the one
@@ -105,7 +117,7 @@ impl Notes {
     }
 }
 
-/// Where a session's note opens: in roster's own editor (vim's keys, the
+/// Where a note opens: in roster's own editor (vim's keys, the
 /// agent's screen still in view), or in `$VISUAL` / `$EDITOR`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -210,6 +222,8 @@ pub struct ProjectKeys {
     pub filter: KeyList,
     /// The projects view.
     pub list: KeyList,
+    /// The project's note, to read and write.
+    pub note: KeyList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +292,7 @@ impl Default for ProjectKeys {
             remove: keys(&["d"]),
             filter: keys(&["f"]),
             list: keys(&["l"]),
+            note: keys(&["o"]),
         }
     }
 }
@@ -387,6 +402,11 @@ impl Config {
         }
         if config.notes.escape_ms == Some(0) {
             bail!("notes.escape_ms must be at least 1 (milliseconds)");
+        }
+        if let Some(lines) = config.notes.lines
+            && !(1..=MAX_NOTE_LINES).contains(&lines)
+        {
+            bail!("notes.lines must be 1 to {MAX_NOTE_LINES}, not {lines}");
         }
         for (name, agent) in &config.agents {
             if agent.idle_after == Some(0) {
@@ -622,6 +642,15 @@ mod tests {
         ] {
             assert!(detach(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn notes_show_two_lines_unless_set_from_one_to_ten() {
+        assert_eq!(Config::default().notes.lines(), 2);
+        let notes = |text: &str| Config::parse(&format!("[notes]\n{text}"));
+        assert_eq!(notes("lines = 5").unwrap().notes.lines(), 5);
+        assert!(notes("lines = 0").is_err());
+        assert!(notes("lines = 11").is_err());
     }
 
     #[test]

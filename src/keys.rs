@@ -57,6 +57,8 @@ pub enum Action {
     Retitle,
     /// The session's note.
     Note,
+    /// The project's note.
+    ProjectNote,
     Adopt,
     NewProject,
     EditProject,
@@ -101,7 +103,7 @@ impl Action {
             Action::Delete => "delete for good",
             Action::ToggleRead => "read/unread",
             Action::Retitle => "new title",
-            Action::Note => "note",
+            Action::Note | Action::ProjectNote => "note",
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
@@ -339,6 +341,7 @@ impl Keymap {
         project.bind(t, "filter", &k.filter, Action::FilterProject, &mut labels)?;
         project.bind(t, "remove", &k.remove, Action::RemoveProject, &mut labels)?;
         project.bind(t, "list", &k.list, Action::ShowProjects, &mut labels)?;
+        project.bind(t, "note", &k.note, Action::ProjectNote, &mut labels)?;
 
         let mut view = Table::default();
         let (t, k) = ("keys.view", &keys.view);

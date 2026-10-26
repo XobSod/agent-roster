@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::Config;
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
-use crate::note::{self, Note};
+use crate::note::{self, Note, Noted, Whose};
 use crate::paths::{self, PROJECT_ENV, Paths};
 use crate::stats::AgentStats;
 use crate::tmux::{Pane, Tmux};
@@ -394,13 +394,15 @@ impl Roster {
         path: &Path,
         defaults: Defaults,
     ) -> Result<Project> {
-        let project = self.checked_project(id, name, path, defaults)?;
-        if self.chat_project_id()? == Some(id) {
-            let current = self.db.projects()?.into_iter().find(|p| p.id == id);
-            if current.is_some_and(|p| p.origin != project.origin) {
-                bail!("the chats project's directory is set by `chats_dir` in config.toml");
-            }
+        let mut project = self.checked_project(id, name, path, defaults)?;
+        let current = self.db.projects()?.into_iter().find(|p| p.id == id);
+        if self.chat_project_id()? == Some(id)
+            && current.as_ref().is_some_and(|p| p.origin != project.origin)
+        {
+            bail!("the chats project's directory is set by `chats_dir` in config.toml");
         }
+        // Its note is saved apart (`save_note`), and kept.
+        project.note = current.and_then(|p| p.note);
         self.db.save_project(&project)?;
         Ok(project)
     }
@@ -433,6 +435,7 @@ impl Roster {
             agent: defaults.agent,
             model: defaults.model,
             effort: defaults.effort,
+            note: None,
         })
     }
 
@@ -491,7 +494,7 @@ impl Roster {
             .project(name)?
             .with_context(|| format!("no project {name:?}"))?;
         let archived = self.db.purged_with(&project)?;
-        Ok(project_removal_question(&project.name, &archived))
+        Ok(project_removal_question(&project, &archived))
     }
 
     /// Removes a project that has no live sessions; returns the archived sessions
@@ -988,12 +991,12 @@ impl Roster {
         Ok(s)
     }
 
-    /// Saves the note of session `id` from the TUI's editor, opened on note
-    /// `base` (nothing but blanks removes it): unless `force`d, not over
-    /// another saved meanwhile. The note as saved.
+    /// Saves a session's or a project's note from the TUI's editor, opened
+    /// on note `base` (nothing but blanks removes it): unless `force`d, not
+    /// over another saved meanwhile. The note as saved.
     pub fn save_note(
         &self,
-        id: &str,
+        whose: &Whose,
         text: &str,
         pin: Option<usize>,
         base: Option<&Note>,
@@ -1001,8 +1004,8 @@ impl Roster {
     ) -> Result<Option<Note>> {
         let note = new_note(text, pin);
         if force {
-            self.db.set_note(id, note.as_ref())?;
-        } else if !self.db.set_note_if(id, base, note.as_ref())? {
+            self.db.set_note(whose, note.as_ref())?;
+        } else if !self.db.set_note_if(whose, base, note.as_ref())? {
             bail!(
                 "The note changed since you opened it (roster note, say): :w! saves yours over it"
             );
@@ -1010,77 +1013,76 @@ impl Roster {
         Ok(note)
     }
 
-    /// Saves `text` as the note of `s`, edited from the one it has, so its pin
+    /// Saves `text` as the note `n`, edited from what it was, so its pin
     /// follows its line. What happened, to say.
-    pub fn change_note(&self, s: &Session, text: &str) -> Result<String> {
-        let (old, pin) = s
+    pub fn change_note(&self, n: &Noted, text: &str) -> Result<String> {
+        let (old, pin) = n
             .note
             .as_ref()
             .map_or(("", None), |n| (n.text.as_str(), n.pin));
         if note::tidy(text) == old {
-            return Ok(format!("The note of {} is unchanged", s.label()));
+            return Ok(format!("The note of {} is unchanged", n.label));
         }
         let before: Vec<&str> = old.lines().collect();
         let after: Vec<&str> = text.lines().collect();
         let note = new_note(text, note::follow_pin(&before, &after, pin));
         // Not over one saved meanwhile (another editor, an agent through
         // `roster note`), which yours was never made from.
-        if !self.db.set_note_if(&s.id, s.note.as_ref(), note.as_ref())? {
+        if !self
+            .db
+            .set_note_if(&n.whose, n.note.as_ref(), note.as_ref())?
+        {
             bail!(
                 "the note of {} changed meanwhile, so yours isn't saved over it",
-                s.label()
+                n.label
             );
         }
         Ok(match note {
-            Some(_) => format!("Saved the note of {}", s.label()),
-            None => format!("{} has no note now", s.label()),
+            Some(_) => format!("Saved the note of {}", n.label),
+            None => format!("{} has no note now", n.label),
         })
     }
 
-    /// Pins line `line` (from 1) of the note of `s`, or with None unpins it.
+    /// Pins line `line` (from 1) of the note `n`, or with None unpins it.
     /// What happened, to say.
-    pub fn pin_note(&self, s: &Session, line: Option<usize>) -> Result<String> {
-        let Some(note) = &s.note else {
-            bail!("{} has no note", s.label());
+    pub fn pin_note(&self, n: &Noted, line: Option<usize>) -> Result<String> {
+        let Some(note) = &n.note else {
+            bail!("{} has no note", n.label);
         };
         let lines: Vec<&str> = note.text.lines().collect();
+        let label = &n.label;
         let pin = match line {
             None => None,
-            Some(n) if (1..=lines.len()).contains(&n) => Some(n - 1),
-            Some(n) => bail!(
-                "the note of {} has {} lines, so no line {n}",
-                s.label(),
+            Some(line) if (1..=lines.len()).contains(&line) => Some(line - 1),
+            Some(line) => bail!(
+                "the note of {label} has {} lines, so no line {line}",
                 lines.len()
             ),
         };
         // Over the note it was asked of, not one saved meanwhile.
         if !self
             .db
-            .set_note_if(&s.id, Some(note), new_note(&note.text, pin).as_ref())?
+            .set_note_if(&n.whose, Some(note), new_note(&note.text, pin).as_ref())?
         {
-            bail!(
-                "the note of {} changed meanwhile; nothing pinned",
-                s.label()
-            );
+            bail!("the note of {label} changed meanwhile; nothing pinned");
         }
         Ok(match pin {
-            Some(p) => format!(
-                "Pinned line {} of the note of {}: {}",
-                p + 1,
-                s.label(),
-                lines[p]
-            ),
-            None => format!("Unpinned the note of {}", s.label()),
+            Some(p) => format!("Pinned line {} of the note of {label}: {}", p + 1, lines[p]),
+            None => format!("Unpinned the note of {label}"),
         })
     }
 
-    /// Where `$EDITOR` edits a session's note: named after it, so the
-    /// editor's title says whose it is, and its id, which only it has
-    /// (`a-b/c` and `a/b-c` name alike); each editing makes its own file next
-    /// to that (`note::edit_externally`).
-    pub fn note_file(&self, s: &Session) -> PathBuf {
-        let name: String = s
-            .label()
+    /// Where `$EDITOR` edits a note: named after whose it is, so the editor's
+    /// title says so, and its id, which only it has (`a-b/c` and `a/b-c` name
+    /// alike); each editing makes its own file next to that
+    /// (`note::edit_externally`).
+    pub fn note_file(&self, n: &Noted) -> PathBuf {
+        let id = match &n.whose {
+            Whose::Session(id) => id.clone(),
+            Whose::Project(id) => id.to_string(),
+        };
+        let name: String = n
+            .label
             .chars()
             .map(|c| match c {
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
@@ -1090,7 +1092,7 @@ impl Roster {
         self.paths
             .state_dir
             .join("notes")
-            .join(format!("{name}-{}.md", s.id))
+            .join(format!("{name}-{id}.md"))
     }
 
     /// What the session's agent can tell about it, from its transcript; None
@@ -1282,12 +1284,16 @@ pub(crate) fn new_project_name(directory: &Path, taken: &[&str]) -> String {
         .expect("unbounded")
 }
 
-/// What removing project `name` asks first, in the TUI and the CLI: its
-/// `archived` sessions go with it, for good, and their notes.
+/// What removing project `p` asks first, in the TUI and the CLI: its note
+/// and its `archived` sessions go with it, for good, and their notes.
 pub(crate) fn project_removal_question<'a>(
-    name: &str,
+    p: &Project,
     archived: impl IntoIterator<Item = &'a Session>,
 ) -> String {
+    let name = match p.note {
+        Some(_) => format!("{} and its note", p.name),
+        None => p.name.clone(),
+    };
     let archived: Vec<&Session> = archived.into_iter().collect();
     let notes = archived.iter().filter(|s| s.note.is_some()).count();
     let with = match (archived.len(), notes) {
@@ -1336,6 +1342,7 @@ mod tests {
             agent: None,
             model: None,
             effort: None,
+            note: None,
         };
         let session = |noted: bool| {
             let mut s = Session::new("r-1", &p, "one", "claude", 0);
@@ -1348,7 +1355,7 @@ mod tests {
         };
         let ask = |notes: &[bool]| {
             let sessions: Vec<Session> = notes.iter().map(|&n| session(n)).collect();
-            project_removal_question("demo", &sessions)
+            project_removal_question(&p, &sessions)
         };
         assert_eq!(ask(&[]), "Remove project demo?");
         assert_eq!(
@@ -1370,6 +1377,15 @@ mod tests {
         assert_eq!(
             ask(&[true, true, false]),
             "Remove project demo? Its 3 archived sessions go for good, 2 with notes."
+        );
+        // Its own note goes too.
+        let noted = Project {
+            note: session(true).note,
+            ..p.clone()
+        };
+        assert_eq!(
+            project_removal_question(&noted, &[session(false)]),
+            "Remove project demo and its note? Its archived session goes for good."
         );
     }
 }

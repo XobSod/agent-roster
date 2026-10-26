@@ -175,18 +175,29 @@ impl App {
                 self.chord(Menu::Session, Action::NewChat)
             ))
         });
+        // Its note's first line it shows (the pinned one).
+        let note = p.note.as_ref().and_then(|n| {
+            let shown = n.shown(self.notes.lines()).lines;
+            let line = shown.into_iter().find(|l| !l.trim().is_empty())?;
+            Some(Line::from(format!("note      {line}")))
+        });
         Text::from_iter(
-            builtin.into_iter().chain([
-                format!("origin    {}", p.origin.display()).into(),
-                format!("sessions  {}", p.sessions_label(&self.sessions)).into(),
-                format!("env file  {} ({env_state})", env.display()).into(),
-                "".into(),
-                format!(
-                    "Press {} to start a session here.",
-                    self.chord(Menu::Session, Action::NewSession)
-                )
-                .into(),
-            ]),
+            builtin
+                .into_iter()
+                .chain([
+                    format!("origin    {}", p.origin.display()).into(),
+                    format!("sessions  {}", p.sessions_label(&self.sessions)).into(),
+                    format!("env file  {} ({env_state})", env.display()).into(),
+                ])
+                .chain(note)
+                .chain([
+                    "".into(),
+                    format!(
+                        "Press {} to start a session here.",
+                        self.chord(Menu::Session, Action::NewSession)
+                    )
+                    .into(),
+                ]),
         )
     }
 
@@ -211,7 +222,10 @@ impl App {
         let count = members.len();
         let mut blocks: Vec<Vec<Line<'static>>> = members
             .iter()
-            .map(|s| member_block(s, group, prompts.get(&s.id).map(String::as_str), width, now))
+            .map(|s| {
+                let prompt = prompts.get(&s.id).map(String::as_str);
+                member_block(s, group, prompt, self.notes.lines(), width, now)
+            })
             .collect();
         // What the group is only when a session fits below it (or "No
         // sessions here."); else sessions first.
@@ -440,10 +454,11 @@ impl App {
             lines.extend(last_screen.iter().map(|l| Line::from(format!("  {l}"))));
         }
         // Unless it's open in the editor above.
+        let whose = crate::note::Whose::Session(s.id.clone());
         if let Some(note) = s.note.as_ref().filter(|_| {
             self.note
                 .as_ref()
-                .is_none_or(|editor| editor.session != s.id)
+                .is_none_or(|open| open.shown().whose != whose)
         }) {
             lines.push(Line::default());
             lines.push(Line::styled(
@@ -452,7 +467,7 @@ impl App {
             ));
             for (i, line) in note.text.lines().enumerate() {
                 let mark = match note.pin == Some(i) {
-                    true => Span::styled("  ▸ ", Style::new().fg(theme::ACCENT)),
+                    true => Span::styled("  ✎ ", Style::new().fg(theme::ACCENT)),
                     false => Span::raw("    "),
                 };
                 lines.push(Line::from(vec![
@@ -556,12 +571,13 @@ fn shelf_meaning(shelf: Shelf) -> &'static str {
 }
 
 /// A session's lines in a heading's preview: what it is (`member_line`),
-/// its last prompt and its note's line (the first not blank of those it
-/// shows), each cut to `width`.
+/// its last prompt and its note's line (the first not blank of the `shown`
+/// lines it shows), each cut to `width`.
 fn member_block(
     s: &Session,
     group: Group,
     prompt: Option<&str>,
+    shown: usize,
     width: usize,
     now: i64,
 ) -> Vec<Line<'static>> {
@@ -578,7 +594,7 @@ fn member_block(
         lines.push(indented(Span::styled("› ", muted), prompt, muted));
     }
     let note = s.note.as_ref().and_then(|n| {
-        n.shown()
+        n.shown(shown)
             .lines
             .into_iter()
             .find(|l| !l.trim().is_empty())

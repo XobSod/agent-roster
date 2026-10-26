@@ -974,6 +974,7 @@ mod tests {
             agent: None,
             model: model.map(String::from),
             effort: Some("high".into()),
+            note: None,
         }
     }
 

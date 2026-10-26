@@ -185,9 +185,14 @@ enum Cmd {
     },
     /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
     Info { session: String },
-    /// Print a session's note, or change it (in the TUI: s o)
+    /// Print a session's or a project's note, or change it (in the TUI: s o, p o)
     Note {
-        session: String,
+        /// Whose note: a session's; with --project alone, its project's
+        session: Option<String>,
+        /// A project's note: this project's, or the session's project's (inside
+        /// an agent, its own session's)
+        #[arg(long, value_name = "PROJECT", num_args = 0..=1, default_missing_value = "")]
+        project: Option<String>,
         /// Replace it with this text ("-" reads it from stdin)
         #[arg(long, allow_hyphen_values = true, conflicts_with_all = ["append", "clear", "edit"])]
         set: Option<String>,
@@ -728,6 +733,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         }
         Cmd::Note {
             session,
+            project,
             set,
             append,
             clear,
@@ -735,12 +741,12 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             pin,
             unpin,
         } => {
-            let s = r.resolve_any(&session)?;
+            let n = noted(r, session.as_deref(), project.as_deref())?;
             if pin.is_some() || unpin {
-                println!("{}", r.pin_note(&s, pin)?);
+                println!("{}", r.pin_note(&n, pin)?);
                 return Ok(());
             }
-            let old = s.note.as_ref().map_or(String::new(), |n| n.text.clone());
+            let old = n.note.as_ref().map_or(String::new(), |n| n.text.clone());
             let new = match (set, append) {
                 (Some(text), _) => {
                     let text = match text.as_str() {
@@ -757,22 +763,22 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 (None, Some(line)) => format!("{old}\n{line}"),
                 (None, None) if clear => String::new(),
                 (None, None) if edit => {
-                    let file = r.note_file(&s);
-                    match note::edit_externally(&file, &old, |text| r.change_note(&s, &text))? {
+                    let file = r.note_file(&n);
+                    match note::edit_externally(&file, &old, |text| r.change_note(&n, &text))? {
                         Some(said) => println!("{said}"),
                         None => bail!("$EDITOR exited with an error; the note is as it was"),
                     }
                     return Ok(());
                 }
                 (None, None) => {
-                    match &s.note {
-                        Some(n) => println!("{}", n.text),
-                        None => eprintln!("{} has no note", s.label()),
+                    match &n.note {
+                        Some(note) => println!("{}", note.text),
+                        None => eprintln!("{} has no note", n.label),
                     }
                     return Ok(());
                 }
             };
-            println!("{}", r.change_note(&s, &new)?);
+            println!("{}", r.change_note(&n, &new)?);
         }
         Cmd::Retitle { session, auto } => {
             let s = r.resolve(&session, false)?;
@@ -910,6 +916,32 @@ fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> 
         return Ok(true);
     }
     confirm(&crate::agent::new_conversation_question(s), yes)
+}
+
+/// Whose note `roster note` acts on: `session`'s, or with `project` a
+/// project's, the one named or else the session's (inside an agent, without
+/// a session, its own's).
+fn noted(r: &Roster, session: Option<&str>, project: Option<&str>) -> Result<note::Noted> {
+    let of = |id: i64| -> Result<note::Noted> {
+        let p = r.projects()?.into_iter().find(|p| p.id == id);
+        Ok(p.context("its project is gone")?.noted())
+    };
+    match (session, project) {
+        (Some(_), Some(name)) if !name.is_empty() => {
+            bail!("a session or --project with a name, not both")
+        }
+        (Some(session), Some(_)) => of(r.resolve_any(session)?.project_id),
+        (Some(session), None) => Ok(r.resolve_any(session)?.noted()),
+        (None, Some("")) => match std::env::var("ROSTER_SESSION") {
+            Ok(id) => of(r.resolve_any(&id)?.project_id),
+            Err(_) => bail!("which project's note? --project <PROJECT>"),
+        },
+        (None, Some(name)) => match r.projects()?.into_iter().find(|p| p.name == name) {
+            Some(p) => Ok(p.noted()),
+            None => bail!("no project named {name:?}"),
+        },
+        (None, None) => bail!("which note? a session's, or --project <PROJECT>"),
+    }
 }
 
 /// `roster config --edit` when roster couldn't open (`why`): if config.toml

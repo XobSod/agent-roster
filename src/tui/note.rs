@@ -1,9 +1,10 @@
-//! The note editor: a session's note, under the preview's header, with vim's
-//! keys (edtui's, and a few it lacks), and roster's on top: `:w`, `:wq`, `:q`,
-//! `:q!`, `ZZ` and `ZQ` save and close as in vim, `mm` pins a line, Ctrl+G
-//! hands the note to `$EDITOR`, and keys typed quickly (`jk`, `notes.escape`)
-//! can leave insert mode. Esc never closes it: it's pressed out of habit,
-//! often twice.
+//! The note editor: a session's note and its project's, under the preview's
+//! header, with vim's keys (edtui's, and a few it lacks), and roster's on top:
+//! `:w`, `:wq`, `:q`, `:q!`, `ZZ` and `ZQ` save and close as in vim, `[` and
+//! `]` show the project's note and the session's, kept as vim keeps buffers
+//! (`:wa`, `:qa`, `:wqa` for both), `mm` pins a line, Ctrl+G hands the note
+//! to `$EDITOR`, and keys typed quickly (`jk`, `notes.escape`) can leave
+//! insert mode. Esc never closes it: it's pressed out of habit, often twice.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -18,8 +19,7 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, Index2, Lines};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input;
-use crate::model::Session;
-use crate::note::{self, Note};
+use crate::note::{self, Note, Noted, Whose};
 
 /// Columns a tab takes, in the editor and where its lines are counted.
 pub const TAB_WIDTH: usize = 4;
@@ -40,8 +40,9 @@ fn mark() -> KeyInput {
 pub type Escape = (Vec<char>, Duration);
 
 pub struct NoteEditor {
-    /// Whose: the session's id.
-    pub session: String,
+    pub whose: Whose,
+    /// What to call whose it is: "api/fix", "project api".
+    pub label: String,
     /// edtui's state; drawing it needs it mutable (it keeps its scroll there).
     pub state: RefCell<EditorState>,
     keys: EditorEventHandler,
@@ -68,18 +69,32 @@ pub struct NoteEditor {
     held: Option<(usize, Instant)>,
 }
 
+/// Which of the notes the editor holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Session,
+    Project,
+}
+
 /// What a key asks of the app.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     None,
-    /// Save the note, then close the editor or stay in it; `force`d, also
-    /// over one saved by another meanwhile.
+    /// Save the note, or `all` that have changes, then close the editor or
+    /// stay in it; `force`d, also over one saved by another meanwhile.
     Save {
+        all: bool,
         close: bool,
         force: bool,
     },
-    /// Close without saving.
-    Close,
+    /// Close without saving this note's changes, nor with `all` the other's;
+    /// without it, only if the other has none.
+    Close {
+        all: bool,
+    },
+    /// Show the project's note (`[`, as it's on the left in the preview), or
+    /// the session's (`]`).
+    Show(Side),
     /// Hand the text to `$EDITOR`.
     External,
     /// Say why not.
@@ -88,10 +103,99 @@ pub enum Outcome {
     Notice(String),
 }
 
+/// The notes open in the editor, kept as vim keeps buffers: a session's and
+/// its project's, each opened when first shown, one of them shown.
+pub struct OpenNotes {
+    /// Where it was opened: on a session (its id) or on a project.
+    pub session: Option<String>,
+    pub project: i64,
+    /// The session's and the project's, once opened.
+    editors: [Option<NoteEditor>; 2],
+    shown: Side,
+}
+
+impl OpenNotes {
+    /// Opened on a note, shown: a session's (`session` its id) or its
+    /// project's.
+    pub fn new(session: Option<String>, project: i64, side: Side, editor: NoteEditor) -> Self {
+        let mut editors = [None, None];
+        editors[side as usize] = Some(editor);
+        OpenNotes {
+            session,
+            project,
+            editors,
+            shown: side,
+        }
+    }
+
+    pub fn side(&self) -> Side {
+        self.shown
+    }
+
+    pub fn shown(&self) -> &NoteEditor {
+        self.editors[self.shown as usize]
+            .as_ref()
+            .expect("the shown note is open")
+    }
+
+    pub fn shown_mut(&mut self) -> &mut NoteEditor {
+        self.editors[self.shown as usize]
+            .as_mut()
+            .expect("the shown note is open")
+    }
+
+    /// The other note, if it was opened.
+    pub fn other(&self) -> Option<&NoteEditor> {
+        self.get(match self.shown {
+            Side::Session => Side::Project,
+            Side::Project => Side::Session,
+        })
+    }
+
+    pub fn get(&self, side: Side) -> Option<&NoteEditor> {
+        self.editors[side as usize].as_ref()
+    }
+
+    /// The open note `whose`.
+    pub fn of(&mut self, whose: &Whose) -> Option<&mut NoteEditor> {
+        self.editors
+            .iter_mut()
+            .flatten()
+            .find(|e| e.whose == *whose)
+    }
+
+    /// Shows `side`'s note, opened with `open` if it isn't yet.
+    pub fn show(&mut self, side: Side, open: impl FnOnce() -> NoteEditor) {
+        self.editors[side as usize].get_or_insert_with(open);
+        self.shown = side;
+    }
+
+    /// Those with changes not saved, the shown first.
+    pub fn dirty(&self) -> Vec<&NoteEditor> {
+        let other = self.other().filter(|e| e.dirty());
+        let shown = Some(self.shown()).filter(|e| e.dirty());
+        shown.into_iter().chain(other).collect()
+    }
+
+    /// What the footer says of the keys: the shown note's, then `[` and `]`
+    /// where there are two to show.
+    pub fn hints(&self) -> Vec<(String, &'static str)> {
+        let mut hints = self.shown().hints();
+        if self.session.is_some() && self.shown().mode() == EditorMode::Normal {
+            let to = match self.shown {
+                Side::Session => ("[", "project's note"),
+                Side::Project => ("]", "session's note"),
+            };
+            hints.insert(hints.len() - 2, (to.0.to_string(), to.1));
+        }
+        hints
+    }
+}
+
 impl NoteEditor {
-    /// Opens on the session's note, the cursor on its pinned line.
-    pub fn new(s: &Session, escape: Option<Escape>) -> NoteEditor {
-        let (text, pin) = s
+    /// Opens on the note, the cursor on its pinned line.
+    pub fn new(n: &Noted, escape: Option<Escape>) -> NoteEditor {
+        let (text, pin) = n
             .note
             .as_ref()
             .map_or((String::new(), None), |n| (n.text.clone(), n.pin));
@@ -101,12 +205,13 @@ impl NoteEditor {
         }
         let lines = rows(&state);
         NoteEditor {
-            session: s.id.clone(),
+            whose: n.whose.clone(),
+            label: n.label.clone(),
             state: RefCell::new(state),
             keys: vim_keys(),
             pin,
             saved: (text, pin),
-            base: s.note.clone(),
+            base: n.note.clone(),
             lines,
             pending: None,
             repeat: None,
@@ -282,13 +387,28 @@ impl NoteEditor {
             if let Some(first) = self.pending.take() {
                 return match (first, e.code) {
                     ('Z', KeyCode::Char('Z')) if plain => self.write_and_close(false),
-                    ('Z', KeyCode::Char('Q')) if plain => Outcome::Close,
+                    ('Z', KeyCode::Char('Q')) if plain => Outcome::Close { all: false },
                     ('m', KeyCode::Char('m')) if plain => {
                         self.toggle_pin();
                         Outcome::None
                     }
                     _ => Outcome::None,
                 };
+            }
+            // `[` and `]` show a note, unless they end a sequence edtui
+            // was in (`ci[`): edtui is given them, and runs what they do
+            // alone only if it wasn't (`vim_keys`).
+            if let KeyCode::Char(c @ ('[' | ']')) = e.code
+                && plain
+            {
+                self.feed(e);
+                if !self.unmarked() {
+                    return Outcome::None;
+                }
+                return Outcome::Show(match c {
+                    '[' => Side::Project,
+                    _ => Side::Session,
+                });
             }
             if let KeyCode::Char(c @ (':' | 'Z' | 'm')) = e.code
                 && plain
@@ -387,36 +507,34 @@ impl NoteEditor {
     }
 
     /// A `:` command.
-    fn run(&mut self, command: &str) -> Outcome {
+    fn run(&mut self, typed: &str) -> Outcome {
+        let (command, force) = match typed.strip_suffix('!') {
+            Some(command) => (command, true),
+            None => (typed, false),
+        };
+        let save = |all, close| Outcome::Save { all, close, force };
         match command {
-            "" => Outcome::None,
+            "" if !force => Outcome::None,
             // Nothing of yours to save, so nothing over a note saved meanwhile.
-            "w" | "w!" if !self.dirty() => Outcome::Notice("Nothing new to save".into()),
-            "wq" | "wq!" if !self.dirty() => Outcome::Close,
-            "w" => Outcome::Save {
-                close: false,
-                force: false,
-            },
-            "w!" => Outcome::Save {
-                close: false,
-                force: true,
-            },
-            "wq" => Outcome::Save {
-                close: true,
-                force: false,
-            },
-            "wq!" => Outcome::Save {
-                close: true,
-                force: true,
-            },
-            "x" | "xit" | "exit" => self.write_and_close(false),
-            "x!" | "xit!" | "exit!" => self.write_and_close(true),
-            "q" | "quit" if self.dirty() => Outcome::Fail(
-                "The note has unsaved changes: :wq saves them, :q! leaves them".into(),
-            ),
-            "q" | "quit" | "q!" | "quit!" => Outcome::Close,
-            other => Outcome::Fail(format!(
-                "Not a command here: :{other} (:w saves, :wq or :x closes too, :q! leaves changes)"
+            "w" if !self.dirty() => Outcome::Notice("Nothing new to save".into()),
+            "wq" if !self.dirty() => Outcome::Close { all: false },
+            "w" => save(false, false),
+            "wq" => save(false, true),
+            "x" | "xit" | "exit" => self.write_and_close(force),
+            // Whether the other note has changes is for the app to tell.
+            "wa" | "wall" => save(true, false),
+            "wqa" | "wqall" | "xa" | "xall" => save(true, true),
+            "q" | "quit" | "qa" | "qall" if !force && self.dirty() => {
+                let a = if command.starts_with("qa") { "a" } else { "" };
+                Outcome::Fail(format!(
+                    "The note has unsaved changes: :wq{a} saves them, :q{a}! leaves them"
+                ))
+            }
+            "q" | "quit" => Outcome::Close { all: false },
+            "qa" | "qall" => Outcome::Close { all: force },
+            _ => Outcome::Fail(format!(
+                "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
+                 changes; :wa, :wqa and :qa! act on both notes)"
             )),
         }
     }
@@ -424,9 +542,13 @@ impl NoteEditor {
     /// `:x` and `ZZ`: saves if changed, and closes.
     fn write_and_close(&self, force: bool) -> Outcome {
         if self.dirty() {
-            Outcome::Save { close: true, force }
+            Outcome::Save {
+                all: false,
+                close: true,
+                force,
+            }
         } else {
-            Outcome::Close
+            Outcome::Close { all: false }
         }
     }
 
@@ -544,7 +666,8 @@ impl NoteEditor {
 
 /// edtui's vim keys, `p` as vim's (below the last line too), some it lacks
 /// (`C`, `cc` and `S`, `^`, `r`, and Ctrl+W in insert mode, as in roster's
-/// other text fields), and the mark. (`x` and `X` are roster's: `on_key_at`.)
+/// other text fields), and the mark. (`x` and `X` are roster's, and `[` and
+/// `]`: `on_key_at`.)
 fn vim_keys() -> EditorEventHandler {
     let mut keys = EditorEventHandler::vim_mode();
     let k = &mut keys.key_handler;
@@ -593,6 +716,14 @@ fn vim_keys() -> EditorEventHandler {
             .chain(SwitchMode(EditorMode::Insert))
             .chain(SwitchMode(EditorMode::Search)),
     );
+    // `[` and `]` alone: leave edtui in search mode, as the mark does, for
+    // roster to show a note; in a sequence (`ci[`), what that does.
+    for c in ['[', ']'] {
+        k.insert(
+            KeyEventRegister::n(vec![KeyInput::new(c)]),
+            SwitchMode(EditorMode::Search),
+        );
+    }
     // `p` puts a line below the cursor's, the last one's too: edtui puts it
     // above the last line, except in insert mode. Into it by way of search
     // mode, which takes no undo point (so one `u` undoes it), and out the
@@ -639,24 +770,21 @@ fn rows(state: &EditorState) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Project;
+
+    fn noted(whose: Whose, text: Option<&str>, pin: Option<usize>) -> Noted {
+        Noted {
+            whose,
+            label: "api/fix".into(),
+            note: text.map(|t| Note {
+                text: t.into(),
+                pin,
+                at: 0,
+            }),
+        }
+    }
 
     fn editor(text: Option<&str>, pin: Option<usize>) -> NoteEditor {
-        let project = Project {
-            id: 1,
-            name: "api".into(),
-            origin: "/tmp".into(),
-            agent: None,
-            model: None,
-            effort: None,
-        };
-        let mut s = Session::new("r-1", &project, "fix", "claude", 0);
-        s.note = text.map(|t| Note {
-            text: t.into(),
-            pin,
-            at: 0,
-        });
-        NoteEditor::new(&s, None)
+        NoteEditor::new(&noted(Whose::Session("r-1".into()), text, pin), None)
     }
 
     fn keys(e: &mut NoteEditor, typed: &str) -> Vec<Outcome> {
@@ -681,20 +809,27 @@ mod tests {
 
     #[test]
     fn it_saves_and_closes_as_vim_does() {
+        let close = [Outcome::Close { all: false }];
         let mut e = editor(Some("one"), None);
-        assert_eq!(keys(&mut e, ":q\n"), [Outcome::Close]);
-        assert_eq!(keys(&mut e, "ZZ"), [Outcome::Close]);
+        assert_eq!(keys(&mut e, ":q\n"), close);
+        assert_eq!(keys(&mut e, "ZZ"), close);
         // Unchanged: nothing saved, so nothing over a note saved meanwhile.
-        assert_eq!(keys(&mut e, ":wq\n"), [Outcome::Close]);
+        assert_eq!(keys(&mut e, ":wq\n"), close);
         assert!(matches!(keys(&mut e, ":w!\n")[..], [Outcome::Notice(_)]));
         keys(&mut e, "Atwo\x1b");
         assert_eq!(e.text(), "onetwo");
         assert!(e.dirty());
         // Not with unsaved changes; :q! and ZQ leave them.
         assert!(matches!(keys(&mut e, ":q\n")[..], [Outcome::Fail(_)]));
-        assert_eq!(keys(&mut e, ":q!\n"), [Outcome::Close]);
-        assert_eq!(keys(&mut e, "ZQ"), [Outcome::Close]);
-        let save = |close, force| [Outcome::Save { close, force }];
+        assert_eq!(keys(&mut e, ":q!\n"), close);
+        assert_eq!(keys(&mut e, "ZQ"), close);
+        let save = |close, force| {
+            [Outcome::Save {
+                all: false,
+                close,
+                force,
+            }]
+        };
         assert_eq!(keys(&mut e, ":w\n"), save(false, false));
         assert_eq!(keys(&mut e, ":wq\n"), save(true, false));
         assert_eq!(keys(&mut e, "ZZ"), save(true, false));
@@ -711,6 +846,72 @@ mod tests {
             at: 0,
         }));
         assert!(!e.dirty());
+    }
+
+    #[test]
+    fn commands_for_all_notes_are_vims() {
+        let all = |close, force| {
+            [Outcome::Save {
+                all: true,
+                close,
+                force,
+            }]
+        };
+        // Whatever this note's changes: the other may have some.
+        let mut e = editor(Some("one"), None);
+        assert_eq!(keys(&mut e, ":wa\n"), all(false, false));
+        assert_eq!(keys(&mut e, ":wqa\n"), all(true, false));
+        assert_eq!(keys(&mut e, ":xa\n"), all(true, false));
+        assert_eq!(keys(&mut e, ":xall!\n"), all(true, true));
+        assert_eq!(keys(&mut e, ":qa\n"), [Outcome::Close { all: false }]);
+        assert_eq!(keys(&mut e, ":qa!\n"), [Outcome::Close { all: true }]);
+        // With changes, :qa doesn't close; :q! leaves this note's only.
+        keys(&mut e, "Atwo\x1b");
+        assert!(matches!(&keys(&mut e, ":qa\n")[..], [Outcome::Fail(why)] if why.contains(":wqa")));
+        assert_eq!(keys(&mut e, ":q!\n"), [Outcome::Close { all: false }]);
+        assert_eq!(keys(&mut e, ":qall!\n"), [Outcome::Close { all: true }]);
+    }
+
+    #[test]
+    fn brackets_show_a_note_unless_in_a_sequence() {
+        let mut e = editor(Some("- [ ] one"), None);
+        // As the preview has them: the project's on the left.
+        assert_eq!(keys(&mut e, "["), [Outcome::Show(Side::Project)]);
+        assert_eq!(keys(&mut e, "]"), [Outcome::Show(Side::Session)]);
+        assert_eq!(e.mode(), EditorMode::Normal);
+        // ci[ changes what's in brackets; f[ and r[ take it as a character.
+        assert_eq!(keys(&mut e, "lllci[x\x1b"), []);
+        assert_eq!(e.text(), "- [x] one");
+        assert_eq!(keys(&mut e, "0f[r]"), []);
+        assert_eq!(e.text(), "- ]x] one");
+        // In insert mode, they're typed.
+        assert_eq!(keys(&mut e, "A [\x1b"), []);
+        assert_eq!(e.text(), "- ]x] one [");
+    }
+
+    #[test]
+    fn notes_open_as_buffers_the_shown_first() {
+        let session =
+            |text| NoteEditor::new(&noted(Whose::Session("r-1".into()), text, None), None);
+        let project = |text| NoteEditor::new(&noted(Whose::Project(1), text, None), None);
+        let mut open = OpenNotes::new(Some("r-1".into()), 1, Side::Session, session(Some("s")));
+        assert!(open.other().is_none());
+        keys(open.shown_mut(), "Ax\x1b");
+        // Shown, the project's opens; the session's keeps its changes.
+        open.show(Side::Project, || project(Some("p")));
+        assert_eq!(open.shown().text(), "p");
+        assert_eq!(open.other().map(|e| e.text()).as_deref(), Some("sx"));
+        open.show(Side::Project, || unreachable!());
+        keys(open.shown_mut(), "Ay\x1b");
+        let dirty: Vec<String> = open.dirty().iter().map(|e| e.text()).collect();
+        assert_eq!(dirty, ["py", "sx"]);
+        assert!(open.of(&Whose::Project(1)).is_some());
+        assert!(open.of(&Whose::Project(2)).is_none());
+        // The footer says how to show the other, where there is one: from
+        // the project's, ] for the session's.
+        assert!(open.hints().iter().any(|(k, _)| k == "]"));
+        let alone = OpenNotes::new(None, 1, Side::Project, project(None));
+        assert!(!alone.hints().iter().any(|(k, _)| k == "[" || k == "]"));
     }
 
     #[test]

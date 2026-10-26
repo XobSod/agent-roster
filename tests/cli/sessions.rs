@@ -865,6 +865,104 @@ fn notes_are_kept_with_their_session() {
 }
 
 #[test]
+fn a_projects_note_is_its_own() {
+    let Some(t) = TestEnv::new("pnotes") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    let out = t.run(&["note", "--project", "demo"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("project demo has no note"));
+    assert!(
+        t.ok(&["note", "--project", "demo", "--set", "backlog"])
+            .contains("Saved the note of project demo")
+    );
+    t.ok(&["note", "--project", "demo", "--append", "- [ ] retry"]);
+    assert!(
+        t.ok(&["note", "--project", "demo", "--pin", "2"])
+            .contains("Pinned line 2 of the note of project demo: - [ ] retry")
+    );
+    assert_eq!(
+        t.ok(&["note", "--project", "demo"]),
+        "backlog\n- [ ] retry\n"
+    );
+    // Apart from its sessions' notes.
+    assert!(t.run(&["note", "one"]).stdout.is_empty());
+    // A session's project's, by the session; inside an agent, its own's.
+    assert_eq!(
+        t.ok(&["note", "one", "--project"]),
+        "backlog\n- [ ] retry\n"
+    );
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = t
+        .command(&["note", "--project"])
+        .env("ROSTER_SESSION", &id)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "backlog\n- [ ] retry\n"
+    );
+    for which in [
+        &["note", "--project"][..],
+        &["note"],
+        &["note", "one", "--project", "demo"],
+        &["note", "--project", "nope"],
+    ] {
+        assert!(!t.run(which).status.success(), "{which:?}");
+    }
+    // Removing the project says its note goes too.
+    t.ok(&["archive", "--yes", "one"]);
+    let out = t.run(&["project", "rm", "demo"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Remove project demo and its note?"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Removed while its note is in $EDITOR, and another added: what's
+    // written isn't saved, least of all as the other's note.
+    for dir in ["old", "new"] {
+        fs::create_dir_all(t.path(dir)).unwrap();
+    }
+    t.ok(&["project", "add", "old", t.path("old").to_str().unwrap()]);
+    let roster = env!("CARGO_BIN_EXE_roster");
+    let editor = t.path("editor.sh");
+    fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\n'{roster}' project rm old --yes\n'{roster}' project add new '{}'\n\
+             echo 'for old' > \"$1\"\n",
+            t.path("new").display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&editor)
+        .status()
+        .unwrap();
+    let out = t
+        .command(&["note", "--project", "old", "--edit"])
+        .env("EDITOR", &editor)
+        .env_remove("VISUAL")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("no project"), "{stderr}");
+    let out = t.run(&["note", "--project", "new"]);
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
     let Some(t) = TestEnv::new("signal") else {
         return;

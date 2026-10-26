@@ -2,15 +2,19 @@
 
 use super::*;
 
-/// Every project: name, directory, sessions, defaults; the selected one's
-/// details below.
+/// Every project: name, directory, sessions, defaults, whether it has a note;
+/// the selected one's details below, or its note open in the editor.
 pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
+    let below = match &app.note {
+        Some(open) => editor_height(open.shown(), area.width, area.height),
+        None => 8,
+    };
     let [head, _, table, details] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(7),
+        Constraint::Length(below),
     ])
     .areas(area);
     let count = match app.projects.len() {
@@ -86,12 +90,21 @@ pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(pad(sessions, sessions_w)),
             Span::styled(defaults.clone(), Style::new().fg(MUTED)),
         ];
-        let content = fit(width.saturating_sub(1), content, Vec::new());
+        let mark = match p.note {
+            Some(_) => vec![Span::styled(
+                format!("{PROJECT_NOTE} "),
+                Style::new().fg(MUTED),
+            )],
+            None => Vec::new(),
+        };
+        let content = fit(width.saturating_sub(1), content, mark);
         lines.push(framed(content, i == app.project_row, width));
     }
     f.render_widget(Paragraph::new(lines), table);
 
-    if let Some(p) = app.projects.get(app.project_row) {
+    if let Some(open) = &app.note {
+        draw_note_editor(f, open, details);
+    } else if let Some(p) = app.projects.get(app.project_row) {
         let mut text = vec![Line::styled(
             format!(" {}", p.name),
             Style::new().add_modifier(Modifier::BOLD),

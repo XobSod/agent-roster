@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_params, params};
 
 use crate::model::{Event, Project, Session, State};
-use crate::note::Note;
+use crate::note::{Note, Whose};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -23,7 +23,10 @@ CREATE TABLE projects (
     created_at INTEGER NOT NULL,
     agent      TEXT,
     model      TEXT,
-    effort     TEXT
+    effort     TEXT,
+    note       TEXT,
+    note_pin   INTEGER,
+    note_at    INTEGER
 );
 CREATE TABLE sessions (
     id                TEXT PRIMARY KEY,
@@ -95,7 +98,7 @@ const SESSION_COLUMNS: &str =
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
     s.worked_ms, s.fork_from, s.note, s.note_pin, s.note_at";
 
-const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort";
+const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort, note, note_pin, note_at";
 
 /// What each schema version adds to the one before.
 const MIGRATIONS: &[(i64, &str)] = &[
@@ -152,6 +155,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
          );
          CREATE INDEX spent_at ON spent(at);
          CREATE INDEX spent_path ON spent(path);",
+    ),
+    (
+        9,
+        "ALTER TABLE projects ADD COLUMN note TEXT;
+         ALTER TABLE projects ADD COLUMN note_pin INTEGER;
+         ALTER TABLE projects ADD COLUMN note_at INTEGER;",
     ),
 ];
 
@@ -212,6 +221,15 @@ impl Db {
         }
         // Not a schema change: older rosters use the index without knowing it.
         tx.execute_batch("CREATE INDEX IF NOT EXISTS events_session ON events(session_id);")?;
+        // The highest project id given (`add_project`) is at least the
+        // highest there is, before any can be removed: a database from
+        // before it was kept has its projects all the same.
+        let highest: Option<i64> =
+            tx.query_row("SELECT max(id) FROM projects", [], |r| r.get(0))?;
+        let kept = last_project_id(&tx)?;
+        if let Some(highest) = highest.filter(|&h| h > kept) {
+            set_meta(&tx, "last_project_id", &highest.to_string())?;
+        }
         tx.commit()?;
         // Pages that pruning old events frees go back to the disk as they're
         // freed (`fold_events`), so the file doesn't stay at its largest (54
@@ -229,26 +247,38 @@ impl Db {
 
     // Projects
 
-    /// Inserts `project` (its id is ignored) and returns it with its new id.
+    /// Inserts `project` (its id and note are ignored) and returns it with
+    /// its new id: one no project had before, so what's addressed to a
+    /// removed project (a note open in an editor) never reaches another.
+    /// SQLite would give the highest id again once its project is removed.
     pub fn add_project(&self, project: &Project, now: i64) -> Result<Project> {
         let name = &project.name;
         let origin_str = path_str(&project.origin)?;
-        self.conn
-            .execute(
-                "INSERT INTO projects (name, origin, created_at, agent, model, effort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    name,
-                    origin_str,
-                    now,
-                    project.agent,
-                    project.model,
-                    project.effort
-                ],
-            )
-            .map_err(|e| constraint(e, || format!("project {name:?} already exists")))?;
+        // In one transaction, so two rosters adding at once don't pick the
+        // same id.
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let highest: Option<i64> =
+            tx.query_row("SELECT max(id) FROM projects", [], |r| r.get(0))?;
+        let id = last_project_id(&tx)?.max(highest.unwrap_or(0)) + 1;
+        tx.execute(
+            "INSERT INTO projects (id, name, origin, created_at, agent, model, effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                name,
+                origin_str,
+                now,
+                project.agent,
+                project.model,
+                project.effort
+            ],
+        )
+        .map_err(|e| constraint(e, || format!("project {name:?} already exists")))?;
+        set_meta(&tx, "last_project_id", &id.to_string())?;
+        tx.commit()?;
         Ok(Project {
-            id: self.conn.last_insert_rowid(),
+            id,
+            note: None,
             ..project.clone()
         })
     }
@@ -500,10 +530,12 @@ impl Db {
         Ok(())
     }
 
-    /// Saves a session's note (None removes it), and only that.
-    pub fn set_note(&self, id: &str, note: Option<&Note>) -> Result<()> {
+    /// Saves a session's or a project's note (None removes it), and only
+    /// that.
+    pub fn set_note(&self, whose: &Whose, note: Option<&Note>) -> Result<()> {
+        let (table, id) = note_row(whose);
         let n = self.conn.execute(
-            "UPDATE sessions SET note = ?2, note_pin = ?3, note_at = ?4 WHERE id = ?1",
+            &format!("UPDATE {table} SET note = ?2, note_pin = ?3, note_at = ?4 WHERE id = ?1"),
             params![
                 id,
                 note.map(|n| &n.text),
@@ -512,22 +544,25 @@ impl Db {
             ],
         )?;
         if n == 0 {
-            bail!("no session with id {id}");
+            bail!("{}", no_such(whose));
         }
         Ok(())
     }
 
     /// `set_note`, but only if the note is still `expected`: whether it was
-    /// (an error if there's no such session).
+    /// (an error if there's no such session or project).
     pub fn set_note_if(
         &self,
-        id: &str,
+        whose: &Whose,
         expected: Option<&Note>,
         note: Option<&Note>,
     ) -> Result<bool> {
+        let (table, id) = note_row(whose);
         let n = self.conn.execute(
-            "UPDATE sessions SET note = ?2, note_pin = ?3, note_at = ?4
-             WHERE id = ?1 AND note IS ?5 AND note_pin IS ?6 AND note_at IS ?7",
+            &format!(
+                "UPDATE {table} SET note = ?2, note_pin = ?3, note_at = ?4
+                 WHERE id = ?1 AND note IS ?5 AND note_pin IS ?6 AND note_at IS ?7"
+            ),
             params![
                 id,
                 note.map(|n| &n.text),
@@ -539,7 +574,14 @@ impl Db {
             ],
         )?;
         if n == 0 {
-            self.session(id)?;
+            let there: bool = self.conn.query_row(
+                &format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE id = ?1)"),
+                [&id],
+                |r| r.get(0),
+            )?;
+            if !there {
+                bail!("{}", no_such(whose));
+            }
         }
         Ok(n == 1)
     }
@@ -1044,7 +1086,35 @@ fn project_from_row(r: &Row) -> rusqlite::Result<Project> {
         agent: r.get(3)?,
         model: r.get(4)?,
         effort: r.get(5)?,
+        note: note_from_row(r)?,
     })
+}
+
+/// A session's or a project's note, from its columns; None without text.
+fn note_from_row(r: &Row) -> rusqlite::Result<Option<Note>> {
+    Ok(match r.get::<_, Option<String>>("note")? {
+        Some(text) => Some(Note {
+            text,
+            pin: r.get::<_, Option<i64>>("note_pin")?.map(|p| p as usize),
+            at: r.get::<_, Option<i64>>("note_at")?.unwrap_or(0),
+        }),
+        None => None,
+    })
+}
+
+/// Where a note is kept: its table, and its row's id.
+fn note_row(whose: &Whose) -> (&'static str, rusqlite::types::Value) {
+    match whose {
+        Whose::Session(id) => ("sessions", id.clone().into()),
+        Whose::Project(id) => ("projects", (*id).into()),
+    }
+}
+
+fn no_such(whose: &Whose) -> String {
+    match whose {
+        Whose::Session(id) => format!("no session with id {id}"),
+        Whose::Project(id) => format!("no project with id {id}"),
+    }
 }
 
 /// A project's sessions, all archived, which removing it deletes for good;
@@ -1099,15 +1169,20 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         turns: r.get("turns")?,
         worked_ms: r.get("worked_ms")?,
         fork_from: r.get("fork_from")?,
-        note: match r.get::<_, Option<String>>("note")? {
-            Some(text) => Some(Note {
-                text,
-                pin: r.get::<_, Option<i64>>("note_pin")?.map(|p| p as usize),
-                at: r.get::<_, Option<i64>>("note_at")?.unwrap_or(0),
-            }),
-            None => None,
-        },
+        note: note_from_row(r)?,
     })
+}
+
+/// The highest project id given, 0 for none.
+fn last_project_id(conn: &Connection) -> Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'last_project_id'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
 }
 
 fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -1162,6 +1237,7 @@ mod tests {
             agent: None,
             model: None,
             effort: None,
+            note: None,
         }
     }
 
@@ -1265,7 +1341,7 @@ mod tests {
         let s = db.session("old").unwrap();
         assert_eq!((s.state, s.baseline_at, s.title), (State::Idle, None, None));
         let p = db.project("p").unwrap().unwrap();
-        assert_eq!(p.model, None);
+        assert_eq!((p.model, p.note), (None, None));
         let version: i64 = db
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -1387,7 +1463,8 @@ mod tests {
             pin: Some(1),
             at: 7,
         };
-        db.set_note(&s.id, Some(&note)).unwrap();
+        let whose = Whose::Session(s.id.clone());
+        db.set_note(&whose, Some(&note)).unwrap();
         assert_eq!(db.session(&s.id).unwrap().note, Some(note.clone()));
         // A save of a copy read before (refresh's) leaves it.
         db.save_session(&s).unwrap();
@@ -1398,13 +1475,81 @@ mod tests {
             pin: None,
             at: 8,
         };
-        assert!(!db.set_note_if(&s.id, None, Some(&newer)).unwrap());
-        assert!(db.set_note_if(&s.id, Some(&note), Some(&newer)).unwrap());
-        assert_eq!(db.session(&s.id).unwrap().note, Some(newer));
-        assert!(db.set_note_if("nobody", None, None).is_err());
-        db.set_note(&s.id, None).unwrap();
+        assert!(!db.set_note_if(&whose, None, Some(&newer)).unwrap());
+        assert!(db.set_note_if(&whose, Some(&note), Some(&newer)).unwrap());
+        assert_eq!(db.session(&s.id).unwrap().note, Some(newer.clone()));
+        let nobody = Whose::Session("nobody".into());
+        assert!(db.set_note_if(&nobody, None, None).is_err());
+        db.set_note(&whose, None).unwrap();
         assert_eq!(db.session(&s.id).unwrap().note, None);
-        assert!(db.set_note("nobody", None).is_err());
+        assert!(db.set_note(&nobody, None).is_err());
+
+        // A project's, the same way; an edit of the project leaves it.
+        let p = db.project(&s.project).unwrap().unwrap();
+        let whose = Whose::Project(p.id);
+        assert!(db.set_note_if(&whose, None, Some(&note)).unwrap());
+        assert!(!db.set_note_if(&whose, None, Some(&newer)).unwrap());
+        db.save_project(&p).unwrap();
+        let p = db.project(&s.project).unwrap().unwrap();
+        assert_eq!(p.note, Some(note));
+        assert_eq!(db.session(&s.id).unwrap().note, None);
+        assert!(db.set_note_if(&Whose::Project(99), None, None).is_err());
+        assert!(db.set_note(&Whose::Project(99), None).is_err());
+    }
+
+    #[test]
+    fn a_removed_projects_id_and_note_go_to_no_other() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.add_project(&project("first"), 0).unwrap();
+        let old = db.add_project(&project("old"), 0).unwrap();
+        db.remove_project(&old).unwrap();
+        // The next has an id of its own, though the removed one was highest.
+        let new = db.add_project(&project("new"), 0).unwrap();
+        assert!(new.id > old.id);
+        // A note opened on the removed one isn't saved, forced or not.
+        let note = Note {
+            text: "for old".into(),
+            pin: None,
+            at: 1,
+        };
+        let old = Whose::Project(old.id);
+        assert!(db.set_note_if(&old, None, Some(&note)).is_err());
+        assert!(db.set_note(&old, Some(&note)).is_err());
+        assert_eq!(db.project("new").unwrap().unwrap().note, None);
+    }
+
+    #[test]
+    fn an_upgraded_databases_project_ids_arent_given_again() {
+        // From before the highest id given was kept: none recorded.
+        let older = |meta: &str| {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(V1_SCHEMA).unwrap();
+            conn.execute_batch(&format!(
+                "INSERT INTO projects (name, origin, created_at) VALUES ('first', '/f', 0);
+                 INSERT INTO projects (name, origin, created_at) VALUES ('old', '/o', 0);
+                 {meta}"
+            ))
+            .unwrap();
+            Db::init(conn).unwrap()
+        };
+        let mut db = older("");
+        let old = db.project("old").unwrap().unwrap();
+        // Its highest removed before any is added: the next isn't given it.
+        db.remove_project(&old).unwrap();
+        let new = db.add_project(&project("new"), 0).unwrap();
+        assert_eq!(new.id, old.id + 1);
+        let note = Note {
+            text: "for old".into(),
+            pin: None,
+            at: 1,
+        };
+        let old = Whose::Project(old.id);
+        assert!(db.set_note_if(&old, None, Some(&note)).is_err());
+        assert!(db.set_note(&old, Some(&note)).is_err());
+        assert_eq!(db.project("new").unwrap().unwrap().note, None);
+        // A higher one recorded is kept.
+        let db = older("INSERT INTO meta (key, value) VALUES ('last_project_id', '10');");
+        assert_eq!(db.add_project(&project("new"), 0).unwrap().id, 11);
     }
 
     #[test]

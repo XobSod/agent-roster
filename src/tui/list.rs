@@ -216,6 +216,7 @@ mod tests {
             agent: None,
             model: None,
             effort: None,
+            note: None,
         }
     }
 

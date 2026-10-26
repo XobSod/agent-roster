@@ -87,6 +87,7 @@ impl App {
             Action::NewProject
             | Action::EditProject
             | Action::RemoveProject
+            | Action::ProjectNote
             | Action::NewSession
             | Action::NewChat
             | Action::Adopt => return self.act_on_projects(action),
@@ -112,6 +113,7 @@ impl App {
                 }
             },
             Action::RemoveProject => self.remove_project(),
+            Action::ProjectNote => return self.project_note(),
             Action::NewSession => self.new_session(),
             Action::NewChat => return Some(Op::NewChat),
             Action::Adopt => return Some(Op::FindConversations),
@@ -227,13 +229,7 @@ impl App {
         };
         // Archived sessions have notes too.
         if action == Action::Note {
-            return match self.notes.editor() {
-                crate::config::NoteEditor::External => Some(Op::EditNote(s.id)),
-                crate::config::NoteEditor::Builtin => {
-                    self.note = Some(NoteEditor::new(&s, self.notes.escape()));
-                    None
-                }
-            };
+            return self.open_note(Some(s.id.clone()), s.project_id, Side::Session, s.noted());
         }
         let archive = self.chord(Menu::Session, Action::Archive);
         if s.deleted_at.is_some() {
@@ -324,6 +320,39 @@ impl App {
     }
 
     /// The project the selection belongs to; with only one project, that one.
+    /// `p o`: the selected project's note, opened beside the selected
+    /// session's (`[` shows that), if it's one of the project's.
+    fn project_note(&mut self) -> Option<Op> {
+        let Some(p) = self.selected_project() else {
+            self.fail("Select a project (group by project) or one of its sessions first");
+            return None;
+        };
+        let session = self
+            .selected_session()
+            .filter(|s| s.project_id == p.id && self.mode == Mode::Sessions)
+            .map(|s| s.id.clone());
+        self.open_note(session, p.id, Side::Project, p.noted())
+    }
+
+    /// Opens note `n`, `side`'s of the session `session` (if opened on one)
+    /// in `project`: in the editor, or in `$EDITOR` if config.toml says so.
+    fn open_note(
+        &mut self,
+        session: Option<String>,
+        project: i64,
+        side: Side,
+        n: crate::note::Noted,
+    ) -> Option<Op> {
+        match self.notes.editor() {
+            crate::config::NoteEditor::External => Some(Op::EditNote(n.whose)),
+            crate::config::NoteEditor::Builtin => {
+                let editor = NoteEditor::new(&n, self.notes.escape());
+                self.note = Some(OpenNotes::new(session, project, side, editor));
+                None
+            }
+        }
+    }
+
     pub(super) fn selected_project(&self) -> Option<Project> {
         if self.mode == Mode::Projects {
             return self.projects.get(self.project_row).cloned();
@@ -425,7 +454,7 @@ impl App {
             ));
             return;
         }
-        let question = crate::engine::project_removal_question(&p.name, archived);
+        let question = crate::engine::project_removal_question(&p, archived);
         self.confirm(question, Op::RemoveProject(p.name));
     }
 

@@ -35,6 +35,7 @@ use crate::adopt::Adopt;
 use crate::agent;
 use crate::engine::{Defaults, NewSession, Roster};
 use crate::keys::{Action, Keymap, Menu};
+use crate::note::Whose;
 use crate::settings::Reloaded;
 use app::{App, Mode};
 use list::{Entry, EntryKey, Group};
@@ -189,8 +190,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
-        if let Some(editor) = app.note.as_mut() {
-            editor.tick(Instant::now());
+        if let Some(open) = app.note.as_mut() {
+            open.shown_mut().tick(Instant::now());
         }
         let size = app.preview.size.get();
         terminal.draw(|f| ui::draw(f, app))?;
@@ -207,7 +208,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         } else {
             until_reload
         };
-        if let Some(deadline) = app.note.as_ref().and_then(|e| e.deadline()) {
+        if let Some(deadline) = app.note.as_ref().and_then(|n| n.shown().deadline()) {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
         // A title or a transcript coming is looked for more often than a tick.
@@ -222,7 +223,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            let (selected, mode, editing) = (app.selected_key(), app.mode, app.note.is_some());
+            let editing = |app: &App| app.note.as_ref().map(|n| n.shown().whose.clone());
+            let (selected, mode, was_editing) = (app.selected_key(), app.mode, editing(app));
             match app.on_key(key) {
                 Some(Op::Quit) => return Ok(()),
                 Some(op) => {
@@ -232,7 +234,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                 }
                 None if app.mode != mode => reload(roster, app),
                 // A stopped session's panel shows its note unless it's open.
-                None if app.selected_key() != selected || app.note.is_some() != editing => {
+                None if app.selected_key() != selected || editing(app) != was_editing => {
                     update_preview(roster, app)
                 }
                 None => {}
@@ -739,28 +741,8 @@ fn perform(
             });
             format!("Asking {agent} for a title for {}…", app.session_label(&id))
         }),
-        Op::SaveNote {
-            id,
-            text,
-            pin,
-            close,
-            base,
-            force,
-        } => roster
-            .save_note(&id, &text, pin, base.as_ref(), force)
-            .map(|note| {
-                if close {
-                    app.note = None;
-                } else if let Some(editor) = app.note.as_mut() {
-                    editor.saved(note.as_ref());
-                }
-                let label = app.session_label(&id);
-                match note {
-                    Some(_) => format!("Saved the note of {label}"),
-                    None => format!("{label} has no note now"),
-                }
-            }),
-        Op::EditNote(id) => edit_note(terminal, roster, app, &id)?,
+        Op::SaveNotes { saves, close } => save_notes(roster, app, saves, close),
+        Op::EditNote(whose) => edit_note(terminal, roster, app, &whose)?,
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);
             app.open_chat_form(&roster.projects()?, &chats);
@@ -834,22 +816,60 @@ fn in_terminal<T>(terminal: &mut DefaultTerminal, run: impl FnOnce() -> T) -> Re
     Ok(ran)
 }
 
-/// Hands a session's note to `$EDITOR`: the open editor's text, which comes
-/// back into it, or else the note as saved, saved again when the editor exits.
-/// The outer result is the terminal's.
+/// Saves notes from the editor in turn, each marked saved there, until one
+/// can't be; then closes it if all were and `close`. What was saved, to say.
+fn save_notes(
+    roster: &Roster,
+    app: &mut App,
+    saves: Vec<op::NoteSave>,
+    close: bool,
+) -> Result<String> {
+    let mut said = Vec::new();
+    for s in saves {
+        let saved = roster.save_note(&s.whose, &s.text, s.pin, s.base.as_ref(), s.force);
+        let note = match saved {
+            Ok(note) => note,
+            // What was saved before is, and says so.
+            Err(e) if said.is_empty() => return Err(e),
+            Err(e) => return Err(e.context(said.join("; "))),
+        };
+        if let Some(editor) = app.note.as_mut().and_then(|n| n.of(&s.whose)) {
+            editor.saved(note.as_ref());
+        }
+        said.push(match note {
+            Some(_) => format!("Saved the note of {}", s.label),
+            None => format!("{} has no note now", s.label),
+        });
+    }
+    if close {
+        app.note = None;
+    }
+    Ok(said.join("; "))
+}
+
+/// Hands a note to `$EDITOR`: the open editor's text, which comes back into
+/// it, or else the note as saved, saved again when the editor exits. The
+/// outer result is the terminal's.
 fn edit_note(
     terminal: &mut DefaultTerminal,
     roster: &mut Roster,
     app: &mut App,
-    id: &str,
+    whose: &Whose,
 ) -> Result<Result<String>> {
-    let s = match roster.resolve_any(id) {
-        Ok(s) => s,
+    let noted = match whose {
+        Whose::Session(id) => roster.resolve_any(id).map(|s| s.noted()),
+        Whose::Project(id) => roster.projects().and_then(|ps| {
+            let p = ps.into_iter().find(|p| p.id == *id);
+            Ok(p.context("the project is gone")?.noted())
+        }),
+    };
+    let n = match noted {
+        Ok(n) => n,
         Err(e) => return Ok(Err(e)),
     };
-    let file = roster.note_file(&s);
+    let file = roster.note_file(&n);
     let failed = || anyhow::anyhow!("$EDITOR exited with an error; the note is as it was");
-    if let Some(editor) = app.note.as_mut().filter(|e| e.session == id) {
+    if let Some(editor) = app.note.as_mut().and_then(|open| open.of(whose)) {
         let text = editor.text();
         let back = in_terminal(terminal, || {
             crate::note::edit_externally(&file, &text, |back| {
@@ -862,9 +882,9 @@ fn edit_note(
                 .ok_or_else(failed)
         }));
     }
-    let text = s.note.as_ref().map_or(String::new(), |n| n.text.clone());
+    let text = n.note.as_ref().map_or(String::new(), |n| n.text.clone());
     let saved = in_terminal(terminal, || {
-        crate::note::edit_externally(&file, &text, |back| roster.change_note(&s, &back))
+        crate::note::edit_externally(&file, &text, |back| roster.change_note(&n, &back))
     })?;
     Ok(saved.and_then(|said| said.ok_or_else(failed)))
 }

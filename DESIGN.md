@@ -24,7 +24,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 
 ## 2. Concepts
 
-- **Project**: a name, a directory, and defaults for its sessions (agent, model, effort). Every session belongs to one.
+- **Project**: a name, a directory, defaults for its sessions (agent, model, effort), and a note. Every session belongs to one.
 - **Session**: one agent at work in a project: its agent, name, directory, conversation, state, title, model and effort, note.
 - **Name**: unique among the project's live sessions, made up as `<agent>-<n>` unless you give one. A given name is often a role (`tester`) reused task after task, so it shows next to the title; a made-up one only stands in for a missing title.
 - **Agent**: Claude, pi, Codex, or any other CLI configured by its command. Claude is always offered, pi and Codex once installed, others once configured.
@@ -33,7 +33,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Archived**: put away with the agent stopped, kept with its conversation and note until restored or deleted for good.
 - **Chat**: a session without a project of its own (§3.11).
 - **Title**: what the session is about: the agent's, or one of yours, which wins.
-- **Note**: free text per session, such as what's left to do in it.
+- **Note**: free text per session, such as what's left to do in it, and per project, such as what's left to do there.
 
 ## 3. Running agents
 
@@ -80,7 +80,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Stop** ends the agent (SIGTERM, then SIGKILL); the pane stays, with its last screen. Stopping or restarting a working session asks first, since both cut its turn short.
 - **Archive** stops the agent, closes its tmux session and puts the session on the Archived shelf, with its conversation and note. **Restore** brings it back stopped (if its name was taken meanwhile, you give it another); starting it then resumes. An archived session's note can still be read and edited; nothing else acts on it.
 - **Delete for good**, for archived sessions only, confirmed: the session, its events and its note go. The conversation stays where the agent keeps it, and can be adopted again.
-- **Removing a project** needs it to have no live sessions, and deletes its archived ones for good, so it asks first, saying how many.
+- **Removing a project** needs it to have no live sessions, and deletes its archived ones for good and its note, so it asks first, saying how many and whether it has a note.
 - After a reboot every session is stopped; starting one resumes it.
 
 ### 3.6 Model and effort
@@ -95,9 +95,11 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Automatic**, for agents that don't name their task (pi): once per conversation, after its first turn, made the same way and kept as the agent's title, so the agent's own naming still replaces it. One that fails isn't tried again by itself. It can be turned off.
 
 ### 3.8 Notes
-- Free text per session, kept through stops, restarts and archiving, gone only with the session. Cards mark sessions with one.
+- Free text per session, kept through stops, restarts and archiving, gone only with the session; and per project, gone only with the project. Why both: a session's note ends with its task, a project's outlives every session in it. Cards mark sessions with one (`✎`), headings and the projects view projects with one (`▤`).
+- **The preview shows them side by side** above the agent's screen, in a faint box from the row under the statistics: the project's pinned lines on the left, the session's on the right, each by its mark, a line between them, so two notes take the rows of one. Stacked one above the other, they took twice the rows and read as one list; without a box, they read as part of the agent's screen. Where the preview is too narrow for two, they're stacked, the project's on top, with a line across the box between them. A note that isn't there takes no room, and one alone has the whole width. A note the preview shows whole (a stopped session's, in its panel) isn't repeated there.
 - **Edited inside roster**, under the preview's header with the agent's screen still below, in an editor with vim's keys; or in `$EDITOR`. `Esc` doesn't close it, so pressing it once too often is harmless.
-- **The pin**: the pinned line and the one below it show above the agent's screen, so a to-do list shows where you are in it.
+- **The pin**: the pinned line and the one below it show above the agent's screen, so a to-do list shows where you are in it. How many lines show is a setting, from 1 to 10: more push the agent's screen down.
+- **Both open at once**: the editor holds the session's note and its project's as vim holds buffers, `[` showing the project's and `]` the session's, as the preview has them left and right, each keeping its changes while the other shows. The pinned line is marked by the note's own mark, `▤` or `✎`, in the editor as in the preview. `:wa`, `:qa`, `:wqa`, `:xa` act on both; `:q`, `:wq` and `:x` close the editor, and refuse while the other has unsaved changes, as vim does with a hidden buffer. Opened on a project, only the project's is there.
 - **A note changed meanwhile isn't saved over** (an agent ticking a box through `roster note`, say): the save is refused unless you force it, and what you wrote in `$EDITOR` is kept in its file.
 
 ### 3.9 Statistics
@@ -135,7 +137,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - **Roster writes `config.toml` only for a change made in its settings**, and only that setting (taking one out takes its comment with it): the rest of the file stays as written, comments included; what was edited outside meanwhile is kept; and a symlinked file stays where it points. The one other write is the template, when you ask to edit a file that isn't there. Why: the settings should configure everything, and a config kept in git shows what changed.
 - **State** in `$XDG_STATE_HOME/agent-roster/`: the database (SQLite, also keeping what the agents spent, §3.13), the files roster makes for itself (the generated tmux config, pi's extension, notes being edited, the TUI's lock), and the chats' directory. An older database is migrated when opened; a newer one is refused.
 - **Uninstalling**: the binary, both directories, and roster's tmux server.
-- **Several processes**: reports are stored as events, which every roster process folds into sessions; roster's own changes fold pending events first, so an older event can't undo them. A save writes only what it changed, so nothing reverts what another process saved meanwhile. Where you and a process may both write the same thing (a note, a generated title), the write happens only if it's still what it was.
+- **Several processes**: reports are stored as events, which every roster process folds into sessions; roster's own changes fold pending events first, so an older event can't undo them. A save writes only what it changed, so nothing reverts what another process saved meanwhile. Where you and a process may both write the same thing (a note, a generated title), the write happens only if it's still what it was. A removed project's id is never given to another, so what was opened on it (its note, in an editor) can't be saved onto a project added since.
 
 ## 5. TUI
 - **Layout**: a narrow sidebar with a summary of what waits ("2 need input · 1 working"), the list, and, once known, a line with what's left of the agents' accounts' limits (each agent's windows, shortest first, each with its pace's mark, by the agent's mark where names don't fit; it can be turned off); the preview on the right; the footer below. No boxes around them, only a line between them; popups, forms and the note editor are boxed.

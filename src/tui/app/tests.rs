@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::Keys;
 use crate::model::tests::session;
+use crate::note::Whose;
 use ratatui::crossterm::event::KeyModifiers;
 
 fn project(id: i64, name: &str) -> Project {
@@ -11,6 +12,7 @@ fn project(id: i64, name: &str) -> Project {
         agent: None,
         model: None,
         effort: None,
+        note: None,
     }
 }
 
@@ -857,14 +859,17 @@ fn s_o_opens_the_note_and_its_keys_go_to_it() {
     keys(&mut app, ":wq");
     assert_eq!(
         app.on_key(key(KeyCode::Enter)),
-        Some(Op::SaveNote {
-            id: "s1".into(),
-            text: "sq".into(),
-            pin: None,
+        Some(Op::SaveNotes {
+            saves: vec![op::NoteSave {
+                whose: Whose::Session("s1".into()),
+                label: "alpha/s-s1".into(),
+                text: "sq".into(),
+                pin: None,
+                // Over the note it was opened on (none), and only that.
+                base: None,
+                force: false,
+            }],
             close: true,
-            // Over the note it was opened on (none), and only that.
-            base: None,
-            force: false,
         })
     );
     // :q! closes, and the list has its keys back.
@@ -876,22 +881,86 @@ fn s_o_opens_the_note_and_its_keys_go_to_it() {
 }
 
 #[test]
+fn a_projects_note_opens_beside_its_sessions_as_a_buffer() {
+    let mut app = app();
+    app.projects[0].note = Some(crate::note::Note {
+        text: "backlog".into(),
+        pin: None,
+        at: 0,
+    });
+    select(&mut app, "s1");
+    let enter = |app: &mut App, command: &str| {
+        keys(app, command);
+        app.on_key(key(KeyCode::Enter))
+    };
+    let shown = |app: &App| app.note.as_ref().map(|n| n.shown().whose.clone());
+    // p o: the project's; ] the session's, [ back (the project's is on the
+    // left in the preview), each keeping its changes.
+    keys(&mut app, "po");
+    assert_eq!(shown(&app), Some(Whose::Project(1)));
+    assert_eq!(app.note.as_ref().unwrap().shown().text(), "backlog");
+    keys(&mut app, "A!");
+    app.on_key(key(KeyCode::Esc));
+    keys(&mut app, "]");
+    assert_eq!(shown(&app), Some(Whose::Session("s1".into())));
+    keys(&mut app, "[");
+    assert_eq!(app.note.as_ref().unwrap().shown().text(), "backlog!");
+    // With the project's changed, the session's :q and :wq don't close.
+    keys(&mut app, "]");
+    assert_eq!(enter(&mut app, ":q"), None);
+    assert!(
+        app.message()
+            .is_some_and(|m| m.error && m.text.contains(":wqa"))
+    );
+    assert_eq!(enter(&mut app, ":qa"), None);
+    assert!(app.note.is_some());
+    // :wqa saves what has changes, the shown note first, and closes.
+    keys(&mut app, "Ax");
+    app.on_key(key(KeyCode::Esc));
+    let Some(Op::SaveNotes { saves, close: true }) = enter(&mut app, ":wqa") else {
+        panic!("not saved");
+    };
+    let saved: Vec<(&Whose, &str)> = saves.iter().map(|s| (&s.whose, s.text.as_str())).collect();
+    assert_eq!(
+        saved,
+        [
+            (&Whose::Session("s1".into()), "x"),
+            (&Whose::Project(1), "backlog!")
+        ]
+    );
+    // :qa! leaves both.
+    assert_eq!(enter(&mut app, ":qa!"), None);
+    assert!(app.note.is_none());
+    // Opened on a project, it's alone: ] says so; :wqa with nothing new
+    // closes.
+    keys(&mut app, "vp");
+    keys(&mut app, "o");
+    assert_eq!(shown(&app), Some(Whose::Project(1)));
+    keys(&mut app, "]");
+    assert!(app.message().is_some_and(|m| m.error));
+    assert_eq!(enter(&mut app, ":wqa"), None);
+    assert!(app.note.is_none());
+}
+
+#[test]
 fn notes_open_in_editor_if_set_and_archived_sessions_have_them_too() {
     let mut app = app();
     select(&mut app, "s1");
     let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
     keys(&mut app, "so");
-    assert_eq!(app.on_key(ctrl_g), Some(Op::EditNote("s1".into())));
+    let of = |id: &str| Some(Op::EditNote(Whose::Session(id.into())));
+    assert_eq!(app.on_key(ctrl_g), of("s1"));
     keys(&mut app, ":q");
     app.on_key(key(KeyCode::Enter));
     app.notes.editor = Some(crate::config::NoteEditor::External);
-    assert_eq!(keys(&mut app, "so"), Some(Op::EditNote("s1".into())));
+    assert_eq!(keys(&mut app, "so"), of("s1"));
+    assert_eq!(keys(&mut app, "po"), Some(Op::EditNote(Whose::Project(1))));
     assert!(app.note.is_none());
     // Archived: under the folded shelf, opened.
     app.folded.clear();
     app.rebuild();
     select(&mut app, "s3");
-    assert_eq!(keys(&mut app, "so"), Some(Op::EditNote("s3".into())));
+    assert_eq!(keys(&mut app, "so"), of("s3"));
     // Deleting it for good says the note goes too.
     app.sessions.iter_mut().find(|s| s.id == "s3").unwrap().note = Some(crate::note::Note {
         text: "why".into(),

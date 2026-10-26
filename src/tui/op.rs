@@ -43,20 +43,14 @@ pub enum Op {
         effort: Option<Option<String>>,
     },
     RetitleSession(String),
-    /// A session's note as written (all blank: none), then the editor closed
-    /// or left open.
-    SaveNote {
-        id: String,
-        text: String,
-        pin: Option<usize>,
+    /// Notes as written, in turn, then the editor closed if all were saved
+    /// and `close`, else left open.
+    SaveNotes {
+        saves: Vec<NoteSave>,
         close: bool,
-        /// The note the editor was opened on, which this replaces (unless
-        /// `force`d, not another saved meanwhile).
-        base: Option<crate::note::Note>,
-        force: bool,
     },
-    /// A session's note in `$EDITOR`: the open editor's text, or the saved note.
-    EditNote(String),
+    /// A note in `$EDITOR`: the open editor's text, or the saved note.
+    EditNote(crate::note::Whose),
     /// Make sure the chats project exists, then open the new-chat form.
     NewChat,
     /// Look for conversations to adopt, then pick one.
@@ -91,4 +85,18 @@ pub enum Op {
     RemoveProject(String),
     KillOrphans,
     Quit,
+}
+
+/// A note as written in the editor (all blank: none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NoteSave {
+    pub whose: crate::note::Whose,
+    /// "api/fix", "project api", to say what was saved.
+    pub label: String,
+    pub text: String,
+    pub pin: Option<usize>,
+    /// The note the editor was opened on, which this replaces (unless
+    /// `force`d, not another saved meanwhile).
+    pub base: Option<crate::note::Note>,
+    pub force: bool,
 }

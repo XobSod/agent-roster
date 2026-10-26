@@ -21,8 +21,8 @@ pub use texts::screen_tail;
 use super::form::{self, Form, Outcome};
 use super::input;
 use super::list::{self, Entry, EntryKey, Group, Shelf};
-use super::note::{self, NoteEditor};
-use super::op::Op;
+use super::note::{self, NoteEditor, OpenNotes, Side};
+use super::op::{self, Op};
 use super::picker::{Picked, Picker};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
@@ -164,8 +164,9 @@ pub struct App {
     pub capturing: Option<settings::Capture>,
     /// Oldest or newest first, per shelf (config.toml).
     pub order: crate::config::Order,
-    /// A session's note, open to read and write; keys go to it.
-    pub note: Option<NoteEditor>,
+    /// A session's note and its project's, open to read and write; keys go
+    /// to the one shown.
+    pub note: Option<OpenNotes>,
     /// Titles being made (`s t`), by session: each its agent's answer to
     /// come, on a thread of its own.
     pub titling: Vec<Titling>,
@@ -519,22 +520,69 @@ impl App {
 
     /// The note editor's keys; what it asks for.
     fn on_note_key(&mut self, e: KeyEvent) -> Option<Op> {
-        let editor = self.note.as_mut()?;
-        match editor.on_key(e) {
+        let open = self.note.as_mut()?;
+        let save = |editor: &NoteEditor, force| op::NoteSave {
+            whose: editor.whose.clone(),
+            label: editor.label.clone(),
+            text: editor.text(),
+            pin: editor.pin,
+            base: editor.base.clone(),
+            force,
+        };
+        // As vim, closing leaves no changes in a note not shown.
+        let unsaved = |open: &OpenNotes| {
+            let (key, whose) = match open.side() {
+                Side::Session => ("[", "project's"),
+                Side::Project => ("]", "session's"),
+            };
+            format!(
+                "The {whose} note has unsaved changes: {key} shows it, :wqa saves both, :qa! leaves them"
+            )
+        };
+        let other_dirty = open.other().is_some_and(|e| e.dirty());
+        match open.shown_mut().on_key(e) {
             note::Outcome::None => None,
-            note::Outcome::Save { close, force } => Some(Op::SaveNote {
-                id: editor.session.clone(),
-                text: editor.text(),
-                pin: editor.pin,
+            note::Outcome::Save {
+                all: false,
                 close,
-                base: editor.base.clone(),
                 force,
-            }),
-            note::Outcome::Close => {
-                self.note = None;
+            } => {
+                if close && other_dirty {
+                    let why = unsaved(open);
+                    self.fail(why);
+                    return None;
+                }
+                let saves = vec![save(open.shown(), force)];
+                Some(Op::SaveNotes { saves, close })
+            }
+            note::Outcome::Save {
+                all: true,
+                close,
+                force,
+            } => {
+                let saves: Vec<op::NoteSave> =
+                    open.dirty().into_iter().map(|e| save(e, force)).collect();
+                match (saves.is_empty(), close) {
+                    (false, _) => return Some(Op::SaveNotes { saves, close }),
+                    (true, true) => self.note = None,
+                    (true, false) => self.flash("Nothing new to save"),
+                }
                 None
             }
-            note::Outcome::External => Some(Op::EditNote(editor.session.clone())),
+            note::Outcome::Close { all } => {
+                if !all && other_dirty {
+                    let why = unsaved(open);
+                    self.fail(why);
+                } else {
+                    self.note = None;
+                }
+                None
+            }
+            note::Outcome::Show(side) => {
+                self.show_note(side);
+                None
+            }
+            note::Outcome::External => Some(Op::EditNote(open.shown().whose.clone())),
             note::Outcome::Fail(why) => {
                 self.fail(why);
                 None
@@ -543,6 +591,38 @@ impl App {
                 self.flash(what);
                 None
             }
+        }
+    }
+
+    /// `[` or `]` in the editor: the project's note or the session's, opened
+    /// from what roster last read if it isn't open yet.
+    fn show_note(&mut self, side: Side) {
+        let Some(open) = &self.note else {
+            return;
+        };
+        let noted = match side {
+            _ if open.get(side).is_some() => None,
+            Side::Session => match &open.session {
+                Some(id) => self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == *id)
+                    .map(Session::noted),
+                None => {
+                    self.fail("Opened on a project: there's no session's note here");
+                    return;
+                }
+            },
+            Side::Project => self.project(open.project).map(Project::noted),
+        };
+        let escape = self.notes.escape();
+        let Some(open) = self.note.as_mut() else {
+            return;
+        };
+        match noted {
+            Some(noted) => open.show(side, || NoteEditor::new(&noted, escape)),
+            None if open.get(side).is_some() => open.show(side, || unreachable!()),
+            None => self.fail("It's gone meanwhile"),
         }
     }
 

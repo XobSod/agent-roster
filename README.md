@@ -57,7 +57,7 @@ Everything else is in three menus, which pop up their keys:
 | Menu | Keys |
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
-| `p` project | `n` new · `e` edit · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
+| `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `g` group by project · `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
@@ -98,13 +98,26 @@ unsaved changes, which `:q!` and `ZQ` leave. A note saved meanwhile by something
 (`roster note`, an agent using it) isn't saved over: `:w!` (`:wq!`, `:x!`) does that;
 in `$EDITOR`, what you wrote is kept in its file instead, and roster says where. `Esc` doesn't close it, so pressing it once
 too often is harmless; `escape = "jk"` under `[notes]` makes `jk` typed quickly leave
-insert mode too. `mm` pins the cursor's line (`▸`; again there unpins it): above the
-agent's screen the preview shows the pinned line and the one below, so a to-do list
+insert mode too. `mm` pins the cursor's line (`✎`; again there unpins it): above the
+agent's screen the preview shows the pinned line and the one below (`lines` under
+`[notes]` shows more, or only the one), so a to-do list
 shows where you are in it (with no pin, the note's first lines). The pin follows its
 line as you edit. Ctrl+G hands the note to `$VISUAL` or `$EDITOR` and back; with
 `editor = "external"` under `[notes]`, `s o` opens it there. A note stays through
 stops, restarts and archiving, and goes only when its session is deleted for good;
 `✎` marks sessions with one.
+
+Each project can have a note too, for what outlives its sessions: a backlog, what to
+remember there. `p o` opens it, in the same editor (in the projects view, `o`). Its
+pinned lines show beside those of a session's note, on the left, by `▤` where the
+session's are by `✎` (on a narrow preview, above them); a note that isn't there takes
+no room. With a session selected, `p o` opens beside its note: in the editor `[` shows
+the project's and `]` the session's, as the preview has them, left and right. Each
+keeps what you changed while the other shows, as vim's buffers do: `:wa` saves both,
+`:wqa` (`:xa`) saves both and closes, `:qa!` closes leaving both; `:q`, `:wq` and `:x`
+don't close while the other has unsaved changes. In the editor too, the pinned line is
+marked `▤` in the project's note. `▤` marks projects with a note on their headings and
+in the projects view. It goes when the project is removed.
 
 `v u` shows what's left of your Claude and Codex accounts' limits: the 5-hour and the
 weekly window, each as a bar, full while none of it is used and shrinking as you use
@@ -147,6 +160,8 @@ roster info api                         # created, prompts, time worked, context
 roster note api                         # print its note; --edit opens it in $EDITOR
 roster note api --append "- [ ] check the fork path"   # --set replaces it ("-": from stdin), --clear removes it
 roster note api --pin 3                 # the line the preview shows, with the one below; --unpin
+roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
+roster note api --project               # api's project's; inside an agent, --project alone is its own's
 roster adopt --list                     # Claude, pi and Codex conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
@@ -196,12 +211,13 @@ All files are optional and live in `~/.config/agent-roster/`:
     height by a row on their next attach.
   - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
     Codex accounts have used of their limits (`v u` still shows it).
-  - `[notes]`: `editor`, where `s o` opens a session's note: `"builtin"` (default),
+  - `[notes]`: `editor`, where `s o` and `p o` open a note: `"builtin"` (default),
     roster's own editor with vim's keys, or `"external"`, `$VISUAL` or `$EDITOR`;
     `escape`, keys that leave insert mode when typed quickly, as vim's `inoremap jk
     <Esc>` (`"jk"`, say; none by default), held back meanwhile; `escape_ms`, how
     quickly: at most this many milliseconds from one to the next (default 300). Typed
-    slower, they're just text.
+    slower, they're just text. `lines`, how many of each note's lines the preview
+    shows, from the pinned one (default 2, at most 10).
   - `fit_preview`: agents drawing full screen (in the terminal's alternate screen, as
     Claude Code's fullscreen renderer does) are sized to the preview while you're not
     attached, so it shows all of their screen; `"never"` turns that off, also per agent
@@ -252,6 +268,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     remove = "d"
     filter = "f"              # show only this project's sessions
     list = "l"                # the projects view
+    note = "o"                # the project's note, to read and write
 
     [keys.view]
     menu = "v"

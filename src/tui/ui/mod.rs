@@ -106,7 +106,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         width: area.width.saturating_sub(1),
         ..area
     };
-    let [head, stats, _, body] = Layout::vertical([
+    let [head, stats, gap, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -131,32 +131,45 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         );
     }
     // The bottom of an agent's screen is where its prompt is; long lines are cut
-    // (agents drawing full screen get this size, so theirs fit). A note takes
+    // (agents drawing full screen get this size, so theirs fit). Notes take
     // rows off its top, so selecting one doesn't resize the agents.
     app.preview.size.set(Some((body.width, body.height)));
-    let note = app
-        .selected_session()
-        .and_then(|s| s.note.as_ref())
-        .filter(|_| app.preview.screen);
-    let screen = if let Some(editor) = &app.note {
-        let height = editor_height(editor, body.width, body.height);
-        let [top, rest] =
-            Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(body);
-        draw_note_editor(f, editor, top);
-        rest
-    } else if let Some(note) = note {
-        let band = note_band(note, body.width as usize);
-        let [top, rule, rest] = Layout::vertical([
-            Constraint::Length(band.len() as u16),
-            Constraint::Length(1),
+    // The notes' pinned lines, from the row above it, which is otherwise
+    // blank; a stopped session's own shows whole in its panel.
+    let (project, session) = match app.selected_entry() {
+        Some(Entry::Card(s) | Entry::Row(s)) => (
+            app.project(s.project_id).and_then(|p| p.note.as_ref()),
+            s.note.as_ref().filter(|_| app.preview.screen),
+        ),
+        Some(Entry::Heading {
+            group: Group::Project(id),
+            ..
+        }) => (app.project(*id).and_then(|p| p.note.as_ref()), None),
+        _ => (None, None),
+    };
+    let band = note_bands(project, session, body.width as usize, app.notes.lines());
+    // The editor, or the notes' box, from the blank row above the screen, as
+    // the one replaces the other.
+    let above = |rows: u16| {
+        let top = Rect {
+            y: gap.y,
+            height: rows.min(body.bottom() - gap.y),
+            ..body
+        };
+        let [_, rest] = Layout::vertical([
+            Constraint::Length(rows.saturating_sub(1)),
             Constraint::Min(0),
         ])
         .areas(body);
+        (top, rest)
+    };
+    let screen = if let Some(open) = &app.note {
+        let (top, rest) = above(editor_height(open.shown(), body.width, body.height));
+        draw_note_editor(f, open, top);
+        rest
+    } else if !band.is_empty() {
+        let (top, rest) = above(band.len() as u16);
         f.render_widget(Paragraph::new(band), top);
-        f.render_widget(
-            Line::styled("─".repeat(rule.width as usize), Style::new().fg(FAINT)),
-            rule,
-        );
         rest
     } else {
         body

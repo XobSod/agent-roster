@@ -320,7 +320,7 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
 
     // Written in the editor under the header, the agent's screen still below.
     term.keys(&["s", "o"]);
-    term.wait_for("the editor", "╭ Note ");
+    term.wait_for("the editor", "╭ ✎ demo/one ");
     term.keys(&["i"]);
     term.wait_for("insert mode", " INSERT ");
     term.text("TODO");
@@ -343,13 +343,13 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     );
     term.wait_for("normal mode, still open", " NORMAL ");
     assert!(term.screen().contains("fake agent:"), "{}", term.screen());
-    term.wait_for("unsaved changes", "Note [+]");
+    term.wait_for("unsaved changes", "✎ demo/one [+]");
     // Pinned on its first item, saved and closed.
     term.keys(&["k", "m", "m"]);
-    term.wait_for("the pin", "▸ - [ ] first");
+    term.wait_for("the pin, by the note's mark", "│✎ - [ ] first");
     term.keys(&[":", "w", "q", "Enter"]);
     term.wait_for("the save", "Saved the note of demo/one");
-    term.wait_for_gone("the editor closed", "╭ Note ");
+    term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
     term.wait_for("the pinned lines above the screen", "✎ - [ ] first");
     term.wait_for("where they are in the note", "2–3 of 3");
     assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
@@ -358,7 +358,7 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     // Saved by another meanwhile (an agent, through `roster note`): :w says
     // so and saves nothing; :w! saves yours over it.
     term.keys(&["s", "o"]);
-    term.wait_for("the editor again", "╭ Note ");
+    term.wait_for("the editor again", "╭ ✎ demo/one ");
     t.ok(&["note", "one", "--append", "from an agent"]);
     term.keys(&["m", "m", ":", "w", "Enter"]);
     term.wait_for("the refusal", "changed since you opened it");
@@ -368,18 +368,49 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     assert!(!t.ok(&["note", "one"]).contains("from an agent"));
     // Saved now, it's what the next save replaces: no refusal.
     term.keys(&["m", "m", ":", "w", "q", "Enter"]);
-    term.wait_for_gone("the editor closed", "╭ Note ");
+    term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
 
     // Ctrl+G: to $EDITOR and back into the editor, unsaved until :w.
     term.keys(&["s", "o", "C-g"]);
     term.wait_for("the text back from $EDITOR", "second, done");
-    term.wait_for("unsaved", "Note [+]");
+    term.wait_for("unsaved", "✎ demo/one [+]");
     term.keys(&[":", "x", "Enter"]);
-    term.wait_for_gone("the editor closed", "╭ Note ");
+    term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
     assert_eq!(
         t.ok(&["note", "one"]),
         "TODO\n- [ ] first\n- [ ] second, done\n"
+    );
+
+    // The project's note: p o, then [ and ] between it and the session's,
+    // each keeping its changes, which :q doesn't leave; :wqa saves both.
+    t.ok(&["note", "--project", "demo", "--set", "backlog"]);
+    term.wait_for("its line above the session's", "▤ backlog");
+    term.keys(&["p", "o"]);
+    term.wait_for("the project's note", "╭ ▤ project demo ");
+    term.wait_for("the session's to show", "] ✎ session");
+    term.keys(&["A"]);
+    term.text("!");
+    term.keys(&["Escape", "]"]);
+    term.wait_for("the session's, the project's unsaved", "▤ project [+]");
+    term.keys(&[":", "q", "Enter"]);
+    term.wait_for("the refusal", "The project's note has unsaved changes");
+    term.keys(&["G", "o"]);
+    term.text("- [ ] third");
+    term.keys(&["Escape", ":", "w", "q", "a", "Enter"]);
+    term.wait_for(
+        "both saved",
+        "Saved the note of demo/one; Saved the note of project demo",
+    );
+    term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
+    // Stacked above the screen, the project's first, by their marks.
+    term.wait_for("the project's line", "▤ backlog!");
+    term.wait_for("the session's", "✎ - [ ] first");
+    term.wait_for("where they are in the session's", "2–3 of 4");
+    assert_eq!(t.ok(&["note", "--project", "demo"]), "backlog!\n");
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first\n- [ ] second, done\n- [ ] third\n"
     );
 
     // With notes.editor = "external", s o is $EDITOR, saved when it exits.
@@ -389,9 +420,14 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     term.wait_for("the save", "Saved the note of demo/one");
     assert_eq!(
         t.ok(&["note", "one"]),
-        "TODO\n- [ ] first\n- [ ] second, done, done\n"
+        "TODO\n- [ ] first\n- [ ] second, done, done\n- [ ] third\n"
     );
-    assert!(!term.screen().contains("╭ Note "));
+    assert!(!term.screen().contains("╭ ✎ demo/one "));
+    term.keys(&["p", "o"]);
+    term.wait_for(
+        "the project's, as it was",
+        "The note of project demo is unchanged",
+    );
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
 }
 

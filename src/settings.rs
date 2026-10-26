@@ -344,6 +344,8 @@ pub enum Kind {
     Seconds,
     /// A whole number of milliseconds, at least 1.
     Millis,
+    /// A whole number of lines.
+    Lines,
     /// TUI keys: one, several, or none.
     Keys,
     /// A tmux key (the back key while attached).
@@ -510,8 +512,10 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         editor,
         escape,
         escape_ms,
+        lines,
     } = notes;
     let ms = escape_ms.unwrap_or(crate::config::ESCAPE_MS);
+    let lines = lines.unwrap_or(crate::config::NOTE_LINES);
     let notes = Section {
         title: "Notes".into(),
         agent: None,
@@ -524,7 +528,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                     NoteEditor::Builtin => "builtin",
                     NoteEditor::External => "external",
                 },
-                "where a session's note opens: roster's own editor, with vim's keys, or $VISUAL / $EDITOR",
+                "where a session's or a project's note opens: roster's own editor, with vim's keys, or $VISUAL / $EDITOR",
             ),
             Setting {
                 placeholder: Some("\"<keys>\"".into()),
@@ -541,6 +545,19 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 format!("{ms} ms"),
                 ms.to_string(),
                 "how quickly: at most this many milliseconds from one of those keys to the next",
+            ),
+            make(
+                &["notes", "lines"],
+                Kind::Lines,
+                match lines {
+                    1 => "1 line".into(),
+                    n => format!("{n} lines"),
+                },
+                lines.to_string(),
+                &format!(
+                    "how many of each note's lines the preview shows, from the pinned one (1 to {})",
+                    crate::config::MAX_NOTE_LINES
+                ),
             ),
         ],
     };
@@ -773,6 +790,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         remove,
         filter,
         list,
+        note,
     } = project;
     let pk =
         |name: &str, list: &KeyList, doc: &str| keys_setting(&["keys", "project", name], list, doc);
@@ -787,6 +805,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             pk("remove", remove, "remove"),
             pk("filter", filter, "show only this project's sessions"),
             pk("list", list, "the projects view"),
+            pk("note", note, "the project's note, to read and write"),
         ],
     });
     let ViewKeys {
@@ -903,6 +922,15 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
                 .parse()
                 .with_context(|| format!("{input:?} isn't a number of milliseconds"))?;
             toml_edit::value(ms)
+        }
+        Kind::Lines => {
+            let lines: i64 = input
+                .trim_end_matches("lines")
+                .trim_end_matches("line")
+                .trim()
+                .parse()
+                .with_context(|| format!("{input:?} isn't a number of lines"))?;
+            toml_edit::value(lines)
         }
         Kind::Words => Item::Value(Value::Array(split_words(input)?.into_iter().collect())),
         Kind::Keys => {

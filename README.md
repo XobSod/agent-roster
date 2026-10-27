@@ -108,8 +108,14 @@ output tokens (its subagents' too), cost and lines changed.
 
 Each session can have a note, what's left to do in it, say. `s o` opens it under the
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
-insert and visual mode, motions, `C`, `r` (`rx` ticks a box, `.` the next), `ciw` and
-the like, `xp` and `ddp`, `/` search, `u`, `.` (no counts). `:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
+insert and visual mode, motions (words of any letters), `c`, `d` and `y` with any motion
+(`de`, `y$`, `cj`, `dfx`, `dG`, `dd`) or text object (`ciw`, `daw`, `yi(`, `ca"`, `dap`,
+brackets nested and across lines; `v` too), counts (`3x`, `d2w`, `5G`, `3ifoo`, `3J`),
+`C`, `r` (`rx` ticks a box, `.` the next), `xp` and `ddp`, `/` search, `u`, `.`. Not
+there: `;` and `,`, `~`, `gJ`, `>` and `<`, `.` in visual mode, marks, and a search
+after an operator (`d/x`); `%` takes no count, and a word object's stops at its line's
+end.
+`:w` saves; `:wq`, `:x` or `ZZ` save and close; `:q` closes unless there are
 unsaved changes, which `:q!` and `ZQ` leave. A note saved meanwhile by something else
 (`roster note`, an agent using it) isn't saved over: `:w!` (`:wq!`, `:x!`) does that;
 in `$EDITOR`, what you wrote is kept in its file instead, and roster says where. `Esc` doesn't close it, so pressing it once
@@ -132,8 +138,9 @@ the project's and `]` the session's, as the preview has them, left and right. Ea
 keeps what you changed while the other shows, as vim's buffers do: `:wa` saves both,
 `:wqa` (`:xa`) saves both and closes, `:qa!` closes leaving both; `:q`, `:wq`, `:x`, `ZZ`
 and `ZQ` don't close while the other has unsaved changes (`:wq`, `:x` and `ZZ` save the
-one shown first, as vim does). A line yanked in one puts in the other: they share one
-register, as vim's buffers do. In the editor too, the pinned line is
+one shown first, as vim does). A line yanked in one puts in the other, and `.` repeats
+there what you did in this one: they share one register and one `.`, as vim's buffers
+do. In the editor too, the pinned line is
 marked `▤` in the project's note. `▤` after a project's name marks it having a note,
 on cards and headings and in the projects view. It goes when the project is removed.
 

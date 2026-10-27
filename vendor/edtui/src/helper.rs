@@ -24,10 +24,60 @@ pub(crate) fn insert_char(lines: &mut Lines, index: &mut Index2, ch: char, skip_
     }
 }
 
+/// The characters from `start` up to `end`, `end` left out, a line break
+/// between lines: a position can be a line's end, after its last character,
+/// so `end` there leaves the line break out and the next line's start takes
+/// it in. Added by roster.
+pub(crate) fn copy_chars(lines: &Lines, start: Index2, end: Index2) -> String {
+    let row = |at: usize| lines.get(RowIndex::new(at)).map_or(&[][..], Vec::as_slice);
+    let mut text = String::new();
+    for at in start.row..=end.row {
+        let chars = row(at);
+        let from = if at == start.row {
+            start.col.min(chars.len())
+        } else {
+            0
+        };
+        let to = if at == end.row {
+            end.col.min(chars.len())
+        } else {
+            chars.len()
+        };
+        text.extend(&chars[from..to.max(from)]);
+        if at < end.row {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// Takes the characters from `start` up to `end` out (`copy_chars`'), what's
+/// left of their lines joined. Added by roster.
+pub(crate) fn cut_chars(lines: &mut Lines, start: Index2, end: Index2) -> String {
+    let text = copy_chars(lines, start, end);
+    let rest = lines
+        .get(RowIndex::new(end.row))
+        .map(|row| row[end.col.min(row.len())..].to_vec())
+        .unwrap_or_default();
+    for _ in start.row..end.row {
+        if start.row + 1 < lines.len() {
+            lines.remove(RowIndex::new(start.row + 1));
+        }
+    }
+    if let Some(first) = lines.get_mut(RowIndex::new(start.row)) {
+        first.truncate(start.col);
+        first.extend(rest);
+    }
+    text
+}
+
 /// Inserts a string into the lines data at the given `index`.
 pub(crate) fn insert_str(lines: &mut Lines, index: &mut Index2, text: &str) {
+    // The last character's, not the last byte's (roster's fix: a put of
+    // `ż` left the cursor past it).
+    let last = text.chars().count().saturating_sub(1);
     for (i, ch) in text.chars().enumerate() {
-        let is_last = i == text.len().saturating_sub(1);
+        let is_last = i == last;
         insert_char(lines, index, ch, is_last);
     }
 }

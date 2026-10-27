@@ -58,10 +58,29 @@ pub struct EditorState {
     /// Text typed in the current insert session.
     pub(crate) insert_recording: Option<String>,
 
+    /// Whether the action just done failed, as vim's do with a beep (no
+    /// such text object, `f` finding nothing): `.` doesn't take it. Added by
+    /// roster.
+    pub(crate) failed: bool,
+
+    /// How many more times what's typed in the insert session is typed on
+    /// leaving it, and whether on new lines (`3ifoo`, `2o`). Added by roster.
+    pub(crate) insert_count: Option<(usize, bool)>,
+
+    /// Where the insert session begun outside insert mode began, while it
+    /// lasts: its one undo point holds all that's typed in it, Backspace
+    /// too, and Ctrl+W stops there once. Added by roster.
+    pub(crate) insert_start: Option<Index2>,
+
     /// Flag indicating a system editor was requested.
     #[cfg(feature = "system-editor")]
     pub(crate) system_edit_requested: bool,
 }
+
+/// What `.` repeats: a change, and the text typed in it (`EditorState::
+/// last_change`).
+#[derive(Clone, Debug, Default)]
+pub struct LastChange(Option<Action>, Option<String>);
 
 impl Default for EditorState {
     /// Creates a default `EditorState` with no text.
@@ -96,6 +115,9 @@ impl EditorState {
             last_change: None,
             last_insert: None,
             insert_recording: None,
+            failed: false,
+            insert_count: None,
+            insert_start: None,
             #[cfg(feature = "system-editor")]
             system_edit_requested: false,
         }
@@ -118,7 +140,15 @@ impl EditorState {
     /// Executes an action, recording it for the dot-repeat command.
     pub(crate) fn execute_recorded(&mut self, mut action: Action) {
         let mode_before = self.mode;
+        self.failed = false;
+        if mode_before != EditorMode::Insert {
+            self.insert_count = None;
+        }
         action.execute(self);
+
+        if mode_before != EditorMode::Insert && self.mode == EditorMode::Insert {
+            self.insert_start = Some(self.cursor);
+        }
 
         // Inside an insert session, keep capturing until it ends.
         if mode_before == EditorMode::Insert {
@@ -128,13 +158,30 @@ impl EditorState {
             return;
         }
 
-        // Remember repeatable changes started from normal mode.
+        // Remember repeatable changes started from normal mode, done.
+        if self.failed {
+            return;
+        }
         if mode_before == EditorMode::Normal && action.is_repeatable() {
             self.last_change = Some(action);
             self.last_insert = None;
             // If the change opened insert mode, start capturing typed text.
             self.insert_recording = (self.mode == EditorMode::Insert).then(String::new);
         }
+    }
+
+    /// The last change and what was typed in it, which `.` repeats: for
+    /// another editor to take, as vim's `.` is one for its buffers. Added
+    /// by roster.
+    #[must_use]
+    pub fn last_change(&self) -> LastChange {
+        LastChange(self.last_change.clone(), self.last_insert.clone())
+    }
+
+    /// What `.` repeats from now on (`last_change`'s).
+    pub fn set_last_change(&mut self, change: LastChange) {
+        self.last_change = change.0;
+        self.last_insert = change.1;
     }
 
     /// Set a custom clipboard.

@@ -30,7 +30,15 @@ impl Stack {
         }
     }
 
-    fn len(&mut self) -> usize {
+    /// Of what was pushed since it held `len`, keeps only the first: one
+    /// undo step for several changes.
+    pub(crate) fn squash_since(&mut self, len: usize) {
+        if self.inner.len() > len + 1 {
+            self.inner.truncate(len + 1);
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
         self.inner.len()
     }
 

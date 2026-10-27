@@ -1,21 +1,35 @@
 use std::cmp::min;
 
-use crate::{
-    helper::{find_matching_bracket, skip_empty_lines},
-    state::selection::set_selection_with_lines,
-};
+use crate::{helper::find_matching_bracket, state::selection::set_selection_with_lines};
 use jagged::Index2;
 
-use super::Execute;
+use super::{word, Execute, MotionKind};
 use crate::{
-    helper::{max_col, max_col_normal, skip_whitespace, skip_whitespace_rev},
-    EditorMode, EditorState,
+    helper::{max_col, max_col_normal, skip_whitespace},
+    EditorMode, EditorState, Lines,
 };
 
 #[derive(Clone, Debug, Copy)]
 pub struct MoveForward(pub usize);
 
 impl Execute for MoveForward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    /// Past the line's last character too (`dl` there takes it); on an
+    /// empty line, nowhere (`cl` there goes into insert mode).
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        let len = state.lines.len_col(state.cursor.row).unwrap_or(0);
+        state.cursor.col = (state.cursor.col + self.0).min(len);
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         for _ in 0..self.0 {
             if state.cursor.col >= max_col(&state.lines, &state.cursor, state.mode) {
@@ -33,6 +47,15 @@ impl Execute for MoveForward {
 pub struct MoveBackward(pub usize);
 
 impl Execute for MoveBackward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         for _ in 0..self.0 {
             if state.cursor.col == 0 {
@@ -54,6 +77,22 @@ impl Execute for MoveBackward {
 pub struct MoveUp(pub usize);
 
 impl Execute for MoveUp {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Linewise)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor.row > 0 && {
+            self.execute(state);
+            true
+        }
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         for _ in 0..self.0 {
             if state.cursor.row == 0 {
@@ -71,6 +110,22 @@ impl Execute for MoveUp {
 pub struct MoveDown(pub usize);
 
 impl Execute for MoveDown {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Linewise)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor.row + 1 < state.lines.len() && {
+            self.execute(state);
+            true
+        }
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         for _ in 0..self.0 {
             if state.cursor.row >= state.lines.len().saturating_sub(1) {
@@ -84,162 +139,184 @@ impl Execute for MoveDown {
     }
 }
 
-/// Move one word forward. Breaks on the first character that is not of
-/// the same class as the initial character or breaks on line ending.
-/// Furthermore, after the first break, whitespaces are skipped.
+/// Move one word forward, as vim's `w`: over the word the cursor's on and
+/// the whitespace after it, to an empty line at most. A word is letters,
+/// digits and `_` (in any script), or other marks.
 #[derive(Clone, Debug, Copy)]
 pub struct MoveWordForward(pub usize);
 
 impl Execute for MoveWordForward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    /// The last word to its line's end at most (`dw` of a line's last
+    /// word leaves the line break).
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor = word::forward(&state.lines, state.cursor, self.0, false, true).0;
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        if state.lines.is_empty() {
-            return;
-        }
-
-        state.clamp_column();
-
-        for _ in 0..self.0 {
-            move_word_forward(state);
-        }
-
-        if state.mode == EditorMode::Visual {
-            set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
-        }
+        let n = self.0;
+        by_words(state, |lines, at| {
+            word::forward(lines, at, n, false, false).0
+        });
     }
 }
 
-fn move_word_forward(state: &mut EditorState) {
-    let start_char_class = CharacterClass::from(state.lines.get(state.cursor));
+/// Move one WORD forward, as vim's `W`: a WORD is anything but whitespace.
+/// Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct MoveBigWordForward(pub usize);
 
-    let start_index = match (
-        state.lines.is_last_col(state.cursor),
-        state.lines.is_last_row(state.cursor),
-    ) {
-        (true, true) => return,
-        (true, false) => {
-            state.cursor = Index2::new(state.cursor.row.saturating_add(1), 0);
-            return;
-        }
-        _ => Index2::new(state.cursor.row, state.cursor.col.saturating_add(1)),
-    };
-
-    for (next_char, index) in state.lines.iter().from(start_index) {
-        if CharacterClass::from(next_char) != start_char_class {
-            state.cursor = index;
-            skip_whitespace(&state.lines, &mut state.cursor);
-            return;
-        }
+impl Execute for MoveBigWordForward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
     }
 
-    let max_col = max_col(&state.lines, &state.cursor, state.mode);
-    state.cursor = Index2::new(state.cursor.row, max_col);
+    /// The last word to its line's end at most (`dw` of a line's last
+    /// word leaves the line break).
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor = word::forward(&state.lines, state.cursor, self.0, true, true).0;
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let n = self.0;
+        by_words(state, |lines, at| {
+            word::forward(lines, at, n, true, false).0
+        });
+    }
 }
 
-/// Move one word forward to the end of the word.
+/// Move to the end of the word, or the next one's if it's there, as vim's
+/// `e`.
 #[derive(Clone, Debug, Copy)]
 pub struct MoveWordForwardToEndOfWord(pub usize);
+
 impl Execute for MoveWordForwardToEndOfWord {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor = word::end(&state.lines, state.cursor, self.0, false, false);
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        if state.lines.is_empty() {
-            return;
-        }
-
-        state.clamp_column();
-
-        for _ in 0..self.0 {
-            move_word_forward_to_end_of_word(state);
-        }
-
-        if state.mode == EditorMode::Visual {
-            set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
-        }
+        let n = self.0;
+        by_words(state, |lines, at| word::end(lines, at, n, false, false));
     }
 }
 
-fn move_word_forward_to_end_of_word(state: &mut EditorState) {
-    let mut start_index = match (
-        state.lines.is_last_col(state.cursor),
-        state.lines.is_last_row(state.cursor),
-    ) {
-        (true, true) => return,
-        (true, false) => Index2::new(state.cursor.row.saturating_add(1), 0),
-        _ => Index2::new(state.cursor.row, state.cursor.col.saturating_add(1)),
-    };
-    skip_empty_lines(&state.lines, &mut start_index.row);
-    skip_whitespace(&state.lines, &mut start_index);
-    let start_char_class = CharacterClass::from(state.lines.get(start_index));
+/// Move to the end of the WORD, as vim's `E`. Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct MoveBigWordForwardToEndOfWord(pub usize);
 
-    for (next_char, index) in state.lines.iter().from(start_index) {
-        // Break loop if characters don't belong to the same class
-        if CharacterClass::from(next_char) != start_char_class {
-            break;
-        }
-        state.cursor = index;
+impl Execute for MoveBigWordForwardToEndOfWord {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
 
-        // Break loop if it reaches the end of the line
-        if state.lines.is_last_col(index) {
-            break;
-        }
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        state.cursor = word::end(&state.lines, state.cursor, self.0, true, false);
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let n = self.0;
+        by_words(state, |lines, at| word::end(lines, at, n, true, false));
     }
 }
 
-/// Move one word forward. Breaks on the first character that is not of
-/// the same class as the initial character or breaks on line starts.
-/// Skips whitespaces if necessary.
+/// Move one word back, to its start, as vim's `b`: over a line's start to
+/// the last word before it, to an empty line at most.
 #[derive(Clone, Debug, Copy)]
 pub struct MoveWordBackward(pub usize);
 
 impl Execute for MoveWordBackward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        let (at, ok) = word::backward(&state.lines, state.cursor, self.0, false);
+        state.cursor = at;
+        ok
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        if state.lines.is_empty() {
-            return;
-        }
-
-        let max_col = max_col(&state.lines, &state.cursor, state.mode);
-        if state.cursor.col > max_col {
-            state.cursor.col = max_col;
-        }
-
-        for _ in 0..self.0 {
-            move_word_backward(state);
-        }
-
-        if state.mode == EditorMode::Visual {
-            set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
-        }
+        let n = self.0;
+        by_words(state, |lines, at| word::backward(lines, at, n, false).0);
     }
 }
 
-fn move_word_backward(state: &mut EditorState) {
-    let mut start_index = state.cursor;
-    if start_index.row == 0 && start_index.col == 0 {
+/// Move one WORD back, as vim's `B`. Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct MoveBigWordBackward(pub usize);
+
+impl Execute for MoveBigWordBackward {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        let (at, ok) = word::backward(&state.lines, state.cursor, self.0, true);
+        state.cursor = at;
+        ok
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let n = self.0;
+        by_words(state, |lines, at| word::backward(lines, at, n, true).0);
+    }
+}
+
+/// Moves the cursor by words, `to` where they go from it, kept on the line
+/// as the mode has it (in normal mode, on a character).
+fn by_words(state: &mut EditorState, to: impl FnOnce(&Lines, Index2) -> Index2) {
+    if state.lines.is_empty() {
         return;
     }
+    state.clamp_column();
+    state.cursor = to(&state.lines, state.cursor);
+    state.clamp_column();
 
-    if start_index.col == 0 {
-        state.cursor.row = start_index.row.saturating_sub(1);
-        state.cursor.col = state.lines.last_col_index(state.cursor.row);
-        return;
+    if state.mode == EditorMode::Visual {
+        set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
     }
-
-    start_index.col = start_index.col.saturating_sub(1);
-    skip_whitespace_rev(&state.lines, &mut start_index);
-    let start_char_class = CharacterClass::from(state.lines.get(start_index));
-
-    for (next_char, i) in state.lines.iter().from(start_index).rev() {
-        // Break loop if it reaches the start of the line
-        if i.col == 0 {
-            start_index = i;
-            break;
-        }
-        // Break loop if characters don't belong to the same class
-        if CharacterClass::from(next_char) != start_char_class {
-            break;
-        }
-        start_index = i;
-    }
-
-    state.cursor = start_index;
 }
 
 // Move the cursor to the start of the line.
@@ -247,6 +324,10 @@ fn move_word_backward(state: &mut EditorState) {
 pub struct MoveToStartOfLine();
 
 impl Execute for MoveToStartOfLine {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         state.cursor.col = 0;
 
@@ -260,6 +341,10 @@ impl Execute for MoveToStartOfLine {
 pub struct MoveToFirst();
 
 impl Execute for MoveToFirst {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         state.cursor.col = 0;
         skip_whitespace(&state.lines, &mut state.cursor);
@@ -270,12 +355,72 @@ impl Execute for MoveToFirst {
     }
 }
 
-// Move the cursor to the end of the line.
+/// Moves the cursor `n - 1` lines down, to that line's first non-blank, as
+/// vim's `_`. Added by roster.
 #[derive(Clone, Debug, Copy)]
-pub struct MoveToEndOfLine();
+pub struct MoveDownToFirst(pub usize);
+
+impl Execute for MoveDownToFirst {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Linewise)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        (self.0 <= 1 || state.cursor.row + 1 < state.lines.len()) && {
+            self.execute(state);
+            true
+        }
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let last = state.lines.len().saturating_sub(1);
+        state.cursor.row = (state.cursor.row + self.0.saturating_sub(1)).min(last);
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
+
+        if state.mode == EditorMode::Visual {
+            set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
+        }
+    }
+}
+
+// Move the cursor to the end of the line; with a count `n`, `n - 1` lines
+// down, as vim's `$` (`2$`), failing on the last line. Count added by
+// roster.
+#[derive(Clone, Debug, Copy)]
+pub struct MoveToEndOfLine(pub usize);
 
 impl Execute for MoveToEndOfLine {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        (self.0 <= 1 || state.cursor.row + 1 < state.lines.len()) && {
+            self.execute(state);
+            true
+        }
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
+        if self.0 > 1 {
+            let last = state.lines.len().saturating_sub(1);
+            if state.cursor.row >= last {
+                state.failed = true;
+                return;
+            }
+            state.cursor.row = (state.cursor.row + self.0 - 1).min(last);
+        }
         state.cursor.col = max_col(&state.lines, &state.cursor, state.mode);
 
         if state.mode == EditorMode::Visual {
@@ -286,11 +431,23 @@ impl Execute for MoveToEndOfLine {
 
 // Move the cursor to the start of the buffer.
 #[derive(Clone, Debug, Copy)]
-pub struct MoveToFirstRow();
+pub struct MoveToFirstRow(pub Option<usize>);
 
 impl Execute for MoveToFirstRow {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Linewise)
+    }
+
+    /// With a count, to that line (`5gg`).
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = Some(n);
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        state.cursor.row = 0;
+        state.cursor.row = to_line(state, self.0).unwrap_or(0);
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
 
         if state.mode == EditorMode::Visual {
             set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
@@ -300,11 +457,31 @@ impl Execute for MoveToFirstRow {
 
 // Move the cursor to the end of the buffer.
 #[derive(Clone, Debug, Copy)]
-pub struct MoveToLastRow();
+pub struct MoveToLastRow(pub Option<usize>);
+
+/// The row of line `n` (counted from 1), the last one past the end.
+fn to_line(state: &EditorState, n: Option<usize>) -> Option<usize> {
+    Some(
+        n?.saturating_sub(1)
+            .min(state.lines.len().saturating_sub(1)),
+    )
+}
 
 impl Execute for MoveToLastRow {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Linewise)
+    }
+
+    /// With a count, to that line (`5G`).
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = Some(n);
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        state.cursor.row = state.lines.len().saturating_sub(1);
+        state.cursor.row = to_line(state, self.0).unwrap_or(state.lines.len().saturating_sub(1));
+        state.cursor.col = 0;
+        skip_whitespace(&state.lines, &mut state.cursor);
 
         if state.mode == EditorMode::Visual {
             set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
@@ -317,6 +494,16 @@ impl Execute for MoveToLastRow {
 pub struct MoveToMatchinBracket();
 
 impl Execute for MoveToMatchinBracket {
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        let from = state.cursor;
+        self.execute(state);
+        state.cursor != from
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         let max_col = max_col_normal(&state.lines, &state.cursor);
         let index = Index2::new(state.cursor.row, state.cursor.col.min(max_col));
@@ -403,27 +590,43 @@ impl Execute for MovePageUp {
     }
 }
 
-/// Move to the next paragraph boundary (Vim `}`).
+/// Move to the next paragraph boundary (Vim `}`); with a count, the `n`th.
 /// A paragraph boundary is the first blank line after a block of non-blank
-/// lines, or the end of the buffer.
+/// lines, or the end of the buffer. Where the buffer ends with some of a
+/// count left, nowhere, as vim's (`2}` in the last paragraph). Count added
+/// by roster.
 #[derive(Clone, Debug, Copy)]
-pub struct MoveParagraphForward();
+pub struct MoveParagraphForward(pub usize);
 
 impl Execute for MoveParagraphForward {
-    fn execute(&mut self, state: &mut EditorState) {
-        let last = state.lines.last_row_index();
-        let mut row = state.cursor.row;
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
 
-        if !state.lines.is_last_row(state.cursor) {
-            while row < last && state.lines.is_empty_row(row).unwrap_or(true) {
-                row += 1;
-            }
-            while row < last && !state.lines.is_empty_row(row).unwrap_or(true) {
-                row += 1;
-            }
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
 
-            state.cursor.row = row;
+    /// With no blank line ahead, to the end of the buffer, its last
+    /// character taken too; with some of a count left there, nowhere.
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        if paragraphs(&state.lines, state.cursor.row, self.0, true).is_none() {
+            return false;
         }
+        self.execute(state);
+        if state.cursor.row + 1 >= state.lines.len() {
+            state.cursor.col = state.lines.len_col(state.cursor.row).unwrap_or(0);
+        }
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let Some(row) = paragraphs(&state.lines, state.cursor.row, self.0, true) else {
+            state.failed = true;
+            return;
+        };
+        state.cursor.row = row;
 
         if state.lines.is_last_row(state.cursor) {
             state.cursor.col = max_col_normal(&state.lines, &state.cursor);
@@ -437,25 +640,35 @@ impl Execute for MoveParagraphForward {
     }
 }
 
-/// Move to the previous paragraph boundary (Vim `{`).
+/// Move to the previous paragraph boundary (Vim `{`); with a count, the
+/// `n`th, and nowhere where the buffer begins with some of it left. Count
+/// added by roster.
 #[derive(Clone, Debug, Copy)]
-pub struct MoveParagraphBackward();
+pub struct MoveParagraphBackward(pub usize);
 
 impl Execute for MoveParagraphBackward {
-    fn execute(&mut self, state: &mut EditorState) {
-        let mut row = state.cursor.row;
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
 
-        if !state.lines.is_first_row(state.cursor) {
-            while row > 0 && state.lines.is_empty_row(row).unwrap_or(true) {
-                row -= 1;
-            }
-            while row > 0 && !state.lines.is_empty_row(row).unwrap_or(true) {
-                row -= 1;
-            }
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
 
-            state.cursor.row = row;
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        paragraphs(&state.lines, state.cursor.row, self.0, false).is_some() && {
+            self.execute(state);
+            true
         }
+    }
 
+    fn execute(&mut self, state: &mut EditorState) {
+        let Some(row) = paragraphs(&state.lines, state.cursor.row, self.0, false) else {
+            state.failed = true;
+            return;
+        };
+        state.cursor.row = row;
         state.cursor.col = 0;
 
         if state.mode == EditorMode::Visual {
@@ -464,24 +677,73 @@ impl Execute for MoveParagraphBackward {
     }
 }
 
+/// The row `n` paragraph boundaries from `row`, down or up, as vim's
+/// `findpar` finds them: past a paragraph's lines to the blank line after
+/// (before) them, else the buffer's end (start), but none if it ends with
+/// some of `n` left.
+fn paragraphs(lines: &crate::Lines, mut row: usize, n: usize, down: bool) -> Option<usize> {
+    let last = lines.last_row_index();
+    let blank = |r: usize| lines.is_empty_row(r).unwrap_or(true);
+    for left in (0..n.max(1)).rev() {
+        let (mut text, mut first) = (false, true);
+        loop {
+            text |= !blank(row);
+            if !first && text && blank(row) {
+                break;
+            }
+            if (down && row >= last) || (!down && row == 0) {
+                if left > 0 {
+                    return None;
+                }
+                break;
+            }
+            row = if down { row + 1 } else { row - 1 };
+            first = false;
+        }
+    }
+    Some(row)
+}
+
 /// Moves the cursor to the next occurrence of a character to the right on the
-/// current line (Vim `f`). Does nothing if the character is not found.
+/// current line (Vim `f`); with a count, the `n`th (`2fx`). Does nothing if
+/// the character is not found, as many times. Count added by roster.
 ///
 /// The target is `None` until the key handler supplies the next keystroke via
 /// [`Execute::char_arg`].
 #[derive(Clone, Debug, Copy)]
-pub struct FindForward(pub Option<char>);
+pub struct FindForward(pub Option<char>, pub usize);
 
 impl Execute for FindForward {
+    fn count(&mut self, n: usize) -> bool {
+        self.1 = n;
+        true
+    }
+
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        self.0
+            .and_then(|c| find_nth_forward(state, c, self.1))
+            .is_some()
+            && {
+                self.execute(state);
+                true
+            }
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         let Some(target) = self.0 else {
             return;
         };
-        if let Some(col) = find_char_forward(state, target) {
+        if let Some(col) = find_nth_forward(state, target, self.1) {
             state.cursor.col = col;
             if state.mode == EditorMode::Visual {
                 set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
             }
+        } else {
+            state.failed = true;
         }
     }
 
@@ -491,30 +753,163 @@ impl Execute for FindForward {
 }
 
 /// Moves the cursor to just before the next occurrence of a character to the
-/// right on the current line (Vim `t`). Does nothing if the character is not
-/// found.
+/// right on the current line (Vim `t`); with a count, the `n`th (`2tx`).
+/// Does nothing if the character is not found, as many times. Count added
+/// by roster.
 ///
 /// The target is `None` until the key handler supplies the next keystroke via
 /// [`Execute::char_arg`].
 #[derive(Clone, Debug, Copy)]
-pub struct TillForward(pub Option<char>);
+pub struct TillForward(pub Option<char>, pub usize);
 
 impl Execute for TillForward {
+    fn count(&mut self, n: usize) -> bool {
+        self.1 = n;
+        true
+    }
+
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Inclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        self.0
+            .and_then(|c| find_nth_forward(state, c, self.1))
+            .is_some()
+            && {
+                self.execute(state);
+                true
+            }
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         let Some(target) = self.0 else {
             return;
         };
-        if let Some(col) = find_char_forward(state, target) {
+        if let Some(col) = find_nth_forward(state, target, self.1) {
             state.cursor.col = col.saturating_sub(1);
             if state.mode == EditorMode::Visual {
                 set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
             }
+        } else {
+            state.failed = true;
         }
     }
 
     fn char_arg(&mut self) -> Option<&mut Option<char>> {
         Some(&mut self.0)
     }
+}
+
+/// Moves the cursor to the previous occurrence of a character on its line,
+/// as vim's `F`; with a count, the `n`th (`2Fx`). Does nothing if there
+/// aren't as many. The character comes as the next key
+/// (`Execute::char_arg`). Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct FindBackward(pub Option<char>, pub usize);
+
+impl Execute for FindBackward {
+    fn count(&mut self, n: usize) -> bool {
+        self.1 = n;
+        true
+    }
+
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        self.0
+            .and_then(|c| find_nth_backward(state, c, self.1))
+            .is_some()
+            && {
+                self.execute(state);
+                true
+            }
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        if let Some(col) = self.0.and_then(|c| find_nth_backward(state, c, self.1)) {
+            state.cursor.col = col;
+            if state.mode == EditorMode::Visual {
+                set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
+            }
+        } else {
+            state.failed = true;
+        }
+    }
+
+    fn char_arg(&mut self) -> Option<&mut Option<char>> {
+        Some(&mut self.0)
+    }
+}
+
+/// Moves the cursor to just after the previous occurrence of a character on
+/// its line, as vim's `T`; with a count, the `n`th (`2Tx`). Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct TillBackward(pub Option<char>, pub usize);
+
+impl Execute for TillBackward {
+    fn count(&mut self, n: usize) -> bool {
+        self.1 = n;
+        true
+    }
+
+    fn motion(&self) -> Option<MotionKind> {
+        Some(MotionKind::Exclusive)
+    }
+
+    fn move_after_operator(&mut self, state: &mut EditorState) -> bool {
+        self.0
+            .and_then(|c| find_nth_backward(state, c, self.1))
+            .is_some()
+            && {
+                self.execute(state);
+                true
+            }
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        if let Some(col) = self.0.and_then(|c| find_nth_backward(state, c, self.1)) {
+            state.cursor.col = col + 1;
+            if state.mode == EditorMode::Visual {
+                set_selection_with_lines(&mut state.selection, state.cursor, &state.lines);
+            }
+        } else {
+            state.failed = true;
+        }
+    }
+
+    fn char_arg(&mut self) -> Option<&mut Option<char>> {
+        Some(&mut self.0)
+    }
+}
+
+/// The cursor's line's characters.
+fn cursor_row(state: &EditorState) -> &[char] {
+    state
+        .lines
+        .get(jagged::index::RowIndex::new(state.cursor.row))
+        .map_or(&[][..], Vec::as_slice)
+}
+
+/// The column of the `n`th `target` right of the cursor on its line, if
+/// there are as many. Added by roster.
+pub(crate) fn find_nth_forward(state: &EditorState, target: char, n: usize) -> Option<usize> {
+    let chars = cursor_row(state);
+    (state.cursor.col + 1..chars.len())
+        .filter(|&col| chars[col] == target)
+        .nth(n.max(1) - 1)
+}
+
+/// The column of the `n`th `target` left of the cursor on its line, if
+/// there are as many. Added by roster.
+pub(crate) fn find_nth_backward(state: &EditorState, target: char, n: usize) -> Option<usize> {
+    let chars = cursor_row(state);
+    (0..state.cursor.col.min(chars.len()))
+        .rev()
+        .filter(|&col| chars[col] == target)
+        .nth(n.max(1) - 1)
 }
 
 /// Returns the column of the next occurrence of `target` to the right of the
@@ -880,6 +1275,80 @@ mod tests {
     }
 
     #[test]
+    fn test_word_motions_are_vims() {
+        // w onto the next line's first word; b from a line's start to the
+        // last word before it.
+        let mut state = EditorState::new(Lines::from("one two\n  three"));
+        state.cursor = Index2::new(0, 4);
+        MoveWordForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(1, 2));
+        state.cursor = Index2::new(1, 0);
+        MoveWordBackward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 4));
+        // Letters beyond ASCII are one word's.
+        let mut state = EditorState::new(Lines::from("zażółć gęślą"));
+        MoveWordForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 7));
+        MoveWordForwardToEndOfWord(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 11));
+        MoveWordBackward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 0));
+    }
+
+    #[test]
+    fn test_big_word_motions_take_marks_in() {
+        let mut state = EditorState::new(Lines::from("a foo.bar(x) b"));
+        MoveBigWordForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 2));
+        MoveBigWordForwardToEndOfWord(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 11));
+        MoveBigWordForward(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 13));
+        MoveBigWordBackward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        // With a count; to the end in normal mode at most.
+        MoveBigWordForward(9).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 13));
+    }
+
+    #[test]
+    fn test_find_and_till_backward() {
+        let mut state = EditorState::new(Lines::from("a,b,c"));
+        state.cursor = Index2::new(0, 4);
+        FindBackward(Some(','), 1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 3));
+        FindBackward(Some(','), 1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 1));
+        // None before: nothing.
+        FindBackward(Some(','), 1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 1));
+        state.cursor = Index2::new(0, 4);
+        TillBackward(Some('a'), 1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 1));
+        // With a count, the nth; past what there is, nowhere.
+        state.cursor = Index2::new(0, 4);
+        FindBackward(Some(','), 2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 1));
+        state.cursor = Index2::new(0, 4);
+        TillBackward(Some(','), 2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 2));
+        FindBackward(Some(','), 3).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 2));
+    }
+
+    #[test]
+    fn test_move_down_to_first() {
+        let mut state = EditorState::new(Lines::from("  one\n   two\nsix"));
+        state.cursor = Index2::new(0, 4);
+        MoveDownToFirst(1).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 2));
+        MoveDownToFirst(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(1, 3));
+        MoveDownToFirst(9).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(2, 0));
+    }
+
+    #[test]
     fn test_move_to_start() {
         let mut state = test_state();
         state.cursor = Index2::new(0, 2);
@@ -893,7 +1362,7 @@ mod tests {
         let mut state = test_state();
         state.cursor = Index2::new(0, 2);
 
-        MoveToEndOfLine().execute(&mut state);
+        MoveToEndOfLine(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 11));
     }
 
@@ -927,17 +1396,17 @@ mod tests {
         let mut state = paragraph_state();
         assert_eq!(state.cursor, Index2::new(0, 0));
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(2, 0));
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(6, 0));
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(8, 14));
 
         // Already at last line
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(8, 14));
     }
 
@@ -946,17 +1415,17 @@ mod tests {
         let mut state = paragraph_state();
         state.cursor = Index2::new(8, 0);
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(7, 0));
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(4, 0));
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 0));
 
         // Already at first line
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 0));
     }
 
@@ -965,7 +1434,7 @@ mod tests {
         let mut state = paragraph_state();
         state.cursor = Index2::new(1, 5);
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(2, 0));
     }
 
@@ -974,7 +1443,7 @@ mod tests {
         let mut state = paragraph_state();
         state.cursor = Index2::new(5, 5);
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(4, 0));
     }
 
@@ -984,7 +1453,7 @@ mod tests {
         let mut state = paragraph_state();
         SwitchMode(EditorMode::Visual).execute(&mut state);
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(2, 0));
         assert!(state.selection.is_some());
         let sel = state.selection.unwrap();
@@ -995,10 +1464,10 @@ mod tests {
     fn test_move_paragraph_single_line() {
         let mut state = EditorState::new(Lines::from("just one line"));
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 12));
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 0));
     }
 
@@ -1009,7 +1478,7 @@ mod tests {
         state.cursor = Index2::new(0, 5);
         SwitchMode(EditorMode::Visual).execute(&mut state);
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 0));
         let sel = state.selection.clone().unwrap();
         assert_eq!(sel.start, Index2::new(0, 5));
@@ -1019,7 +1488,7 @@ mod tests {
         state.cursor = Index2::new(0, 5);
         SwitchMode(EditorMode::Visual).execute(&mut state);
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 12));
         let sel = state.selection.unwrap();
         assert_eq!(sel.start, Index2::new(0, 5));
@@ -1031,10 +1500,31 @@ mod tests {
         let mut state = EditorState::new(Lines::from("\n\n\n"));
         assert_eq!(state.cursor, Index2::new(0, 0));
 
-        MoveParagraphForward().execute(&mut state);
+        MoveParagraphForward(1).execute(&mut state);
         assert_eq!(state.cursor.row, 3);
 
-        MoveParagraphBackward().execute(&mut state);
+        MoveParagraphBackward(1).execute(&mut state);
         assert_eq!(state.cursor.row, 0);
+    }
+
+    #[test]
+    fn test_move_paragraphs_counted_and_none_past_the_end() {
+        let mut state = paragraph_state();
+        MoveParagraphForward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(6, 0));
+        MoveParagraphBackward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        // To the end with the last of the count: there; with some left, or
+        // from the end: nowhere.
+        MoveParagraphForward(3).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(8, 14));
+        state.cursor = Index2::new(5, 3);
+        MoveParagraphForward(3).execute(&mut state);
+        assert_eq!((state.cursor, state.failed), (Index2::new(5, 3), true));
+        let mut state = EditorState::new(Lines::from("foo bar baz"));
+        MoveParagraphForward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        MoveParagraphBackward(2).execute(&mut state);
+        assert_eq!(state.cursor, Index2::new(0, 0));
     }
 }

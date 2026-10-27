@@ -1,9 +1,11 @@
 use jagged::index::RowIndex;
 
-use super::Execute;
+use super::delete::{DeleteChar, DeleteCharForward, DeleteLineBefore, DeleteWordBefore};
+use super::motion::{MoveForward, MoveToEndOfLine, MoveToFirst};
+use super::{Execute, SwitchMode};
 use crate::{
     helper::{insert_char, line_break},
-    EditorState,
+    EditorMode, EditorState,
 };
 
 /// Inserts a single character at the current cursor position.
@@ -47,6 +49,11 @@ impl Execute for LineBreak {
         }
         for _ in 0..self.0 {
             line_break(&mut state.lines, &mut state.cursor);
+        }
+
+        // Typed in an insert session, for the dot-repeat command too.
+        if let Some(buffer) = &mut state.insert_recording {
+            buffer.extend(std::iter::repeat_n('\n', self.0));
         }
     }
 
@@ -103,6 +110,85 @@ impl Execute for InsertNewline {
     }
 
     fn is_repeatable(&self) -> bool {
+        true
+    }
+}
+
+/// What an insert session records for the keys that delete, typed again as
+/// they were (`.`, a count): Backspace, Delete, Ctrl+W and Ctrl+U. Added by
+/// roster.
+pub(crate) const BACKSPACE: char = '\u{8}';
+pub(crate) const DELETE: char = '\u{7f}';
+pub(crate) const DELETE_WORD: char = '\u{17}';
+pub(crate) const DELETE_LINE: char = '\u{15}';
+
+/// Records `key`, `n` times, in the insert session being recorded, if one is.
+pub(crate) fn record(state: &mut EditorState, key: char, n: usize) {
+    if let Some(buffer) = &mut state.insert_recording {
+        buffer.extend(std::iter::repeat_n(key, n));
+    }
+}
+
+/// Types one key an insert session recorded, as it was typed.
+pub(crate) fn type_recorded(state: &mut EditorState, key: char) {
+    match key {
+        BACKSPACE => DeleteChar(1).execute(state),
+        DELETE => DeleteCharForward(1).execute(state),
+        DELETE_WORD => DeleteWordBefore.execute(state),
+        DELETE_LINE => DeleteLineBefore.execute(state),
+        c => InsertChar(c).execute(state),
+    }
+}
+
+/// Where insert mode is entered: vim's `i`, `a`, `I`, `A`, `o` and `O`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertAt {
+    Cursor,
+    After,
+    LineStart,
+    LineEnd,
+    Below,
+    Above,
+}
+
+/// Enters insert mode `at` the cursor or about it, and, with a count, what's
+/// typed there is typed that many times in all on leaving it, as vim's
+/// `3ifoo` and `2o`: on lines of their own below after `o` and `O`. Added by
+/// roster.
+#[derive(Clone, Copy, Debug)]
+pub struct EnterInsert {
+    pub at: InsertAt,
+    pub count: usize,
+}
+
+impl EnterInsert {
+    #[must_use]
+    pub fn at(at: InsertAt) -> Self {
+        Self { at, count: 1 }
+    }
+}
+
+impl Execute for EnterInsert {
+    fn execute(&mut self, state: &mut EditorState) {
+        SwitchMode(EditorMode::Insert).execute(state);
+        match self.at {
+            InsertAt::Cursor => {}
+            InsertAt::After => MoveForward(1).execute(state),
+            InsertAt::LineStart => MoveToFirst().execute(state),
+            InsertAt::LineEnd => MoveToEndOfLine(1).execute(state),
+            InsertAt::Below => AppendNewline(1).execute(state),
+            InsertAt::Above => InsertNewline(1).execute(state),
+        }
+        let lines = matches!(self.at, InsertAt::Below | InsertAt::Above);
+        state.insert_count = (self.count > 1).then_some((self.count - 1, lines));
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+
+    fn count(&mut self, n: usize) -> bool {
+        self.count = n;
         true
     }
 }

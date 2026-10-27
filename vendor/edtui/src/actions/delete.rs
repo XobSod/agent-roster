@@ -1,42 +1,82 @@
 use jagged::index::RowIndex;
 
+use super::insert::{record, BACKSPACE, DELETE, DELETE_LINE, DELETE_WORD};
+use super::word::kind;
 use super::Execute;
 use crate::{
     actions::motion::{find_char_forward, CharacterClass},
     clipboard::ClipboardTrait,
     helper::{
-        is_out_of_bounds, max_col_insert, max_col_normal, skip_whitespace, skip_whitespace_rev,
+        cut_chars, is_out_of_bounds, max_col_insert, max_col_normal, skip_whitespace,
+        skip_whitespace_rev,
     },
     state::selection::Selection,
     EditorState, Index2, Lines,
 };
 
-/// Deletes a character at the current cursor position. Does not
-/// move the cursor position unless it is at the end of the line
+/// Deletes `n` characters from the cursor on (fewer where the line ends
+/// first) and yanks them, as vim's `x`. Does not move the cursor unless it
+/// was at the end of the line. On an empty line it does nothing: no undo
+/// point, and the clipboard stays as it was.
 /// Intended to be called in normal mode.
 #[derive(Clone, Debug, Copy)]
 pub struct RemoveChar(pub usize);
 
 impl Execute for RemoveChar {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
-        state.capture();
         state.clamp_column();
-        for _ in 0..self.0 {
-            let lines = &mut state.lines;
-            let index = &mut state.cursor;
-
-            if is_out_of_bounds(lines, index) {
-                return;
-            }
-
-            let _ = lines.remove(*index);
-            index.col = index.col.min(
-                lines
-                    .len_col(index.row)
-                    .unwrap_or_default()
-                    .saturating_sub(1),
-            );
+        let index = state.cursor;
+        if is_out_of_bounds(&state.lines, &index) {
+            return;
         }
+        state.capture();
+        let Some(row) = state.lines.get_mut(RowIndex::new(index.row)) else {
+            return;
+        };
+        let end = (index.col + self.0.max(1)).min(row.len());
+        let taken: String = row.drain(index.col..end).collect();
+        let left = row.len();
+        state.clip.set_text(taken);
+        state.cursor.col = index.col.min(left.saturating_sub(1));
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+}
+
+/// Deletes `n` characters before the cursor (fewer near the line's start)
+/// and yanks them, as vim's `X`. At the start of a line it does nothing: no
+/// undo point, and the clipboard stays as it was.
+/// Intended to be called in normal mode.
+#[derive(Clone, Debug, Copy)]
+pub struct RemoveCharBefore(pub usize);
+
+impl Execute for RemoveCharBefore {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        state.clamp_column();
+        let index = state.cursor;
+        if index.col == 0 || is_out_of_bounds(&state.lines, &index) {
+            return;
+        }
+        state.capture();
+        let start = index.col.saturating_sub(self.0.max(1));
+        let Some(row) = state.lines.get_mut(RowIndex::new(index.row)) else {
+            return;
+        };
+        let taken: String = row.drain(start..index.col).collect();
+        state.clip.set_text(taken);
+        state.cursor.col = start;
     }
 
     fn is_repeatable(&self) -> bool {
@@ -66,6 +106,45 @@ impl Execute for ReplaceChar {
     }
 }
 
+/// Replaces the character under the cursor with the next key's, as vim's
+/// `r`, and with a count as many (`3rx`), the cursor on the last; none if
+/// fewer are left on the line. Its character is to come
+/// (`Execute::char_arg`), which a repeat (`.`) keeps.
+#[derive(Clone, Debug, Copy)]
+pub struct Replace(pub Option<char>, pub usize);
+
+impl Execute for Replace {
+    fn count(&mut self, n: usize) -> bool {
+        self.1 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let Some(c) = self.0 else {
+            return;
+        };
+        state.clamp_column();
+        let (row, col, n) = (state.cursor.row, state.cursor.col, self.1.max(1));
+        if col + n > state.lines.len_col(row).unwrap_or(0) {
+            state.failed = true;
+            return;
+        }
+        state.capture();
+        if let Some(chars) = state.lines.get_mut(RowIndex::new(row)) {
+            chars[col..col + n].fill(c);
+        }
+        state.cursor.col = col + n - 1;
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+
+    fn char_arg(&mut self) -> Option<&mut Option<char>> {
+        Some(&mut self.0)
+    }
+}
+
 /// Deletes a character to the left of the current cursor. Deletes
 /// the line break if the the cursor is in column zero.
 /// Intended to be called in insert mode.
@@ -74,10 +153,14 @@ pub struct DeleteChar(pub usize);
 
 impl Execute for DeleteChar {
     fn execute(&mut self, state: &mut EditorState) {
-        state.capture();
+        // In an insert session, its undo point holds this too (roster's).
+        if state.insert_start.is_none() {
+            state.capture();
+        }
         for _ in 0..self.0 {
             delete_char(&mut state.lines, &mut state.cursor);
         }
+        record(state, BACKSPACE, self.0);
     }
 
     fn is_repeatable(&self) -> bool {
@@ -124,11 +207,14 @@ pub struct DeleteCharForward(pub usize);
 
 impl Execute for DeleteCharForward {
     fn execute(&mut self, state: &mut EditorState) {
-        state.capture();
+        if state.insert_start.is_none() {
+            state.capture();
+        }
         state.clamp_column();
         for _ in 0..self.0 {
             delete_char_forward(&mut state.lines, &mut state.cursor);
         }
+        record(state, DELETE, self.0);
     }
 
     fn is_repeatable(&self) -> bool {
@@ -161,6 +247,11 @@ fn delete_char_forward(lines: &mut Lines, index: &mut Index2) {
 pub struct DeleteWordForward(pub usize);
 
 impl Execute for DeleteWordForward {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         if state.lines.is_empty() {
             return;
@@ -237,6 +328,11 @@ fn delete_word_forward(state: &mut EditorState) {
 pub struct DeleteBigWordForward(pub usize);
 
 impl Execute for DeleteBigWordForward {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         if state.lines.is_empty() {
             return;
@@ -320,6 +416,80 @@ fn delete_big_word_end(state: &mut EditorState) {
     );
 }
 
+/// Deletes the word before the cursor in insert mode, as vim's Ctrl+W: the
+/// whitespace before it too, not into the clipboard, stopping once where
+/// the insert began; at a line's start, the line break. Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct DeleteWordBefore;
+
+impl Execute for DeleteWordBefore {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.insert_start.is_none() {
+            state.capture();
+        }
+        let at = state.cursor;
+        if at.col == 0 {
+            delete_char(&mut state.lines, &mut state.cursor);
+        } else if let Some(chars) = state.lines.get_mut(RowIndex::new(at.row)) {
+            let end = at.col.min(chars.len());
+            let mut start = end;
+            while start > 0 && chars[start - 1].is_whitespace() {
+                start -= 1;
+            }
+            if let Some(&c) = start.checked_sub(1).and_then(|i| chars.get(i)) {
+                let class = kind(c, false);
+                while start > 0 && kind(chars[start - 1], false) == class {
+                    start -= 1;
+                }
+            }
+            if let Some(begin) = state.insert_start {
+                if begin.row == at.row && start < begin.col && begin.col < end {
+                    start = begin.col;
+                }
+            }
+            chars.drain(start..end);
+            state.cursor.col = start;
+        }
+        record(state, DELETE_WORD, 1);
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+}
+
+/// Deletes what's before the cursor on its line in insert mode, as vim's
+/// Ctrl+U: what was typed in this insert, else all of it (stopping once
+/// where the insert began), not into the clipboard; at a line's start, the
+/// line break. Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct DeleteLineBefore;
+
+impl Execute for DeleteLineBefore {
+    fn execute(&mut self, state: &mut EditorState) {
+        if state.insert_start.is_none() {
+            state.capture();
+        }
+        let at = state.cursor;
+        if at.col == 0 {
+            delete_char(&mut state.lines, &mut state.cursor);
+        } else if let Some(chars) = state.lines.get_mut(RowIndex::new(at.row)) {
+            let end = at.col.min(chars.len());
+            let start = match state.insert_start {
+                Some(begin) if begin.row == at.row && begin.col < end => begin.col,
+                _ => 0,
+            };
+            chars.drain(start..end);
+            state.cursor.col = start;
+        }
+        record(state, DELETE_LINE, 1);
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+}
+
 /// Deletes from cursor backward to start of previous word (Emacs Alt+Backspace).
 #[derive(Clone, Debug, Copy)]
 pub struct DeleteWordBackward(pub usize);
@@ -399,17 +569,28 @@ fn delete_range(
 pub struct DeleteLine(pub usize);
 
 impl Execute for DeleteLine {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
     fn execute(&mut self, state: &mut EditorState) {
         state.capture();
+        // All of them into the clipboard, as lines.
+        let mut deleted = String::new();
         for _ in 0..self.0 {
             if state.cursor.row >= state.lines.len() {
                 break;
             }
             let row_index = RowIndex::new(state.cursor.row);
             let deleted_line = state.lines.remove(row_index).iter().collect::<String>();
-            state.clip.set_text(String::from('\n') + &deleted_line);
+            deleted.push('\n');
+            deleted.push_str(&deleted_line);
             state.cursor.col = 0;
             state.cursor.row = state.cursor.row.min(state.lines.len().saturating_sub(1));
+        }
+        if !deleted.is_empty() {
+            state.clip.set_text(deleted);
         }
     }
 
@@ -424,7 +605,9 @@ pub struct DeleteToFirstCharOfLine;
 
 impl Execute for DeleteToFirstCharOfLine {
     fn execute(&mut self, state: &mut EditorState) {
-        state.capture();
+        if state.insert_start.is_none() {
+            state.capture();
+        }
 
         let row_index = RowIndex::new(state.cursor.row);
         let Some(row) = state.lines.get_mut(row_index) else {
@@ -556,6 +739,10 @@ impl Execute for DeleteSelection {
             state.capture();
             let drained = delete_selection(state, &selection);
             state.clip.set_text(drained.into());
+            // As vim leaves it: a line at least. Added by roster.
+            if state.lines.is_empty() {
+                state.lines.push(vec![]);
+            }
         }
         state.selection = None;
     }
@@ -566,9 +753,28 @@ impl Execute for DeleteSelection {
 }
 
 pub(crate) fn delete_selection(state: &mut EditorState, selection: &Selection) -> Lines {
-    state.cursor = selection.start();
+    let (start, end) = (selection.start(), selection.end());
+    let taken = if selection.line_mode {
+        selection.extract_from(&mut state.lines)
+    } else {
+        // The line break after `end` only if `end` is past its line's last
+        // character (`v$`), not on it: `extract_from` took it then too.
+        // Added by roster.
+        let len = state.lines.len_col(end.row).unwrap_or(0);
+        let past = if end.col < len {
+            Index2::new(end.row, end.col + 1)
+        } else if end.row + 1 < state.lines.len() {
+            Index2::new(end.row + 1, 0)
+        } else {
+            Index2::new(end.row, len)
+        };
+        Lines::from(cut_chars(&mut state.lines, start, past))
+    };
+    // On a line still there, the last if the last ones went.
+    state.cursor = start;
+    state.cursor.row = start.row.min(state.lines.len().saturating_sub(1));
     state.clamp_column();
-    selection.extract_from(&mut state.lines)
+    taken
 }
 
 /// Joins line below to the current line.
@@ -589,6 +795,51 @@ impl Execute for JoinLineWithLineBelow {
     }
 }
 
+/// Joins `n` lines from the cursor's into one, as vim's `J`: each loses its
+/// indent, and a space goes between (none after a space, before a `)`, or
+/// with an empty line). `J` is two, as `2J`: vim's count counts the
+/// cursor's line. The cursor goes where the last two met. Added by roster.
+#[derive(Clone, Debug, Copy)]
+pub struct JoinLines(pub usize);
+
+impl Execute for JoinLines {
+    fn count(&mut self, n: usize) -> bool {
+        self.0 = n;
+        true
+    }
+
+    fn execute(&mut self, state: &mut EditorState) {
+        let row = state.cursor.row;
+        let below = state.lines.len().saturating_sub(row + 1);
+        let joins = (self.0.max(2) - 1).min(below);
+        if joins == 0 {
+            // Nothing below: nothing done, nor for `.` to repeat.
+            state.failed = true;
+            return;
+        }
+        state.capture();
+        for _ in 0..joins {
+            let next = state.lines.remove(RowIndex::new(row + 1));
+            let next: Vec<char> = next.into_iter().skip_while(|c| c.is_whitespace()).collect();
+            let Some(line) = state.lines.get_mut(RowIndex::new(row)) else {
+                return;
+            };
+            state.cursor.col = line.len();
+            let space = !matches!(line.last(), None | Some(' ' | '\t'))
+                && !matches!(next.first(), None | Some(')'));
+            if space {
+                line.push(' ');
+            }
+            line.extend(next);
+        }
+        state.clamp_column();
+    }
+
+    fn is_repeatable(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::state::selection::Selection;
@@ -599,6 +850,72 @@ mod tests {
     use super::*;
     fn test_state() -> EditorState {
         EditorState::new(Lines::from("Hello World!\n\n123."))
+    }
+
+    #[test]
+    fn test_join_lines_as_vims_j() {
+        let mut state = EditorState::new(Lines::from("one\n  two\nthree"));
+        JoinLines(2).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("one two\nthree"));
+        assert_eq!(state.cursor, Index2::new(0, 3));
+        // A count counts the cursor's line: 3J joins three.
+        let mut state = EditorState::new(Lines::from("a\nb\nc\nd"));
+        JoinLines(3).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("a b c\nd"));
+        assert_eq!(state.cursor, Index2::new(0, 3));
+        // No space after one, before a `)`, or with an empty line; as many
+        // as there are.
+        let mut state = EditorState::new(Lines::from("f(a, \nb\n)\n\nx"));
+        JoinLines(9).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("f(a, b) x"));
+        assert_eq!(state.cursor, Index2::new(0, 7));
+        // On the last line, nothing.
+        JoinLines(2).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("f(a, b) x"));
+    }
+
+    #[test]
+    fn test_remove_char_yanks_what_it_takes() {
+        use crate::clipboard::InternalClipboard;
+        let mut state = test_state();
+        state.set_clipboard(InternalClipboard::default());
+        state.cursor = Index2::new(0, 3);
+        RemoveChar(3).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("HelWorld!\n\n123."));
+        assert_eq!(state.clip.get_text(), "lo ");
+        // Past the line's end, what there is; on an empty line, nothing.
+        state.cursor = Index2::new(0, 7);
+        RemoveChar(5).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("HelWorl\n\n123."));
+        assert_eq!((state.clip.get_text(), state.cursor.col), ("d!".into(), 6));
+        state.cursor = Index2::new(1, 0);
+        let undo = state.undo.len();
+        RemoveChar(1).execute(&mut state);
+        assert_eq!(
+            (state.clip.get_text(), state.undo.len()),
+            ("d!".into(), undo)
+        );
+    }
+
+    #[test]
+    fn test_remove_char_before_yanks_and_stops_at_the_line_start() {
+        use crate::clipboard::InternalClipboard;
+        let mut state = test_state();
+        state.set_clipboard(InternalClipboard::default());
+        state.cursor = Index2::new(0, 4);
+        RemoveCharBefore(2).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("Heo World!\n\n123."));
+        assert_eq!((state.clip.get_text(), state.cursor.col), ("ll".into(), 2));
+        RemoveCharBefore(5).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("o World!\n\n123."));
+        assert_eq!((state.clip.get_text(), state.cursor.col), ("He".into(), 0));
+        let undo = state.undo.len();
+        RemoveCharBefore(1).execute(&mut state);
+        assert_eq!(state.lines, Lines::from("o World!\n\n123."));
+        assert_eq!(
+            (state.clip.get_text(), state.undo.len()),
+            ("He".into(), undo)
+        );
     }
 
     #[test]
@@ -722,6 +1039,37 @@ mod tests {
         DeleteSelection.execute(&mut state);
         assert_eq!(state.cursor, Index2::new(0, 1));
         assert_eq!(state.lines, Lines::from("H23."));
+    }
+
+    #[test]
+    fn test_delete_selection_leaves_the_line_break_after_it() {
+        use crate::clipboard::{ClipboardTrait, InternalClipboard};
+        // A whole line's characters: the line break stays.
+        let mut state = EditorState::new(Lines::from("foo\nbar"));
+        state.set_clipboard(InternalClipboard::default());
+        state.selection = Some(Selection::new(Index2::new(0, 0), Index2::new(0, 2)));
+        DeleteSelection.execute(&mut state);
+        assert_eq!(state.lines, Lines::from("\nbar"));
+        assert_eq!(state.clip.get_text(), "foo");
+        // Past the line's end, as `v$` goes: the line break too.
+        let mut state = EditorState::new(Lines::from("foo\nbar"));
+        state.selection = Some(Selection::new(Index2::new(0, 1), Index2::new(0, 3)));
+        DeleteSelection.execute(&mut state);
+        assert_eq!(state.lines, Lines::from("fbar"));
+        // The last line: the cursor on the one left; every line: one left.
+        let mut state = EditorState::new(Lines::from("a\nb"));
+        state.cursor = Index2::new(1, 0);
+        let line = |row| Some(Selection::new(Index2::new(row, 0), Index2::new(row, 0)).line_mode());
+        state.selection = line(1);
+        DeleteSelection.execute(&mut state);
+        assert_eq!(state.lines, Lines::from("a"));
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        state.selection = line(0);
+        DeleteSelection.execute(&mut state);
+        assert_eq!(
+            (state.lines.len(), state.lines.to_string()),
+            (1, String::new())
+        );
     }
 
     #[test]

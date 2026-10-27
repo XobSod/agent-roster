@@ -11,7 +11,8 @@ use super::motion::find_char_forward;
 use super::select::{DeleteInnerBetween, DeleteInnerBigWord, DeleteInnerWord};
 use super::Execute;
 use crate::clipboard::ClipboardTrait;
-use crate::{EditorMode, EditorState};
+use crate::{EditorMode, EditorState, Index2};
+use jagged::index::RowIndex;
 
 /// Changes from the cursor to the end of the current word: deletes it and
 /// enters insert mode (Vim `cw`).
@@ -173,6 +174,13 @@ impl Execute for ChangeSelection {
             state.capture();
             let deleted = delete_selection(state, &selection);
             state.clip.set_text(deleted.into());
+            if selection.line_mode {
+                // As vim leaves it: an empty line where they were. Added by
+                // roster.
+                let row = selection.start().row.min(state.lines.len());
+                state.lines.insert(RowIndex::new(row), vec![]);
+                state.cursor = Index2::new(row, 0);
+            }
         }
     }
 
@@ -185,6 +193,26 @@ impl Execute for ChangeSelection {
 mod tests {
     use super::*;
     use crate::{Index2, Lines};
+
+    #[test]
+    fn test_change_selection_keeps_line_breaks_and_lines() {
+        use crate::state::selection::Selection;
+        // A whole line's characters: the line break stays.
+        let mut state = EditorState::new(Lines::from("foo\nbar"));
+        state.mode = EditorMode::Insert;
+        state.selection = Some(Selection::new(Index2::new(0, 0), Index2::new(0, 2)));
+        ChangeSelection.execute(&mut state);
+        assert_eq!(state.lines, Lines::from("\nbar"));
+        assert_eq!(state.cursor, Index2::new(0, 0));
+        // Lines: an empty one where they were.
+        let mut state = EditorState::new(Lines::from("a\nb\nc"));
+        state.mode = EditorMode::Insert;
+        let lines = Selection::new(Index2::new(1, 0), Index2::new(2, 0)).line_mode();
+        state.selection = Some(lines);
+        ChangeSelection.execute(&mut state);
+        assert_eq!(state.lines, Lines::from("a\n"));
+        assert_eq!(state.cursor, Index2::new(1, 0));
+    }
 
     #[test]
     fn test_change_word_enters_insert_mode() {

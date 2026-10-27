@@ -34,12 +34,18 @@ pub fn sh_quote(s: &str) -> String {
 /// FNV-1a hash as hex. Used to notice screen changes across runs, so it has to be
 /// stable (std's hasher isn't guaranteed to be).
 pub fn fnv1a(data: &[u8]) -> String {
+    format!("{:016x}", fnv1a_64(data))
+}
+
+/// FNV-1a hash: the same on every machine and in every version, for what
+/// roster keeps by it (screens, calls).
+pub fn fnv1a_64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in data {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 
 /// Whether `command` would run: an executable file at that path, or (a bare

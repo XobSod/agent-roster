@@ -284,7 +284,7 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
 /// The files changed since are read first.
 pub fn print_tokens(r: &Roster, days: i64, json: bool) -> Result<()> {
     use crate::tokens::{Report, Scan, Spent, amount, dollars};
-    Scan::default().update(&r.db)?;
+    Scan::default().update(&r.db, &crate::tokens::Prices::new(&r.config.prices))?;
     let now = util::now_ms();
     let from = now - days * 86_400_000;
     let report = Report::of(&r.db.spent_hours(from, now)?, from, now, 0);

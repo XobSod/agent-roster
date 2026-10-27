@@ -65,6 +65,10 @@ impl crate::engine::Roster {
     /// like a config at startup, and only then written and used.
     pub fn change_setting(&mut self, dotted: &str, input: Option<&str>) -> Result<()> {
         let path: Vec<String> = dotted.split('.').map(String::from).collect();
+        // A table of numbers per model, whose names have dots of their own.
+        if path[0] == "prices" {
+            bail!("prices are set in config.toml itself: roster config --edit");
+        }
         let sections = self.settings();
         let item = match input {
             None => None,
@@ -461,6 +465,9 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         default_agent,
         notes,
         group_by,
+        // A table per model, priced in config.toml by hand (`roster config
+        // --edit`); the template shows how.
+        prices: _,
     } = config;
     let fit = |f: &Option<FitPreview>| match f.unwrap_or(FitPreview::Auto) {
         FitPreview::Auto => "auto",
@@ -1361,6 +1368,16 @@ pub fn template(sections: &[Section]) -> String {
             out.push_str(&format!("# {} = {value}    # {}\n", s.name(), s.doc));
         }
     }
+    // Prices, a table per model, aren't settings the view shows: how one goes.
+    out.push_str(
+        "\n# [prices.\"<model>\"]    # what a model's calls cost, in dollars per million tokens: \
+         for one roster has no price for, or in place of roster's own\n\
+         # input = 1.25\n\
+         # output = 10.0\n\
+         # cache_read = 0.125    # default 0, as cache_write\n\
+         # long = { above = 272000, input = 2.5, output = 15.0 }    # a call sending more \
+         than `above` tokens: all of it at these\n",
+    );
     out
 }
 

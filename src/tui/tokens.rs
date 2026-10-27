@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::tokens::{Period, Report, Scan};
+use crate::tokens::{Period, Prices, Report, Scan};
 use crate::util::now_ms;
 
 /// How often the files are looked at again while shown, and a sum that
@@ -23,10 +23,13 @@ const EVERY: Duration = Duration::from_secs(10);
 const SLIDE: Duration = Duration::from_secs(60);
 
 /// What reads the agents' files: each built-in agent's, changed since saved
-/// in the database at `db`, opened on the reading thread. Whether it saved
-/// anything.
-pub fn scan(db: PathBuf) -> impl FnOnce(&mut Scan) -> Result<bool> + Send + 'static {
-    move |scan| scan.update(&Db::open(&db)?)
+/// in the database at `db`, opened on the reading thread, priced at
+/// `prices`. Whether it saved anything.
+pub fn scan(
+    db: PathBuf,
+    prices: Prices,
+) -> impl FnOnce(&mut Scan) -> Result<bool> + Send + 'static {
+    move |scan| scan.update(&Db::open(&db)?, &prices)
 }
 
 /// What sums up a period from what the database at `db` has saved, up to

@@ -59,6 +59,19 @@ fn settings_change_config_toml_in_place() {
         "{out:?}"
     );
     assert_eq!(fs::read_to_string(&file).unwrap(), text);
+    // Prices are set in the file itself.
+    for args in [
+        &["config", "set", "prices.\"x\".input", "1"][..],
+        &["config", "unset", "prices"],
+    ] {
+        let out = t.run(args);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("roster config --edit"),
+            "{out:?}"
+        );
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
     t.ok(&["config", "unset", "status_line"]);
     assert!(!fs::read_to_string(&file).unwrap().contains("status_line"));
     assert!(t.ok(&["config", "--defaults"]).contains("# [keys.session]"));

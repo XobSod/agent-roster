@@ -6,7 +6,7 @@
 //! unless told otherwise).
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -122,6 +122,13 @@ const fn rates(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Ra
 /// tokens, the rates all of that call is priced at instead.
 type Price = (&'static str, Rates, Option<(u64, Rates)>);
 
+/// What one model's calls cost: its rates, and those of a long call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ModelRates {
+    normal: Rates,
+    long: Option<(u64, Rates)>,
+}
+
 /// The API's prices, as the model catalog of pi 1.3.0 has them
 /// (`@earendil-works/pi-ai`, generated 2026-10-21), for the Claude and
 /// OpenAI models the agents run.
@@ -216,34 +223,68 @@ const FAST: &[(&str, f64)] = &[
     ("claude-opus-5-5", 2.0),
 ];
 
-/// A model's prices, by its name without a provider (`anthropic/…`, as pi
-/// names it) or a date (`…-20251001`).
-fn price(model: &str) -> Option<&'static Price> {
-    let name = base_name(model);
-    PRICES.iter().find(|p| p.0 == name)
+/// The prices calls are priced at: roster's own table, with what
+/// config.toml's `[prices]` adds to it or sets in its place.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prices {
+    set: BTreeMap<String, ModelRates>,
 }
 
-/// A model's name without a provider or a date.
-fn base_name(model: &str) -> &str {
-    let name = model.rsplit('/').next().unwrap_or(model);
-    match name.rsplit_once('-') {
-        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
-        _ => name,
+impl Prices {
+    pub fn new(set: &BTreeMap<String, crate::config::Price>) -> Prices {
+        let set = set
+            .iter()
+            .map(|(model, p)| {
+                let long = p.long.as_ref().map(|l| {
+                    (
+                        l.above,
+                        rates(l.input, l.output, l.cache_read, l.cache_write),
+                    )
+                });
+                let normal = rates(p.input, p.output, p.cache_read, p.cache_write);
+                (model.clone(), ModelRates { normal, long })
+            })
+            .collect();
+        Prices { set }
     }
-}
 
-impl Call {
-    /// What it cost, or would have at the API's prices, and what reading
+    /// A model's prices: as config.toml sets them, by the name its agent
+    /// gives it or without a provider (`anthropic/…`, as pi names it) or a
+    /// date (`…-20251001`), else roster's own by the latter.
+    fn of(&self, model: &str) -> Option<ModelRates> {
+        let name = base_name(model);
+        let set = self.set.get(model).or_else(|| self.set.get(name)).copied();
+        set.or_else(|| {
+            PRICES.iter().find(|p| p.0 == name).map(|p| ModelRates {
+                normal: p.1,
+                long: p.2,
+            })
+        })
+    }
+
+    /// What a file's calls are saved with: the version of roster's reading
+    /// and table (`VERSION`), and of what config.toml sets, so that once
+    /// either changes, every file still there is read and priced again.
+    pub fn version(&self) -> String {
+        if self.set.is_empty() {
+            return VERSION.to_string();
+        }
+        let set = format!("{:?}", self.set);
+        format!("{VERSION}+{}", crate::util::fnv1a(set.as_bytes()))
+    }
+
+    /// What `call` cost, or would have at the API's prices, and what reading
     /// from the cache saved; None if no price for its model is known. As
     /// Claude prices its own: fast mode at its own rates (a long call's
     /// too), a call in the US only a tenth more, then each search.
-    pub fn cost(&self) -> Option<(f64, f64)> {
-        let c = &self.counts;
-        let s = &self.served;
-        let priced = price(&self.model).map(|(name, normal, long)| {
-            let fast = FAST.iter().find(|f| s.fast && f.0 == *name).map(|f| f.1);
+    pub fn cost(&self, call: &Call) -> Option<(f64, f64)> {
+        let c = &call.counts;
+        let s = &call.served;
+        let name = base_name(&call.model);
+        let priced = self.of(&call.model).map(|ModelRates { normal, long }| {
+            let fast = FAST.iter().find(|f| s.fast && f.0 == name).map(|f| f.1);
             let r = match long {
-                Some((above, long)) if fast.is_none() && c.sent() > *above => long,
+                Some((above, long)) if fast.is_none() && c.sent() > above => long,
                 _ => normal,
             };
             let times = fast.unwrap_or(1.0) * if s.us_only { US_ONLY } else { 1.0 };
@@ -261,10 +302,27 @@ impl Call {
         });
         // What the agent says it cost counts; 0 is what pi says of a model
         // it knows no price for.
-        match self.cost.filter(|c| *c > 0.0) {
+        match call.cost.filter(|c| *c > 0.0) {
             Some(own) => Some((own, priced.map_or(0.0, |p| p.1))),
             None => priced,
         }
+    }
+}
+
+/// A model's name without a provider or a date.
+fn base_name(model: &str) -> &str {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    match name.rsplit_once('-') {
+        Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => name,
+    }
+}
+
+impl Call {
+    /// What it cost at roster's own prices (`Prices::cost`).
+    #[cfg(test)]
+    pub fn cost(&self) -> Option<(f64, f64)> {
+        Prices::default().cost(self)
     }
 }
 
@@ -370,8 +428,9 @@ pub struct ModelSpent {
 const HOUR: i64 = 3_600_000;
 
 /// What changes how the files are read or what their calls cost (a reader
-/// mended, a price added): saved with each file, and a file saved with
-/// another is read again.
+/// mended, a price added to the table): saved with each file, with what
+/// config.toml sets (`Prices::version`), and a file saved with another is
+/// read again.
 pub const VERSION: &str = "4";
 
 /// What a conversation's calls to one model spent in one hour, as summed
@@ -471,11 +530,12 @@ pub(crate) struct Found {
 
 impl Scan {
     /// Reads the built-in agents' files that changed since what `db` has of
-    /// them was saved, or were saved with another `VERSION`, and saves each
-    /// one's calls in place of what was. What was saved of a file gone
-    /// stays, unless it was moved (codex archiving a rollout): then it's the
-    /// file where it is now. Whether anything was saved or forgotten.
-    pub fn update(&mut self, db: &Db) -> Result<bool> {
+    /// them was saved, or were saved with another version of the reading or
+    /// `prices`, and saves each one's calls in place of what was, priced at
+    /// `prices`. What was saved of a file gone stays, unless it was moved
+    /// (codex archiving a rollout): then it's the file where it is now.
+    /// Whether anything was saved or forgotten.
+    pub fn update(&mut self, db: &Db, prices: &Prices) -> Result<bool> {
         let mut found = Vec::new();
         for &agent in crate::agent::BUILT_IN {
             for (path, session) in crate::agent::adapter(agent).token_files() {
@@ -492,14 +552,15 @@ impl Scan {
                 });
             }
         }
-        self.save(db, VERSION, found)
+        self.save(db, prices, found)
     }
 
     /// Saves what the files `found` spent, those changed since saved, or
-    /// saved with another `version` (`update`). Each is saved with its
+    /// saved with another version (`update`). Each is saved with its
     /// version, so a reading stopped halfway (roster quit) goes on where it
     /// stopped.
-    pub(crate) fn save(&mut self, db: &Db, version: &str, found: Vec<Found>) -> Result<bool> {
+    pub(crate) fn save(&mut self, db: &Db, prices: &Prices, found: Vec<Found>) -> Result<bool> {
+        let version = prices.version();
         let mut saved = db.spent_files()?;
         // A file gone from where it was saved, found by its name where an
         // agent keeps its files, of the same conversation, was moved: what
@@ -546,7 +607,7 @@ impl Scan {
             let at = ms(f.modified);
             if saved
                 .get(&f.key)
-                .is_some_and(|s| (s.modified, s.size, s.version.as_str()) == (at, f.size, version))
+                .is_some_and(|s| (s.modified, s.size, &s.version) == (at, f.size, &version))
             {
                 continue;
             }
@@ -576,13 +637,13 @@ impl Scan {
                 calls,
             });
             if batch.len() >= BATCH_FILES || batched >= BATCH_CALLS {
-                db.save_spent_files(&std::mem::take(&mut batch), version)?;
+                db.save_spent_files(&std::mem::take(&mut batch), prices)?;
                 batched = 0;
                 changed = true;
             }
         }
         if !batch.is_empty() {
-            db.save_spent_files(&batch, version)?;
+            db.save_spent_files(&batch, prices)?;
             changed = true;
         }
         self.files.retain(|path, _| recent.contains(path));
@@ -782,8 +843,9 @@ pub(crate) mod tests {
         };
         let db = Db::open_in_memory().unwrap();
         let (a, b) = (write("a.jsonl", 100), write("b.jsonl", 20));
+        let (v1, v2) = (Prices::default(), priced("claude-opus-5-5", 1.0));
         // Stopped after the first file.
-        assert!(Scan::default().save(&db, "v1", vec![found(&a)]).unwrap());
+        assert!(Scan::default().save(&db, &v1, vec![found(&a)]).unwrap());
         // As it was then, though rewritten since (as long, as old): not read
         // again; the other is.
         let was = std::fs::metadata(&a).unwrap().modified().unwrap();
@@ -796,28 +858,101 @@ pub(crate) mod tests {
             .unwrap();
         assert!(
             Scan::default()
-                .save(&db, "v1", vec![found(&a), found(&b)])
+                .save(&db, &v1, vec![found(&a), found(&b)])
                 .unwrap()
         );
         assert_eq!(input(&db), 100 + 20);
         assert!(
             !Scan::default()
-                .save(&db, "v1", vec![found(&a), found(&b)])
+                .save(&db, &v1, vec![found(&a), found(&b)])
                 .unwrap()
         );
-        // Another version: every file again.
+        // Another version, of the prices here: every file again, priced at
+        // them ($1 a million in).
         assert!(
             Scan::default()
-                .save(&db, "v2", vec![found(&a), found(&b)])
+                .save(&db, &v2, vec![found(&a), found(&b)])
                 .unwrap()
         );
         assert_eq!(input(&db), 900 + 20);
-        assert!(
-            db.spent_files()
-                .unwrap()
-                .values()
-                .all(|f| f.version == "v2")
+        let files = db.spent_files().unwrap();
+        assert!(files.values().all(|f| f.version == v2.version()));
+        let cost: f64 = db
+            .spent_hours(i64::MIN / 2, i64::MAX / 2)
+            .unwrap()
+            .iter()
+            .map(|h| h.spent.cost)
+            .sum();
+        assert!((cost - 920.0 / 1e6).abs() < 1e-12, "{cost}");
+    }
+
+    /// Roster's prices, with `model`'s input at `input` a million and the
+    /// rest free.
+    fn priced(model: &str, input: f64) -> Prices {
+        let config = format!("[prices.{model:?}]\ninput = {input:?}\noutput = 0.0\n");
+        Prices::new(&crate::config::Config::parse(&config).unwrap().prices)
+    }
+
+    #[test]
+    fn prices_set_in_config_add_to_roster_s_or_take_their_place() {
+        let config = crate::config::Config::parse(
+            r#"
+            [prices."claude-opus-5-5"]
+            input = 1.0
+            output = 2.0
+            [prices."vllm/qwen3"]
+            input = 0.5
+            output = 0.5
+            cache_read = 0.25
+            [prices.qwen3]
+            input = 9.0
+            output = 9.0
+            [prices.big]
+            input = 1.0
+            output = 1.0
+            long = { above = 1000, input = 3.0, output = 3.0 }
+            "#,
+        )
+        .unwrap();
+        let prices = Prices::new(&config.prices);
+        let cost = |model: &str, input: u64, cache_read: u64, output: u64| {
+            prices
+                .cost(&call(0, model, input, cache_read, output))
+                .map(|c| c.0)
+        };
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-12);
+        // In place of roster's own, with a date too.
+        assert!(close(
+            cost("claude-opus-5-5-20261001", 1_000_000, 0, 1_000_000),
+            3.0
+        ));
+        // As its agent names it, before the name alone; one roster has none for.
+        assert!(close(cost("vllm/qwen3", 1_000_000, 1_000_000, 0), 0.75));
+        assert!(close(cost("ollama/qwen3", 1_000_000, 0, 0), 9.0));
+        // A long call, all of it at the long rates.
+        assert!(close(cost("big", 2_000, 0, 0), 6_000.0 / 1e6));
+        assert!(close(cost("big", 500, 0, 0), 500.0 / 1e6));
+        // Roster's own for the rest; unknown, none.
+        assert_eq!(
+            cost("claude-sonnet-5-5", 1, 0, 0),
+            call(0, "claude-sonnet-5-5", 1, 0, 0).cost().map(|c| c.0)
         );
+        assert_eq!(cost("mystery", 1, 0, 0), None);
+        // Their version: roster's own without any, another with them, as the
+        // prices set change.
+        assert_eq!(Prices::default().version(), VERSION);
+        assert_ne!(prices.version(), VERSION);
+        assert_ne!(priced("big", 1.0).version(), priced("big", 2.0).version());
+        // What they must be.
+        for bad in [
+            "[prices.x]\ninput = -1.0\noutput = 1.0",
+            "[prices.x]\ninput = 1.0\noutput = 1.0\ncache_read = 1e308",
+            "[prices.x]\ninput = 1.0",
+            "[prices.x]\ninput = 1.0\noutput = 1.0\nlong = { above = 0, input = 1.0, output = 1.0 }",
+            "[prices.x]\ninput = 1.0\noutput = 1.0\ncached = 1.0",
+        ] {
+            assert!(crate::config::Config::parse(bad).is_err(), "{bad}");
+        }
     }
 
     /// What files' calls add up to by the hour, as saved: an agent, a

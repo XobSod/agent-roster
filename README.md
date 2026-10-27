@@ -165,8 +165,9 @@ To the right of the limits (`h`/`l` move along the tabs), what the agents spent 
 last 24 hours, 7, 30 or 90 days, from every conversation they keep on this machine,
 started in roster or not: tokens of each kind (input, read from the cache, written to
 it, output) and what they'd cost at the API's prices, by agent, with a chart of when,
-and by model. Prices are roster's own table, from pi's model catalog; a model it has no
-price for shows as unpriced, and pi's own costs count as pi says them. Roster keeps it in
+and by model. Prices are roster's own table, from pi's model catalog, and what
+`[prices]` in config.toml sets; a model with no price shows as unpriced, and pi's own
+costs count as pi says them. Roster keeps it in
 its database, call by call, so it stays once a conversation is gone: Claude deletes its
 after 30 days (`cleanupPeriodDays`), and you may delete them yourself.
 It goes back as far as the agents' files did when roster first read them. A newer
@@ -207,10 +208,10 @@ roster events --follow                  # what the agents' hooks report
 roster usage                            # what your Claude and Codex accounts have used of their limits
 roster tokens --days 7                  # what the agents spent: tokens by kind, and their cost at API prices
 roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
-roster config                           # every setting: its value, yours or the default, what it does
+roster config                           # every setting (but prices): its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
 roster config unset fit_preview         # back to its default
-roster config --defaults                # a config.toml with every setting, commented out
+roster config --defaults                # a config.toml with every setting, prices' shape too, commented out
 roster config --edit                    # config.toml in $EDITOR (from those defaults if there's none)
 ```
 
@@ -221,8 +222,8 @@ lists every command.
 
 All files are optional and live in `~/.config/agent-roster/`:
 
-- `config.toml`: the settings view (`v s`) shows every setting with its value and
-  what it does, and changes them: Enter (on/off, the next choice, a value typed, or
+- `config.toml`: the settings view (`v s`) shows every setting (but prices) with its
+  value and what it does, and changes them: Enter (on/off, the next choice, a value typed, or
   for a key the next one pressed), `←→` (for a model, through the agent's; Tab
   completes one being typed), `a` adds a key, `d` puts the default back,
   `n` adds an agent, `x` takes an agent's settings out, `e` opens the file in
@@ -246,6 +247,17 @@ All files are optional and live in `~/.config/agent-roster/`:
     Codex accounts have used of their limits (`v u` still shows it).
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
+  - `[prices."<model>"]`: what a model's calls cost, in dollars per million tokens
+    (`input`, `output`, `cache_read`, `cache_write`, the last two 0 unless set, and
+    `long = { above = 272000, input = …, output = … }` for a call sending more than
+    `above` tokens), for a model roster's table lacks or in place of its own. By the
+    model's name as its agent gives it (`"vllm/qwen3"`), else without a provider or a
+    date. Changed, what's still in the agents' files is priced again; what's gone keeps
+    its cost. Mind that cache reads and writes are free unless priced; Claude's
+    hour-long cache writes cost twice `input` still, and its fast mode multiplies the
+    price as for the table's; and a cost the agent says itself (pi's) counts over any
+    price. Not in the settings view nor `roster config set`: `roster config --edit`,
+    or `--defaults` for the shape.
   - `[notes]`: `editor`, where `s o` and `p o` open a note: `"builtin"` (default),
     roster's own editor with vim's keys, or `"external"`, `$VISUAL` or `$EDITOR`;
     `escape`, keys that leave insert mode when typed quickly, as vim's `inoremap jk

@@ -310,12 +310,7 @@ fn index_calls_once(tx: &Transaction) -> rusqlite::Result<usize> {
 /// does in an eighth of the room: of ten million calls, two sharing one is
 /// a chance in hundreds of thousands.
 fn call_key(id: &str) -> i64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in id.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash as i64
+    crate::util::fnv1a_64(id.as_bytes()) as i64
 }
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
@@ -1096,14 +1091,19 @@ impl Db {
             size,
             calls: calls.to_vec(),
         };
-        self.save_spent_files(&[save], crate::tokens::VERSION)
+        self.save_spent_files(&[save], &crate::tokens::Prices::default())
     }
 
     /// Saves the calls in each of `files` in place of what was saved of it,
-    /// as of `version` (`tokens::Prices::version`), in one transaction. A
+    /// priced at `prices`, and with their version, in one transaction. A
     /// call saved already from another file (copied there by a fork) stays
     /// that file's; one that spent nothing (it failed) isn't saved.
-    pub fn save_spent_files(&self, files: &[SpentSave], version: &str) -> Result<()> {
+    pub fn save_spent_files(
+        &self,
+        files: &[SpentSave],
+        prices: &crate::tokens::Prices,
+    ) -> Result<()> {
+        let version = prices.version();
         let tx = self.conn.unchecked_transaction()?;
         let mut file = tx.prepare(
             "INSERT INTO spent_files (path, agent, session, modified, size, version)
@@ -1147,7 +1147,7 @@ impl Db {
                         new
                     }
                 };
-                let (t, cost) = (&call.counts, call.cost());
+                let (t, cost) = (&call.counts, prices.cost(call));
                 insert.execute(params![
                     call_key(&call.id),
                     id,

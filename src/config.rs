@@ -57,6 +57,15 @@
 //! [agents.aider]                  # any other agent: state from its screen
 //! idle_after = 4                  # seconds without screen changes = idle
 //! fit_preview = "never"           # also per agent; the agent's wins
+//!
+//! [prices."gpt-5-codex"]          # what a model's calls cost, in dollars per million
+//! input = 1.25                    # tokens: for one roster has no price for, or in
+//! output = 10.0                   # place of roster's own
+//! cache_read = 0.125              # default 0, as cache_write
+//! [prices."gpt-5-codex".long]     # a call sending more than `above` tokens: all of
+//! above = 272000                  # it at these
+//! input = 2.5
+//! output = 15.0
 //! ```
 
 use std::collections::BTreeMap;
@@ -90,6 +99,36 @@ pub struct Config {
     pub notes: Notes,
     /// How the session list is grouped (default: by attention, on shelves).
     pub group_by: Option<GroupBy>,
+    /// What models' calls cost, by model: in place of roster's own prices,
+    /// or for models it has none for (`tokens::Prices`).
+    pub prices: BTreeMap<String, Price>,
+}
+
+/// What a model's calls cost, in dollars per million tokens.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
+    /// What all of a call sending more tokens than its `above` costs.
+    pub long: Option<LongPrice>,
+}
+
+/// A model's prices for a long call: one sending more than `above` tokens.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LongPrice {
+    pub above: u64,
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
 }
 
 /// How Claude's account's limits are asked: of Claude Code itself (in its
@@ -474,6 +513,34 @@ impl Config {
             if let Some(effort) = &agent.effort {
                 crate::agent::check_effort(name, effort)
                     .with_context(|| format!("agents.{name}.effort"))?;
+            }
+        }
+        for (model, price) in &config.prices {
+            if model.trim().is_empty() {
+                bail!("prices: a model needs a name");
+            }
+            let long = price.long.as_ref();
+            let rates = [
+                ("input", Some(price.input)),
+                ("output", Some(price.output)),
+                ("cache_read", Some(price.cache_read)),
+                ("cache_write", Some(price.cache_write)),
+                ("long.input", long.map(|l| l.input)),
+                ("long.output", long.map(|l| l.output)),
+                ("long.cache_read", long.map(|l| l.cache_read)),
+                ("long.cache_write", long.map(|l| l.cache_write)),
+            ];
+            for (key, rate) in rates {
+                // A million dollars a million tokens: past any price, and
+                // far from where a cost would overflow.
+                if let Some(rate) = rate
+                    && !(rate.is_finite() && (0.0..=1e6).contains(&rate))
+                {
+                    bail!("prices.{model:?}.{key} must be dollars per million tokens, not {rate}");
+                }
+            }
+            if long.is_some_and(|l| l.above == 0) {
+                bail!("prices.{model:?}.long.above must be a number of tokens, at least 1");
             }
         }
         Ok(config)

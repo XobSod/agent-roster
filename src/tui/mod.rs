@@ -202,7 +202,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         // it shows.
         let period = app.usage_period.filter(|_| app.mode == Mode::Usage);
         if app.tokens.due(period.is_some()) {
-            app.tokens.read(tokens::scan(roster.paths.db()));
+            let prices = crate::tokens::Prices::new(&roster.config.prices);
+            app.tokens.read(tokens::scan(roster.paths.db(), prices));
         }
         app.tokens.arrived();
         if let Some(period) = period {

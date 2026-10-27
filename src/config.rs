@@ -15,6 +15,9 @@
 //!                                 # [agents.claude] limits says; codex's own server)
 //! sidebar_usage = false           # default true: under the session list, what your
 //!                                 # Claude and codex accounts have used of their limits
+//! trust_project_folders = true    # default false: a project's folder trusted in Claude
+//!                                 # and codex as a session starts there, as their own
+//!                                 # question would (written in their configs)
 //! group_by = "project"            # "attention" (default): the list on shelves, by what
 //!                                 # waits for you; "project": under each project
 //! card_subagents = "unfolded"     # a session's subagents at work, on its card:
@@ -98,6 +101,9 @@ pub struct Config {
     /// Under the session list, a line with what the agents' accounts have
     /// used of their limits (default on).
     pub sidebar_usage: Option<bool>,
+    /// A session's folder trusted in its agent (Claude, codex) as it
+    /// starts, in the agent's own config, so it doesn't ask (default off).
+    pub trust_project_folders: Option<bool>,
     /// The agent new sessions get unless the project or the user picks one.
     pub default_agent: Option<String>,
     pub notes: Notes,
@@ -293,9 +299,9 @@ pub struct SessionKeys {
     pub start: KeyList,
     pub stop: KeyList,
     pub restart: KeyList,
-    /// Start a session, giving its agent the first prompt it may not have
-    /// taken again (one it exited before taking).
-    pub prompt: KeyList,
+    /// The key that gave a first prompt again, gone (starting asks):
+    /// taken, and said to be gone (`Config::gone`).
+    pub prompt: Option<toml::Value>,
     /// Archive a session, or restore an archived one.
     pub archive: KeyList,
     /// Delete an archived session for good.
@@ -371,7 +377,7 @@ impl Default for SessionKeys {
             start: keys(&["s"]),
             stop: keys(&["x"]),
             restart: keys(&["r"]),
-            prompt: keys(&["p"]),
+            prompt: None,
             archive: keys(&["d"]),
             delete: keys(&["D"]),
             toggle_read: keys(&["u"]),
@@ -575,6 +581,14 @@ impl Config {
                     .to_string(),
             );
         }
+        if self.keys.session.prompt.is_some() {
+            gone.push(
+                "keys.session.prompt is gone: starting a session whose first prompt \
+                 wasn't seen taken asks whether to give it again; take it out of \
+                 config.toml (roster config --edit)"
+                    .to_string(),
+            );
+        }
         gone
     }
 
@@ -589,6 +603,10 @@ impl Config {
     /// How Claude's account's limits are asked.
     pub fn claude_limits(&self) -> ClaudeLimits {
         self.agent(crate::agent::CLAUDE).limits.unwrap_or_default()
+    }
+
+    pub fn trust_project_folders(&self) -> bool {
+        self.trust_project_folders.unwrap_or(false)
     }
 
     pub fn sidebar_usage(&self) -> bool {
@@ -827,6 +845,17 @@ mod tests {
             old.gone()
         );
         assert!(Config::default().gone().is_empty());
+    }
+
+    #[test]
+    fn the_key_giving_a_first_prompt_again_is_gone_but_taken() {
+        let old = Config::parse("[keys.session]\nprompt = \"p\"").unwrap();
+        let gone = old.gone();
+        assert!(
+            gone.iter()
+                .any(|g| g.contains("keys.session.prompt") && g.contains("asks")),
+            "{gone:?}"
+        );
     }
 
     #[test]

@@ -443,10 +443,10 @@ fn agents_that_cant_resume_ask_before_a_new_conversation() {
 }
 
 #[test]
-fn a_kept_first_prompt_is_given_again_asking_as_a_start_would() {
+fn a_kept_first_prompt_is_asked_about_as_it_starts() {
     let mut app = app();
     app.agents.push("codex".into());
-    // Codex, gone before saying which conversation it's on.
+    // Codex, gone before saying it took its first prompt.
     let mut cx = with("c1", (1, "alpha"), State::Stopped, false, 1);
     cx.agent = "codex".into();
     cx.conversation_id = None;
@@ -456,13 +456,53 @@ fn a_kept_first_prompt_is_given_again_asking_as_a_start_would() {
     app.folded.clear();
     app.set_data(app.projects.clone(), sessions.clone());
     select(&mut app, "c1");
-    assert_eq!(keys(&mut app, "sp"), None);
-    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
-        panic!("no confirmation")
+    // Starting it asks whether to give it again: y gives it, n starts
+    // without, Esc neither.
+    let asked = |app: &mut App, keys_: &str| {
+        let op = match keys_ {
+            "Enter" => app.on_key(key(KeyCode::Enter)),
+            _ => keys(app, keys_),
+        };
+        assert_eq!(op, None);
+        let Some(Dialog::Ask { question, yes, no }) = app.dialog.take() else {
+            panic!("not asked")
+        };
+        assert!(question.contains("\"fix it and more\""), "{question}");
+        assert!(question.contains("new conversation"), "{question}");
+        (yes, no)
     };
-    assert!(question.contains("can't resume"), "{question}");
-    assert_eq!(keys(&mut app, "y"), Some(Op::PromptAgain("c1".into())));
-    // Its panel: the prompt on one line, and what to do on its own.
+    let (yes, no) = asked(&mut app, "ss");
+    assert_eq!(
+        (yes, no),
+        (Op::PromptAgain("c1".into()), Op::Start("c1".into()))
+    );
+    // So does attaching to it, stopped as it is.
+    let (yes, no) = asked(&mut app, "Enter");
+    assert_eq!(
+        (yes, no),
+        (Op::AttachPromptAgain("c1".into()), Op::Attach("c1".into()))
+    );
+    // And restarting it, still at a screen it showed first.
+    let s = sessions.last_mut().unwrap();
+    s.state = State::Working;
+    app.set_data(app.projects.clone(), sessions.clone());
+    let (yes, no) = asked(&mut app, "sr");
+    assert_eq!(
+        (yes, no),
+        (
+            Op::RestartPromptAgain("c1".into()),
+            Op::Restart("c1".into())
+        )
+    );
+    // The answers, and Esc.
+    app.ask("q".into(), Op::Start("y".into()), Op::Start("n".into()));
+    assert_eq!(keys(&mut app, "y"), Some(Op::Start("y".into())));
+    app.ask("q".into(), Op::Start("y".into()), Op::Start("n".into()));
+    assert_eq!(keys(&mut app, "n"), Some(Op::Start("n".into())));
+    app.ask("q".into(), Op::Start("y".into()), Op::Start("n".into()));
+    assert_eq!(app.on_key(key(KeyCode::Esc)), None);
+    assert!(app.dialog.is_none());
+    // Its panel: the prompt on one line, and that a start asks.
     let text = |app: &App, s: &Session| -> Vec<String> {
         (app.session_info(s, &[], &[], 10).lines.iter())
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -474,11 +514,12 @@ fn a_kept_first_prompt_is_given_again_asking_as_a_start_would() {
         .position(|l| l.contains("First prompt"))
         .unwrap();
     assert!(lines[at].ends_with("fix it and more"), "{lines:?}");
-    assert!(
-        lines[at + 1].trim() == "s p gives it again (not seen taken)",
+    assert_eq!(
+        lines[at + 1].trim(),
+        "not seen taken: starting asks to give it again",
         "{lines:?}"
     );
-    // Archived, it says what it is, not a key that doesn't work there.
+    // Archived, it says what it is, not what doesn't happen there.
     let mut gone = cx.clone();
     gone.deleted_at = Some(5);
     let lines = text(&app, &gone);
@@ -486,20 +527,12 @@ fn a_kept_first_prompt_is_given_again_asking_as_a_start_would() {
         lines.iter().any(|l| l.trim() == "not seen taken"),
         "{lines:?}"
     );
-    // Its conversation known, nothing to ask.
-    sessions.last_mut().unwrap().conversation_id = Some("x".into());
-    app.set_data(app.projects.clone(), sessions.clone());
-    assert_eq!(keys(&mut app, "sp"), Some(Op::PromptAgain("c1".into())));
-    // Nothing kept, or running: said why.
-    sessions.last_mut().unwrap().given_prompt = None;
-    app.set_data(app.projects.clone(), sessions.clone());
-    assert_eq!(keys(&mut app, "sp"), None);
-    assert!(app.dialog.is_none() && app.message().unwrap().error);
+    // Nothing kept: no question but the new conversation's.
     let s = sessions.last_mut().unwrap();
-    (s.given_prompt, s.state) = (Some("fix it".into()), State::Idle);
+    (s.given_prompt, s.state) = (None, State::Stopped);
     app.set_data(app.projects.clone(), sessions);
-    assert_eq!(keys(&mut app, "sp"), None);
-    assert!(app.message().unwrap().text.contains("is running"));
+    assert_eq!(keys(&mut app, "ss"), None);
+    assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
 }
 
 #[test]

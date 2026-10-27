@@ -10,6 +10,13 @@ pub enum Dialog {
         question: String,
         op: Op,
     },
+    /// A question either answer of does something: `yes` or `no`; Esc
+    /// neither.
+    Ask {
+        question: String,
+        yes: Op,
+        no: Op,
+    },
     Input {
         prompt: String,
         value: String,
@@ -72,6 +79,16 @@ impl App {
                 Picked::Cancel => None,
                 Picked::Pick(a) => {
                     self.adopt(*a);
+                    None
+                }
+            },
+            Dialog::Ask { question, yes, no } => match e.code {
+                KeyCode::Char('y' | 'Y') => Some(yes),
+                KeyCode::Char('n' | 'N') => Some(no),
+                KeyCode::Esc => None,
+                KeyCode::Char('c') if ctrl => None,
+                _ => {
+                    self.dialog = Some(Dialog::Ask { question, yes, no });
                     None
                 }
             },
@@ -174,6 +191,10 @@ impl App {
 
     pub(super) fn confirm(&mut self, question: String, op: Op) {
         self.dialog = Some(Dialog::Confirm { question, op });
+    }
+
+    pub(super) fn ask(&mut self, question: String, yes: Op, no: Op) {
+        self.dialog = Some(Dialog::Ask { question, yes, no });
     }
 }
 

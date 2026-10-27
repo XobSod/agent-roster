@@ -446,22 +446,17 @@ impl App {
         };
         lines.push(field("Conversation", conversation));
         // One its agent exited before it said it took (Codex, at a screen
-        // it showed first, say): kept, to give again when asked.
-        // Said on a line of its own, which a long prompt doesn't push off.
+        // it showed first, say): kept, a start asking whether to give it
+        // again. Said on a line of its own, which a long prompt doesn't push
+        // off.
         if let Some(prompt) = &s.given_prompt {
             lines.push(field(
                 "First prompt",
                 vec![Span::raw(crate::util::one_line(prompt))],
             ));
-            // The key first, where a narrow preview cuts the line; none
-            // where it doesn't work (archived) or isn't bound.
-            let key = (self.keymap.label(Action::Open(Menu::Session)))
-                .zip(self.keymap.menu_label(Menu::Session, Action::PromptAgain));
-            let said = match (s.deleted_at, key) {
-                (None, Some((open, key))) => {
-                    format!("{open} {key} gives it again (not seen taken)")
-                }
-                _ => "not seen taken".to_string(),
+            let said = match s.deleted_at {
+                None => "not seen taken: starting asks to give it again",
+                Some(_) => "not seen taken",
             };
             lines.push(field("", vec![Span::styled(said, muted)]));
         }

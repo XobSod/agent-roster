@@ -52,7 +52,6 @@ impl App {
             | Action::Start
             | Action::Stop
             | Action::Restart
-            | Action::PromptAgain
             | Action::Archive
             | Action::Delete
             | Action::ToggleRead
@@ -223,6 +222,16 @@ impl App {
             }
             Entry::Card(s) | Entry::Row(s) if s.deleted_at.is_some() => self.restore(s),
             Entry::Card(s) | Entry::Row(s) => {
+                // Its first prompt not seen taken: given again, or not.
+                if s.state == State::Stopped && s.given_prompt.is_some() {
+                    let question = crate::agent::prompt_again_question(&s);
+                    self.ask(
+                        question,
+                        Op::AttachPromptAgain(s.id.clone()),
+                        Op::Attach(s.id),
+                    );
+                    return None;
+                }
                 // Starting an agent that can't resume loses its conversation: ask.
                 if s.state == State::Stopped && !crate::agent::resumes(&s) {
                     self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
@@ -281,6 +290,23 @@ impl App {
                 self.open_form(Form::edit_session(&s));
                 None
             }
+            // Its first prompt not seen taken (its agent exited first, or
+            // is still at a screen it showed first): given again, or not.
+            // A new conversation either way, as its agent never said which.
+            Action::Start if s.state == State::Stopped && s.given_prompt.is_some() => {
+                let question = crate::agent::prompt_again_question(&s);
+                self.ask(question, Op::PromptAgain(s.id.clone()), Op::Start(s.id));
+                None
+            }
+            Action::Restart if s.given_prompt.is_some() => {
+                let question = crate::agent::prompt_again_question(&s);
+                self.ask(
+                    question,
+                    Op::RestartPromptAgain(s.id.clone()),
+                    Op::Restart(s.id),
+                );
+                None
+            }
             Action::Start | Action::Restart if !crate::agent::resumes(&s) => {
                 let op = if action == Action::Start {
                     Op::Start(s.id.clone())
@@ -291,18 +317,6 @@ impl App {
                 None
             }
             Action::Start => Some(Op::Start(s.id)),
-            Action::PromptAgain => {
-                if let Some(refused) = s.prompt_again_refused() {
-                    self.fail(refused);
-                    return None;
-                }
-                // A new conversation, as starting it at all would be.
-                if !crate::agent::resumes(&s) {
-                    self.confirm(self.new_conversation_question(&s), Op::PromptAgain(s.id));
-                    return None;
-                }
-                Some(Op::PromptAgain(s.id))
-            }
             // Stopping a working session cuts its turn short, as restarting
             // one does: both ask.
             Action::Stop if s.state == State::Working => {

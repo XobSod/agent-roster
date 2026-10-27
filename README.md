@@ -56,7 +56,7 @@ Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `p` start, prompt again (the first prompt it exited before taking) · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
 
@@ -79,9 +79,10 @@ carry a default agent, model and effort for their sessions, and each agent its o
 (`model` and `effort` in its settings), used when neither the session nor its project
 picks one; "default" leaves it to that. A new session can also get a first prompt,
 typed into the agent once it's ready (Codex gets it on its command line; one Codex exited
-before saying it took, at a screen it showed first, is kept, and `s p`, or `roster start
---prompt-again`, starts it giving it again). `s c` starts a chat, a
-session that needs no project: chats share one directory in a built-in project.
+before saying it took, at a screen it showed first, is kept, and starting it again asks
+whether to give it again, as `--prompt-again` or `--no-prompt-again` answers on the CLI).
+`s c` starts a chat, a session that needs no project: chats share one directory in a
+built-in project.
 
 A Claude, pi or Codex conversation started outside roster (plain `claude`, `pi` or
 `codex`, another
@@ -261,6 +262,11 @@ All files are optional and live in `~/.config/agent-roster/`:
     Claude.ai, no `codex app-server`); `v u` and `roster usage` say so.
   - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
     Codex accounts have used of their limits (`v u` still shows it).
+  - `trust_project_folders`: `true` trusts a session's folder in Claude and Codex as
+    it starts there, so neither asks whether to trust it first (off by default:
+    it's their own config roster writes, `~/.claude.json` and Codex's
+    `config.toml`, as answering them would). A folder Codex was told not to trust
+    stays so.
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
   - `card_subagents`: a Claude or Codex session's subagents at work, on its card: `"folded"`
@@ -320,7 +326,6 @@ All files are optional and live in `~/.config/agent-roster/`:
     start = "s"
     stop = "x"
     restart = "r"
-    prompt = "p"              # start, giving the first prompt it didn't take again
     archive = "d"             # or restore an archived one
     delete = "D"              # an archived one, for good
     toggle_read = "u"

@@ -736,7 +736,15 @@ impl Roster {
             check_prompt_fits(&s.agent, text)?;
         }
         let prompt = launch.prompt.as_ref().map(|_| self.prompt_file(&s.id));
-        let argv = self.wrapped(&s, prompt.as_deref(), &launch.argv)?;
+        // Its folder trusted in its agent first, as asked, by roster run in
+        // its place: in its environment, once the env files are sourced.
+        let mut command = launch.argv.clone();
+        if self.config.trust_project_folders() && agent::adapter(&s.agent).trusts_folders() {
+            let exe = self.exe.to_string_lossy().into_owned();
+            let head = [exe, "trust-folder".into(), s.agent.clone(), "--".into()];
+            command.splice(0..0, head);
+        }
+        let argv = self.wrapped(&s, prompt.as_deref(), &command)?;
         // What an agent's hooks need to report (`roster report`).
         let env = [
             ("ROSTER_SESSION", s.id.clone()),
@@ -988,6 +996,13 @@ impl Roster {
     pub fn restart(&mut self, id: &str) -> Result<()> {
         self.stop(id)?;
         self.start(id)
+    }
+
+    /// `restart`, giving its kept first prompt again (`give_prompt_again`):
+    /// for an agent still at a screen it showed before taking it.
+    pub fn restart_giving_prompt(&mut self, id: &str) -> Result<()> {
+        self.stop(id)?;
+        self.give_prompt_again(id)
     }
 
     /// Archives a session: stops it and puts it away, keeping its conversation ID

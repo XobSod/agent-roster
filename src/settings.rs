@@ -462,6 +462,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         status_line,
         account_limits,
         sidebar_usage,
+        trust_project_folders,
         default_agent,
         notes,
         group_by,
@@ -514,6 +515,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &["sidebar_usage"],
                 sidebar_usage.unwrap_or(true),
                 "under the session list, what your Claude and codex accounts have used of their limits",
+            ),
+            bool_setting(
+                &["trust_project_folders"],
+                trust_project_folders.unwrap_or(false),
+                "trust a session's folder in Claude and codex as it starts, so they don't ask (written in their own configs)",
             ),
             choice(
                 &["group_by"],
@@ -802,7 +808,8 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         start,
         stop,
         restart,
-        prompt,
+        // Gone: said so (`Config::gone`).
+        prompt: _,
         archive,
         delete,
         toggle_read,
@@ -825,11 +832,6 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             s("start", start, "start"),
             s("stop", stop, "stop"),
             s("restart", restart, "restart"),
-            s(
-                "prompt",
-                prompt,
-                "start, giving the agent the first prompt it exited before taking",
-            ),
             s("archive", archive, "archive, or restore an archived one"),
             s("delete", delete, "delete an archived one for good"),
             s("toggle_read", toggle_read, "read / unread"),
@@ -1304,15 +1306,16 @@ fn lookup<'a>(table: &'a Table, path: &[&str]) -> Option<&'a Item> {
     table.get(key)
 }
 
-/// Writes `text` to the config file at `path`: if it's a symlink (to
-/// dotfiles, say), to the file it points to, so the link stays, also when
-/// that file isn't there yet; whole, then moved into place, so nothing reads
-/// half of it.
+/// Writes `text` to the config file at `path` (roster's, or an agent's):
+/// if it's a symlink (to dotfiles, say), to the file it points to, so the
+/// link stays, also when that file isn't there yet; whole, with the old
+/// one's permissions, then moved into place, so nothing reads half of it.
 pub fn write_file(path: &Path, text: &str) -> Result<()> {
     let target = link_target(path);
-    let dir = target.parent().context("config.toml has no directory")?;
+    let dir = (target.parent()).with_context(|| format!("{} has no directory", path.display()))?;
     fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
-    let partial = target.with_extension(format!("toml.{}.partial", std::process::id()));
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let partial = target.with_file_name(format!("{name}.{}.partial", std::process::id()));
     let written = fs::write(&partial, text)
         .with_context(|| format!("can't write {}", partial.display()))
         .and_then(|()| {

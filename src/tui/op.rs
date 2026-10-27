@@ -16,6 +16,10 @@ pub enum Op {
     Start(String),
     /// Start, giving the first prompt the agent may not have taken again.
     PromptAgain(String),
+    /// Restart, likewise.
+    RestartPromptAgain(String),
+    /// Start, likewise, and attach.
+    AttachPromptAgain(String),
     Stop(String),
     Restart(String),
     Archive(String),

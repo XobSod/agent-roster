@@ -12,6 +12,7 @@ mod limits;
 mod subagents;
 mod tokens;
 mod transcript;
+mod trust;
 
 use anyhow::{Context as _, Result};
 use serde_json::Value;
@@ -235,6 +236,17 @@ impl Adapter for Codex {
 
     fn transcript(&self, path: &std::path::Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(CodexTranscript::new(path)))
+    }
+
+    fn trusts_folders(&self) -> bool {
+        true
+    }
+
+    fn trust_folder(&self, dir: &std::path::Path) -> Result<bool> {
+        match conversations::codex_dir() {
+            Some(home) => trust::trust(&home.join("config.toml"), dir),
+            None => Ok(false),
+        }
     }
 
     fn subagent_info(&self, transcript: &std::path::Path, id: &str) -> super::SubagentInfo {

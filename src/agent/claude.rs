@@ -6,6 +6,7 @@ mod limits;
 mod subagents;
 mod tokens;
 mod transcript;
+mod trust;
 
 use std::fs;
 use std::path::Path;
@@ -192,6 +193,17 @@ impl Adapter for Claude {
 
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(ClaudeTranscript::new(path)))
+    }
+
+    fn trusts_folders(&self) -> bool {
+        true
+    }
+
+    fn trust_folder(&self, dir: &Path) -> Result<bool> {
+        match trust::config_file() {
+            Some(file) => trust::trust(&file, dir),
+            None => Ok(false),
+        }
     }
 
     fn subagent_info(&self, transcript: &Path, id: &str) -> super::SubagentInfo {

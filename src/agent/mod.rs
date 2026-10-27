@@ -31,6 +31,7 @@
 
 pub mod claude;
 pub mod codex;
+pub(crate) mod locked;
 pub mod pi;
 
 use std::path::Path;
@@ -210,6 +211,20 @@ pub trait Adapter: Sync {
     /// `file` (`SubagentInfo::file`), in a few words: its latest step.
     fn subagent_doing(&self, _file: &Path) -> Option<String> {
         None
+    }
+
+    /// Trusts the folder `dir` in the agent's own config, as answering its
+    /// question there would (`trust_project_folders`), unless it trusts it
+    /// already: whether it wrote that. Its config is found from the
+    /// environment this runs in, which must be the agent's own
+    /// (`trust_and_run`).
+    fn trust_folder(&self, _dir: &Path) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Whether it trusts folders roster can trust for it (`trust_folder`).
+    fn trusts_folders(&self) -> bool {
+        false
     }
 
     /// Every file it keeps what it spent in (its conversations', started in
@@ -479,6 +494,39 @@ pub fn read_report(name: &str, payload: Option<&str>) -> Report {
     report
 }
 
+/// What `roster trust-folder <agent> -- <command…>` does, run by a session's
+/// launch script in its agent's place once the env files are sourced, so in
+/// the environment the agent gets (a `CODEX_HOME` of the project's, say):
+/// trusts the folder it's in for that agent (`Adapter::trust_folder`), then
+/// becomes the agent. What fails of the trust is said, and the agent asks as
+/// it would.
+pub fn trust_and_run(args: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    let (agent, argv) = match args {
+        [agent, dash, argv @ ..] if dash == "--" && !argv.is_empty() => (agent, argv),
+        _ => {
+            eprintln!("roster: trust-folder takes an agent, --, and its command");
+            std::process::exit(2);
+        }
+    };
+    // The working directory as the agent will see it: links resolved.
+    match std::env::current_dir() {
+        Ok(dir) => {
+            if let Err(e) = adapter(agent).trust_folder(&dir) {
+                eprintln!(
+                    "roster: couldn't trust {} in {}: {e:#}",
+                    dir.display(),
+                    crate::util::capitalize(agent)
+                );
+            }
+        }
+        Err(e) => eprintln!("roster: can't tell which folder to trust: {e}"),
+    }
+    let e = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    eprintln!("roster: can't run {}: {e}", argv[0]);
+    std::process::exit(127);
+}
+
 /// What an adapter may use to start its agent.
 pub struct Context<'a> {
     /// roster's own executable, which the agent's hooks call (`roster report`).
@@ -563,6 +611,22 @@ pub fn resumes(s: &Session) -> bool {
 
 /// What the CLI and TUI ask before starting `s`, which begins a new
 /// conversation (`resumes`).
+/// What starting `s` asks when its agent exited before it said it took its
+/// first prompt (`Session::given_prompt`): whether to give it again. Either
+/// way it's a new conversation, its agent never having said which it's on.
+pub fn prompt_again_question(s: &Session) -> String {
+    let prompt = crate::util::one_line(s.given_prompt.as_deref().unwrap_or(""));
+    let prompt = match prompt.char_indices().nth(60) {
+        Some((at, _)) => format!("{}…", &prompt[..at]),
+        None => prompt,
+    };
+    format!(
+        "{} ({}) exited before it said it took its first prompt, \"{prompt}\", so it starts a new conversation. Give it the prompt again?",
+        s.label(),
+        s.agent
+    )
+}
+
 pub fn new_conversation_question(s: &Session) -> String {
     if adapter(&s.agent).names_its_conversation() {
         format!(

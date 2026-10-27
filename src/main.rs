@@ -144,6 +144,8 @@ enum Cmd {
         /// Start a stopped agent that can't resume without asking
         #[arg(short, long)]
         yes: bool,
+        #[command(flatten)]
+        again: PromptAgain,
     },
     /// Start a stopped session, resuming its conversation
     Start {
@@ -151,10 +153,8 @@ enum Cmd {
         /// Don't ask before starting a new conversation for agents that can't resume
         #[arg(short, long)]
         yes: bool,
-        /// Give the agent again the first prompt it exited before taking
-        /// (Codex, at a screen it showed first, say)
-        #[arg(long)]
-        prompt_again: bool,
+        #[command(flatten)]
+        again: PromptAgain,
     },
     /// Stop a session's agent, keeping the session (asks first if it's working)
     Stop {
@@ -167,6 +167,8 @@ enum Cmd {
         session: String,
         #[arg(short, long)]
         yes: bool,
+        #[command(flatten)]
+        again: PromptAgain,
     },
     /// Archive a session: its agent stops, and `roster restore` brings it back
     Archive {
@@ -272,6 +274,14 @@ enum Cmd {
     /// Called by agent hooks; always silent, always exits 0
     #[command(hide = true)]
     Report { kind: String },
+    /// Run by a session's launch in its agent's place: trusts the folder for
+    /// it, in its environment, then runs it (`trust_project_folders`)
+    #[command(hide = true)]
+    TrustFolder {
+        agent: String,
+        #[arg(last = true)]
+        argv: Vec<String>,
+    },
     /// Types a session's first prompt once its agent is ready: what `new
     /// --attach` leaves running while you're attached, when nothing else
     /// refreshes
@@ -308,6 +318,19 @@ enum ProjectCmd {
         #[arg(short, long)]
         yes: bool,
     },
+}
+
+/// Whether a start gives again the first prompt its agent exited before
+/// saying it took (Codex, at a screen it showed first, say); asked when
+/// neither is given.
+#[derive(clap::Args)]
+struct PromptAgain {
+    /// Give the agent its first prompt again, one it exited before saying it took
+    #[arg(long, conflicts_with = "no_prompt_again")]
+    prompt_again: bool,
+    /// Start without that first prompt, kept to be asked about again
+    #[arg(long)]
+    no_prompt_again: bool,
 }
 
 /// What a new session or chat should be.
@@ -402,6 +425,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("report") {
         report::run(&args[2..]);
+    }
+    if args.get(1).map(String::as_str) == Some("trust-folder") {
+        crate::agent::trust_and_run(&args[2..]);
     }
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -533,18 +559,33 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             let s = r.resolve(&session, false)?;
             print!("{}", r.screen(&s, io::stdout().is_terminal())?);
         }
-        Cmd::Attach { session, yes } => {
+        Cmd::Attach {
+            session,
+            yes,
+            again,
+        } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             if s.state == State::Stopped {
-                if !confirm_new_conversation(r, &s, yes)? {
-                    return Ok(());
-                }
+                // Its first prompt not seen taken asks that instead: a new
+                // conversation either way.
+                let give = match s.given_prompt {
+                    Some(_) => match give_prompt_again(&s, &again)? {
+                        Some(give) => give,
+                        None => return Ok(()),
+                    },
+                    None if !confirm_new_conversation(r, &s, yes)? => return Ok(()),
+                    None => false,
+                };
                 // Here, so what starting says comes before tmux takes the
                 // terminal; unless another roster started it while asking.
                 r.refresh()?;
                 if r.db.session(&s.id)?.state == State::Stopped {
-                    r.start(&s.id)?;
+                    if give {
+                        r.give_prompt_again(&s.id)?;
+                    } else {
+                        r.start(&s.id)?;
+                    }
                     say_notices(r);
                 }
             }
@@ -553,19 +594,27 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Start {
             session,
             yes,
-            prompt_again,
+            again,
         } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             // What can't be done isn't asked about first.
-            if prompt_again && let Some(refused) = s.prompt_again_refused() {
+            if again.prompt_again
+                && let Some(refused) = s.prompt_again_refused()
+            {
                 bail!(refused);
             }
-            // A running one fails to start anyway.
-            if s.state == State::Stopped && !confirm_new_conversation(r, &s, yes)? {
-                return Ok(());
-            }
-            if prompt_again {
+            // Its first prompt not seen taken asks that instead: a new
+            // conversation either way. A running one fails to start anyway.
+            let give = match (&s.given_prompt, s.state) {
+                (Some(_), State::Stopped) => match give_prompt_again(&s, &again)? {
+                    Some(give) => give,
+                    None => return Ok(()),
+                },
+                (_, State::Stopped) if !confirm_new_conversation(r, &s, yes)? => return Ok(()),
+                _ => false,
+            };
+            if give {
                 r.give_prompt_again(&s.id)?;
                 println!("Started {}, its first prompt given again", s.label());
                 return Ok(());
@@ -573,10 +622,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             r.start(&s.id)?;
             println!("Started {}", s.label());
             if s.given_prompt.is_some() {
-                println!(
-                    "Its first prompt, not seen taken, is kept: `roster start --prompt-again {}` gives it again",
-                    s.label()
-                );
+                println!("Its first prompt, not seen taken, is kept: starting it again asks again");
             }
         }
         Cmd::Stop { session, yes } => {
@@ -593,9 +639,28 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 println!("{} wasn't running", s.label());
             }
         }
-        Cmd::Restart { session, yes } => {
+        Cmd::Restart {
+            session,
+            yes,
+            again,
+        } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
+            // Still at a screen it showed before taking its first prompt,
+            // say: whether to give it again is asked instead.
+            if s.given_prompt.is_some() {
+                let Some(give) = give_prompt_again(&s, &again)? else {
+                    return Ok(());
+                };
+                if give {
+                    r.restart_giving_prompt(&s.id)?;
+                    println!("Restarted {}, its first prompt given again", s.label());
+                } else {
+                    r.restart(&s.id)?;
+                    println!("Restarted {}", s.label());
+                }
+                return Ok(());
+            }
             let asked = if !r.can_resume(&s) {
                 confirm_new_conversation(r, &s, yes)?
             } else if s.state == State::Working {
@@ -886,7 +951,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Tokens { days, json } => print_tokens(r, days, json)?,
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
-        Cmd::Report { .. } => {}
+        Cmd::Report { .. } | Cmd::TrustFolder { .. } => {}
         Cmd::Deliver { session } => {
             let s = r.resolve(&session, false)?;
             // Its output goes nowhere: you're attached, so it says so there.
@@ -937,6 +1002,28 @@ fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()
 const DELIVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Asks before (re)starting an agent that can't resume its conversation.
+/// Whether a start of `s`, whose first prompt its agent exited before saying
+/// it took, gives it again: as `again` says, else asked (with a terminal to
+/// ask in); None for no start at all.
+fn give_prompt_again(s: &Session, again: &PromptAgain) -> Result<Option<bool>> {
+    if again.prompt_again || again.no_prompt_again {
+        return Ok(Some(again.prompt_again));
+    }
+    let question = crate::agent::prompt_again_question(s);
+    if !io::stdin().is_terminal() {
+        bail!("{question} Pass --prompt-again to give it, or --no-prompt-again to start without.");
+    }
+    eprint!("{question} [y/n, anything else cancels] ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().lock().read_line(&mut answer)?;
+    Ok(match answer.trim().to_lowercase().as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    })
+}
+
 fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> {
     if r.can_resume(s) {
         return Ok(true);

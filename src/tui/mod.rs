@@ -701,6 +701,29 @@ fn perform(
                 .give_prompt_again(&id)
                 .map(|()| format!("Started {label}, its first prompt given again"))
         }
+        Op::RestartPromptAgain(id) => {
+            let label = app.session_label(&id);
+            busy(terminal, app, format!("Restarting {label}…"))?;
+            roster
+                .restart_giving_prompt(&id)
+                .map(|()| format!("Restarted {label}, its first prompt given again"))
+        }
+        Op::AttachPromptAgain(id) => {
+            let label = app.session_label(&id);
+            busy(terminal, app, format!("Starting {label}…"))?;
+            match roster.give_prompt_again(&id) {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    app.attaching(&id);
+                    let result = attach(terminal, roster, app, &id)?.map(|prompted| {
+                        app.detached(prompted);
+                        String::new()
+                    });
+                    app.preview.fitted.clear();
+                    result
+                }
+            }
+        }
         Op::Stop(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Stopping {label}…"))?;

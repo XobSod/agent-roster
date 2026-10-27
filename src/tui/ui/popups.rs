@@ -160,16 +160,20 @@ pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
     match dialog {
         Dialog::Form(form) => draw_form(f, form, area),
         Dialog::Picker(picker) => draw_picker(f, picker, area),
-        Dialog::Confirm { question, .. } => {
+        Dialog::Confirm { question, .. } | Dialog::Ask { question, .. } => {
             let lines = wrapped_lines(question, width.saturating_sub(2) as usize);
             let rect = centered(area, width, lines as u16 + 4);
             let key = |k: &'static str| {
                 Span::styled(k, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
             };
+            let mut keys = vec![key("y"), " yes    ".into(), key("n"), " no".into()];
+            if matches!(dialog, Dialog::Ask { .. }) {
+                keys.extend([Span::raw("    "), key("Esc"), " neither".into()]);
+            }
             let text = Text::from(vec![
                 Line::from(question.clone()),
                 Line::default(),
-                Line::from(vec![key("y"), " yes    ".into(), key("n"), " no".into()]),
+                Line::from(keys),
             ]);
             let inner = popup(f, rect, "confirm", "");
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);

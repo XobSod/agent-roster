@@ -237,9 +237,10 @@ fn a_first_prompts_file_no_launch_read_goes_at_the_next_start() {
     t.wait_for("its agent gone", |t| {
         t.session("s", false).unwrap()["state"] == "stopped"
     });
-    // With a shell again, starting it once more takes it away.
+    // With a shell again, starting it once more takes it away (the prompt
+    // kept, never seen taken).
     fs::write(&config, text).unwrap();
-    t.ok(&["start", "--yes", "s"]);
+    t.ok(&["start", "--no-prompt-again", "s"]);
     assert_eq!(files(&t), 0);
 }
 
@@ -378,14 +379,27 @@ fn a_first_prompt_codex_exited_before_taking_is_kept_to_give_again() {
         (&s["state"], &s["given_prompt"], &s["pending_prompt"]),
         (&json!("stopped"), &json!(true), &json!(false))
     );
-    // Started plainly, it goes without it, and says it's kept.
-    let out = t.ok(&["start", "--yes", "s"]);
-    assert!(out.contains("roster start --prompt-again"), "{out}");
+    // Started without a word on it (and no terminal to ask in), it's said
+    // what to pass; told not to, it goes without it, and says it's kept.
+    let out = t.run(&["start", "--yes", "s"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        said.contains("exited before it said it took its first prompt, \"fix it\"")
+            && said.contains("--prompt-again")
+            && said.contains("--no-prompt-again"),
+        "{said}"
+    );
+    let out = t.ok(&["start", "--no-prompt-again", "s"]);
+    assert!(
+        out.contains("is kept: starting it again asks again"),
+        "{out}"
+    );
     t.wait_for("codex up", |t| t.ok(&["show", "s"]).contains("fake codex:"));
     assert!(!t.ok(&["show", "s"]).contains("turn: fix it"));
     t.ok(&["stop", "--yes", "s"]);
     // Asked for, it's given again; taken, it's no longer kept.
-    t.ok(&["start", "--yes", "--prompt-again", "s"]);
+    t.ok(&["start", "--prompt-again", "s"]);
     t.wait_for("its first turn", |t| {
         t.ok(&["show", "s"]).contains("turn: fix it")
     });
@@ -411,4 +425,67 @@ fn a_first_prompt_codex_exited_before_taking_is_kept_to_give_again() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(said.contains("has no first prompt to give again"), "{said}");
+}
+
+#[test]
+fn a_sessions_folder_is_trusted_in_its_agent_when_asked() {
+    let Some(t) = TestEnv::new("codex-trust") else {
+        return;
+    };
+    with_fake_codex(&t);
+    let proj = t.path("proj");
+    t.ok(&["project", "add", "demo", proj.to_str().unwrap()]);
+    let dir = fs::canonicalize(&proj).unwrap();
+    let key = dir.to_str().unwrap();
+    let codex_config = t.codex_dir().join("config.toml");
+    let claude_config = t.claude_dir().join(".claude.json");
+    fs::create_dir_all(t.claude_dir()).unwrap();
+    fs::write(&claude_config, r#"{"numStartups":1}"#).unwrap();
+    let trusted = |config: &std::path::Path| -> bool {
+        fs::read_to_string(config)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+            .and_then(|c| {
+                let level = c.get("projects")?.get(key)?.get("trust_level")?;
+                level.as_str().map(|l| l == "trusted")
+            })
+            .unwrap_or(false)
+    };
+    // Not by default.
+    t.ok(&["new", "demo", "--name", "off"]);
+    t.wait_for("codex up", |t| {
+        t.ok(&["show", "off"]).contains("fake codex:")
+    });
+    assert!(!codex_config.exists());
+    // Asked: as each starts, in each one's own config.
+    t.ok(&["config", "set", "trust_project_folders", "true"]);
+    t.ok(&["new", "demo", "--name", "on"]);
+    t.wait_for("trusted in codex", |_| trusted(&codex_config));
+    t.wait_for("codex up", |t| {
+        t.ok(&["show", "on"]).contains("fake codex:")
+    });
+    t.ok(&["new", "demo", "--agent", "claude", "--name", "claude"]);
+    t.wait_for("trusted in claude", |_| {
+        fs::read(&claude_config)
+            .ok()
+            .and_then(|text| serde_json::from_slice::<serde_json::Value>(&text).ok())
+            .is_some_and(|c| c["projects"][key]["hasTrustDialogAccepted"] == json!(true))
+    });
+    let claude: serde_json::Value =
+        serde_json::from_slice(&fs::read(&claude_config).unwrap()).unwrap();
+    assert_eq!(claude["numStartups"], json!(1));
+    // Its own config, as the project's env file has it, not roster's.
+    let elsewhere = t.path("codex-elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(
+        proj.join(".agent-roster.env"),
+        format!("CODEX_HOME='{}'\n", elsewhere.display()),
+    )
+    .unwrap();
+    fs::write(&codex_config, "").unwrap();
+    t.ok(&["new", "demo", "--name", "elsewhere"]);
+    t.wait_for("trusted where codex looks", |_| {
+        trusted(&elsewhere.join("config.toml"))
+    });
+    assert!(!trusted(&codex_config));
 }

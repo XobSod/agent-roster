@@ -91,8 +91,10 @@ pub struct Input<'a> {
     pub text: &'a [u8],
     /// Whether what it has printed so far answers it: until then its stdin
     /// stays open, for a command that serves until its input ends (codex's
-    /// server), and then it's ended, as if it had exited with 0. None: its
-    /// stdin closes once it has the text, and it runs to its end.
+    /// server), and then it closes, for the command to exit as it does
+    /// (Claude tidies up as it goes), or be ended a little later, as if it
+    /// had exited with 0. None: its stdin closes once it has the text, and it
+    /// runs to its end.
     pub answered: Option<&'a Answered>,
 }
 
@@ -158,9 +160,15 @@ pub fn converse(
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        // Answered, it has done what it was run for.
+        // Answered, it has done what it was run for: its input ends, for it
+        // to exit as it would.
         if answered.is_some_and(|done| done(&stdout.lock().unwrap())) {
             use std::os::unix::process::ExitStatusExt;
+            drop(stdin.take());
+            let let_go = (Instant::now() + LET_FINISH).min(deadline);
+            while child.try_wait()?.is_none() && Instant::now() < let_go {
+                sleep(Duration::from_millis(20));
+            }
             end_group();
             let _ = child.wait();
             break std::process::ExitStatus::from_raw(0);
@@ -201,6 +209,9 @@ pub fn converse(
 
 /// How long a command's output may stay open after it exits.
 const LINGER: Duration = Duration::from_millis(500);
+
+/// How long a command that has answered has to exit once its input ends.
+const LET_FINISH: Duration = Duration::from_secs(2);
 
 /// `cmd` to run in a session of its own, so a process group of its own, for
 /// what it starts to be ended with it. Without a terminal, too: something
@@ -653,22 +664,38 @@ mod timeout_tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "one\n");
-        // One that serves until its input ends is ended once it answers.
-        let started = Instant::now();
+        // One that serves until its input ends has it end once it answers,
+        // and finishes as it would.
         let answered = |out: &[u8]| out.ends_with(b"two\n");
+        let started = Instant::now();
         let out = converse(
-            sh("cat; echo after"),
+            sh("cat; echo after; exit 3"),
             "it",
-            Duration::from_secs(3),
+            Duration::from_secs(5),
             Some(Input {
                 text: b"two\n",
                 answered: Some(&answered),
             }),
         )
         .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "two\n");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "two\nafter\n");
         assert!(out.status.success());
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // One that doesn't finish then is ended.
+        let started = Instant::now();
+        let out = converse(
+            sh("cat; sleep 10"),
+            "it",
+            Duration::from_secs(8),
+            Some(Input {
+                text: b"two\n",
+                answered: Some(&answered),
+            }),
+        )
+        .unwrap();
+        assert!(out.status.success());
+        let took = started.elapsed();
+        assert!(took >= LET_FINISH && took < LET_FINISH * 2, "{took:?}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! What the agents' accounts have used of their limits: Claude's asked of
-//! Claude.ai's usage service with Claude's login, through curl; codex's of
-//! codex's own server.
+//! Claude itself, or of Claude.ai's usage service with Claude's login,
+//! through curl; codex's of codex's own server.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -29,6 +29,8 @@ fn usage_is_asked_of_each_agents_service() {
         return;
     };
     with_fake_codex(&t);
+    // Claude's asked of its service, with its login.
+    t.ok(&["config", "set", "agents.claude.limits", "service"]);
     // curl found through the env file, as an agent's own commands are.
     let bin = t.path("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -208,6 +210,70 @@ fn usage_is_asked_of_each_agents_service() {
     assert!(
         stdout.contains("codex  plus")
             && stdout.contains("claude  can't tell: Claude's login has expired"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn claude_is_asked_its_limits_itself() {
+    let Some(t) = TestEnv::new("usage-claude") else {
+        return;
+    };
+    // No plan's limits (an API key): Claude says nothing.
+    fs::create_dir_all(t.claude_dir()).unwrap();
+    let out = t.ok(&["usage"]);
+    assert!(!out.contains("claude"), "{out}");
+    // A plan's: what Claude answered, its login never read here (there's
+    // none to read).
+    fs::write(
+        t.claude_dir().join("usage.json"),
+        r#"{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":31.0,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":95.0,"resets_at":null}}}"#,
+    )
+    .unwrap();
+    // An API key in the environment, which Claude would take over its login.
+    let out = t
+        .command(&["usage"])
+        .env("ANTHROPIC_API_KEY", "sk-test")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("claude  max\n"), "{out}");
+    assert!(out.contains("5 hours   69% left"), "{out}");
+    assert!(out.contains("Weekly     5% left"), "{out}");
+    assert!(!t.claude_dir().join(".credentials.json").exists());
+    let said = |file| fs::read_to_string(t.claude_dir().join(file)).unwrap();
+    assert_eq!(said("sdk-env"), "ANTHROPIC_API_KEY=unset\n");
+    // In its SDK mode, without MCP servers or settings.
+    assert_eq!(
+        said("sdk-args"),
+        "-p\n--input-format\nstream-json\n--output-format\nstream-json\n--verbose\n\
+         --strict-mcp-config\n--setting-sources\n\n"
+    );
+    // Asked as its SDK asks, without the scan of its transcripts.
+    assert_eq!(
+        said("sdk-input"),
+        concat!(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"initialize"}}"#,
+            "\n",
+            r#"{"type":"control_request","request_id":"r2","request":{"subtype":"get_usage","skip_behaviors":true}}"#,
+            "\n",
+        )
+    );
+    // Answered, its input ended, for it to exit as it does.
+    assert!(t.claude_dir().join("sdk-ended").exists());
+
+    // Its answer without the figures (it couldn't ask its usage service):
+    // said, not taken for no plan.
+    fs::write(
+        t.claude_dir().join("usage.json"),
+        r#"{"subscription_type":"max","rate_limits_available":true,"rate_limits":null}"#,
+    )
+    .unwrap();
+    let out = t.run(&["usage"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success());
+    assert!(
+        stdout.contains("claude  can't tell: Claude couldn't ask its usage service"),
         "{stdout}"
     );
 }

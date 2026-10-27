@@ -30,8 +30,8 @@ fn answer(printed: &[u8]) -> Option<Value> {
         .find(|v| v["id"] == 2)
 }
 
-/// Asks codex's server, run as `command`; it serves until its stdin ends, so
-/// it's ended once it has answered. None if codex has no account to ask
+/// Asks codex's server, run as `command`; it serves until its stdin ends,
+/// which it's given once it has answered. None if codex has no account to ask
 /// about (not logged in, or on an API key).
 pub(super) fn ask(command: String, ask: &crate::agent::Ask<'_>) -> Option<Result<Usage>> {
     let requests = requests();

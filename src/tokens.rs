@@ -370,8 +370,8 @@ pub struct ModelSpent {
 const HOUR: i64 = 3_600_000;
 
 /// What changes how the files are read or what their calls cost (a reader
-/// mended, a price added): saved with what was spent, and when it isn't
-/// what was saved with, every file is read again.
+/// mended, a price added): saved with each file, and a file saved with
+/// another is read again.
 pub const VERSION: &str = "4";
 
 /// What a conversation's calls to one model spent in one hour, as summed
@@ -460,7 +460,7 @@ pub struct Scan {
 }
 
 /// One of an agent's files, as found.
-struct Found {
+pub(crate) struct Found {
     agent: &'static str,
     session: String,
     path: PathBuf,
@@ -471,18 +471,11 @@ struct Found {
 
 impl Scan {
     /// Reads the built-in agents' files that changed since what `db` has of
-    /// them was saved (all of them, saved with another `VERSION`), and saves
-    /// each one's calls in place of what was. What was saved of a file gone
+    /// them was saved, or were saved with another `VERSION`, and saves each
+    /// one's calls in place of what was. What was saved of a file gone
     /// stays, unless it was moved (codex archiving a rollout): then it's the
     /// file where it is now. Whether anything was saved or forgotten.
     pub fn update(&mut self, db: &Db) -> Result<bool> {
-        const KEY: &str = "spent:version";
-        let current = db.meta(KEY)?.as_deref() == Some(VERSION);
-        let mut saved = if current {
-            db.spent_files()?
-        } else {
-            HashMap::new()
-        };
         let mut found = Vec::new();
         for &agent in crate::agent::BUILT_IN {
             for (path, session) in crate::agent::adapter(agent).token_files() {
@@ -499,6 +492,15 @@ impl Scan {
                 });
             }
         }
+        self.save(db, VERSION, found)
+    }
+
+    /// Saves what the files `found` spent, those changed since saved, or
+    /// saved with another `version` (`update`). Each is saved with its
+    /// version, so a reading stopped halfway (roster quit) goes on where it
+    /// stopped.
+    pub(crate) fn save(&mut self, db: &Db, version: &str, found: Vec<Found>) -> Result<bool> {
+        let mut saved = db.spent_files()?;
         // A file gone from where it was saved, found by its name where an
         // agent keeps its files, of the same conversation, was moved: what
         // was saved of it goes, and it's saved where it is. (A name alone
@@ -544,7 +546,7 @@ impl Scan {
             let at = ms(f.modified);
             if saved
                 .get(&f.key)
-                .is_some_and(|s| (s.modified, s.size) == (at, f.size))
+                .is_some_and(|s| (s.modified, s.size, s.version.as_str()) == (at, f.size, version))
             {
                 continue;
             }
@@ -574,17 +576,14 @@ impl Scan {
                 calls,
             });
             if batch.len() >= BATCH_FILES || batched >= BATCH_CALLS {
-                db.save_spent_files(&std::mem::take(&mut batch))?;
+                db.save_spent_files(&std::mem::take(&mut batch), version)?;
                 batched = 0;
                 changed = true;
             }
         }
         if !batch.is_empty() {
-            db.save_spent_files(&batch)?;
+            db.save_spent_files(&batch, version)?;
             changed = true;
-        }
-        if !current {
-            db.set_meta(KEY, VERSION)?;
         }
         self.files.retain(|path, _| recent.contains(path));
         Ok(changed)
@@ -755,6 +754,71 @@ pub(crate) mod tests {
     }
 
     const H: i64 = HOUR;
+
+    #[test]
+    fn a_reading_stopped_halfway_goes_on_and_another_version_reads_all_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, input: u64| {
+            let path = dir.path().join(name);
+            let reply = serde_json::json!({"type": "assistant", "timestamp": "2026-10-25T18:00:00.000Z",
+                "message": {"id": name, "model": "claude-opus-5-5", "usage": {"input_tokens": input, "output_tokens": 0}}});
+            std::fs::write(&path, format!("{reply}\n")).unwrap();
+            path
+        };
+        let found = |path: &std::path::Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            Found {
+                agent: "claude",
+                session: "c".into(),
+                key: path.to_string_lossy().into_owned(),
+                path: path.to_path_buf(),
+                modified: meta.modified().unwrap(),
+                size: meta.len(),
+            }
+        };
+        let input = |db: &Db| -> u64 {
+            let hours = db.spent_hours(i64::MIN / 2, i64::MAX / 2).unwrap();
+            hours.iter().map(|h| h.spent.tokens.input).sum()
+        };
+        let db = Db::open_in_memory().unwrap();
+        let (a, b) = (write("a.jsonl", 100), write("b.jsonl", 20));
+        // Stopped after the first file.
+        assert!(Scan::default().save(&db, "v1", vec![found(&a)]).unwrap());
+        // As it was then, though rewritten since (as long, as old): not read
+        // again; the other is.
+        let was = std::fs::metadata(&a).unwrap().modified().unwrap();
+        write("a.jsonl", 900);
+        std::fs::File::options()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_modified(was)
+            .unwrap();
+        assert!(
+            Scan::default()
+                .save(&db, "v1", vec![found(&a), found(&b)])
+                .unwrap()
+        );
+        assert_eq!(input(&db), 100 + 20);
+        assert!(
+            !Scan::default()
+                .save(&db, "v1", vec![found(&a), found(&b)])
+                .unwrap()
+        );
+        // Another version: every file again.
+        assert!(
+            Scan::default()
+                .save(&db, "v2", vec![found(&a), found(&b)])
+                .unwrap()
+        );
+        assert_eq!(input(&db), 900 + 20);
+        assert!(
+            db.spent_files()
+                .unwrap()
+                .values()
+                .all(|f| f.version == "v2")
+        );
+    }
 
     /// What files' calls add up to by the hour, as saved: an agent, a
     /// conversation, calls.

@@ -7,12 +7,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_params, params};
+use rusqlite::{
+    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, named_params, params,
+};
 
 use crate::model::{Event, Project, Session, State};
 use crate::note::{Note, Whose};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -70,17 +72,31 @@ CREATE TABLE events (
     at         INTEGER NOT NULL,
     payload    TEXT
 );
+";
+
+/// What was spent: the agents' files, by number, each as it was when saved
+/// and with the version of roster's reading and prices it was saved with;
+/// the models, by number; and each call, by its id's hash (`call_key`), of
+/// its file and model by number: about 106 bytes a call, where repeating
+/// the texts took 393. Their indexes are `SPENT_INDEXES`.
+const SPENT_TABLES: &str = "
 CREATE TABLE spent_files (
-    path     TEXT PRIMARY KEY,
+    id       INTEGER PRIMARY KEY,
+    path     TEXT NOT NULL UNIQUE,
     agent    TEXT NOT NULL,
     session  TEXT NOT NULL,
     modified INTEGER NOT NULL,
-    size     INTEGER NOT NULL
+    size     INTEGER NOT NULL,
+    version  TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE spent_models (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
 );
 CREATE TABLE spent (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL,
-    model       TEXT NOT NULL,
+    call        INTEGER NOT NULL,
+    file        INTEGER NOT NULL,
+    model       INTEGER NOT NULL,
     at          INTEGER NOT NULL,
     input       INTEGER NOT NULL,
     cache_read  INTEGER NOT NULL,
@@ -89,8 +105,16 @@ CREATE TABLE spent (
     cost        REAL,
     saved       REAL
 );
+";
+
+/// What was spent has each call once, by its id's hash: a call copied into
+/// another file is still one call.
+const SPENT_CALLS_ONCE: &str = "CREATE UNIQUE INDEX spent_call ON spent(call);";
+
+/// What was spent, found by time and by file.
+const SPENT_INDEXES: &str = "
 CREATE INDEX spent_at ON spent(at);
-CREATE INDEX spent_path ON spent(path);
+CREATE INDEX spent_file ON spent(file);
 ";
 
 const SESSION_COLUMNS: &str =
@@ -102,41 +126,53 @@ const SESSION_COLUMNS: &str =
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort, note, note_pin, note_at";
 
+/// How a schema version comes from the one before: SQL, or for one that
+/// has to compute what it keeps, code.
+enum Migration {
+    Sql(&'static str),
+    Code(fn(&Transaction) -> rusqlite::Result<()>),
+}
+
+use Migration::{Code, Sql};
+
 /// What each schema version adds to the one before.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (2, "ALTER TABLE sessions ADD COLUMN baseline_at INTEGER;"),
+const MIGRATIONS: &[(i64, Migration)] = &[
+    (
+        2,
+        Sql("ALTER TABLE sessions ADD COLUMN baseline_at INTEGER;"),
+    ),
     (
         3,
-        "ALTER TABLE projects ADD COLUMN agent TEXT;
+        Sql("ALTER TABLE projects ADD COLUMN agent TEXT;
          ALTER TABLE projects ADD COLUMN model TEXT;
          ALTER TABLE projects ADD COLUMN effort TEXT;
          ALTER TABLE sessions ADD COLUMN title TEXT;
          ALTER TABLE sessions ADD COLUMN model TEXT;
          ALTER TABLE sessions ADD COLUMN effort TEXT;
          ALTER TABLE sessions ADD COLUMN state_since INTEGER;
-         ALTER TABLE sessions ADD COLUMN pending_prompt TEXT;",
+         ALTER TABLE sessions ADD COLUMN pending_prompt TEXT;"),
     ),
     (
         4,
-        "ALTER TABLE sessions ADD COLUMN running_model TEXT;
-         ALTER TABLE sessions ADD COLUMN running_effort TEXT;",
+        Sql("ALTER TABLE sessions ADD COLUMN running_model TEXT;
+         ALTER TABLE sessions ADD COLUMN running_effort TEXT;"),
     ),
     (
         5,
-        "ALTER TABLE sessions ADD COLUMN title_override TEXT;
+        Sql("ALTER TABLE sessions ADD COLUMN title_override TEXT;
          ALTER TABLE sessions ADD COLUMN turns INTEGER NOT NULL DEFAULT 0;
-         ALTER TABLE sessions ADD COLUMN worked_ms INTEGER NOT NULL DEFAULT 0;",
+         ALTER TABLE sessions ADD COLUMN worked_ms INTEGER NOT NULL DEFAULT 0;"),
     ),
-    (6, "ALTER TABLE sessions ADD COLUMN fork_from TEXT;"),
+    (6, Sql("ALTER TABLE sessions ADD COLUMN fork_from TEXT;")),
     (
         7,
-        "ALTER TABLE sessions ADD COLUMN note TEXT;
+        Sql("ALTER TABLE sessions ADD COLUMN note TEXT;
          ALTER TABLE sessions ADD COLUMN note_pin INTEGER;
-         ALTER TABLE sessions ADD COLUMN note_at INTEGER;",
+         ALTER TABLE sessions ADD COLUMN note_at INTEGER;"),
     ),
     (
         8,
-        "CREATE TABLE spent_files (
+        Sql("CREATE TABLE spent_files (
              path     TEXT PRIMARY KEY,
              agent    TEXT NOT NULL,
              session  TEXT NOT NULL,
@@ -156,17 +192,131 @@ const MIGRATIONS: &[(i64, &str)] = &[
              saved       REAL
          );
          CREATE INDEX spent_at ON spent(at);
-         CREATE INDEX spent_path ON spent(path);",
+         CREATE INDEX spent_path ON spent(path);"),
     ),
     (
         9,
-        "ALTER TABLE projects ADD COLUMN note TEXT;
+        Sql("ALTER TABLE projects ADD COLUMN note TEXT;
          ALTER TABLE projects ADD COLUMN note_pin INTEGER;
-         ALTER TABLE projects ADD COLUMN note_at INTEGER;",
+         ALTER TABLE projects ADD COLUMN note_at INTEGER;"),
     ),
-    (10, "ALTER TABLE sessions ADD COLUMN asked_by TEXT;"),
-    (11, "ALTER TABLE sessions ADD COLUMN given_prompt TEXT;"),
+    (10, Sql("ALTER TABLE sessions ADD COLUMN asked_by TEXT;")),
+    (
+        11,
+        Sql("ALTER TABLE sessions ADD COLUMN given_prompt TEXT;"),
+    ),
+    (12, Code(spent_by_number)),
 ];
+
+/// Schema 12: what was spent refers to its file and model by number, and to
+/// its call by its id's hash, rather than repeating their texts; each file
+/// keeps the version it was saved with, where one marker (`spent:version`)
+/// said it for all of them, and has it now. Once, as roster first opens the
+/// database: seconds for a million calls, while hooks can't write their
+/// reports, so the calls are copied first and indexed after (a third of the
+/// time indexing as they go took), and the room the texts took goes back to
+/// the disk after. Meanwhile the file takes up to twice its room.
+fn spent_by_number(tx: &Transaction) -> rusqlite::Result<()> {
+    // Said where it takes long enough to be noticed.
+    let many: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM spent LIMIT 1 OFFSET 99999)",
+        [],
+        |r| r.get(0),
+    )?;
+    if many {
+        eprintln!("roster: updating its database, once (a few seconds)…");
+    }
+    tx.execute_batch(
+        "ALTER TABLE spent RENAME TO spent_old;
+         ALTER TABLE spent_files RENAME TO spent_files_old;
+         DROP INDEX spent_at;
+         DROP INDEX spent_path;",
+    )?;
+    tx.execute_batch(SPENT_TABLES)?;
+    tx.execute_batch(
+        "INSERT INTO spent_files (path, agent, session, modified, size, version)
+             SELECT path, agent, session, modified, size,
+                 COALESCE((SELECT value FROM meta WHERE key = 'spent:version'), '')
+             FROM spent_files_old;
+         INSERT INTO spent_models (name) SELECT DISTINCT model FROM spent_old;",
+    )?;
+    {
+        let mut read = tx.prepare(
+            "SELECT s.id, f.id, m.id, s.at, s.input, s.cache_read, s.cache_write, s.output,
+                 s.cost, s.saved
+             FROM spent_old s JOIN spent_files f ON f.path = s.path
+                 JOIN spent_models m ON m.name = s.model",
+        )?;
+        // Unindexed yet: each as it comes, two calls whose ids share a hash
+        // both.
+        let mut write = tx.prepare(
+            "INSERT INTO spent (call, file, model, at, input, cache_read,
+                 cache_write, output, cost, saved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        let mut rows = read.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: String = r.get(0)?;
+            write.execute(params![
+                call_key(&id),
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, Option<f64>>(8)?,
+                r.get::<_, Option<f64>>(9)?,
+            ])?;
+        }
+    }
+    // Dropped before indexing, for the indexes to take the room it leaves.
+    tx.execute_batch(
+        "DROP TABLE spent_old;
+         DROP TABLE spent_files_old;
+         DELETE FROM meta WHERE key = 'spent:version';",
+    )?;
+    let dropped = index_calls_once(tx)?;
+    match dropped {
+        0 => {}
+        1 => eprintln!("roster: a call whose id's hash another's had is left out"),
+        n => eprintln!("roster: {n} calls whose ids' hashes others had are left out"),
+    }
+    tx.execute_batch(SPENT_INDEXES)
+}
+
+/// Gives the calls copied unindexed their unique index; how many were left
+/// out, sharing their id's hash with one before them: the first copied is
+/// kept, as it would have been saved first (a chance in hundreds of
+/// thousands, for ten million calls).
+fn index_calls_once(tx: &Transaction) -> rusqlite::Result<usize> {
+    match tx.execute_batch(SPENT_CALLS_ONCE) {
+        Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) => {
+            let dropped = tx.execute(
+                "DELETE FROM spent
+                 WHERE rowid NOT IN (SELECT min(rowid) FROM spent GROUP BY call)",
+                [],
+            )?;
+            tx.execute_batch(SPENT_CALLS_ONCE)?;
+            Ok(dropped)
+        }
+        done => done.map(|()| 0),
+    }
+}
+
+/// A call's id as roster keeps it: its 64-bit hash (FNV-1a, the same on
+/// every machine and in every version), which tells calls apart as the id
+/// does in an eighth of the room: of ten million calls, two sharing one is
+/// a chance in hundreds of thousands.
+fn call_key(id: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
 /// free pages back.
@@ -199,6 +349,9 @@ pub struct SpentFile {
     /// In ms.
     pub modified: i64,
     pub size: u64,
+    /// Of roster's reading and prices, as it was saved
+    /// (`tokens::Prices::version`); "" before each file had one.
+    pub version: String,
 }
 
 impl Db {
@@ -223,13 +376,21 @@ impl Db {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
-            0 => tx.execute_batch(SCHEMA)?,
+            0 => {
+                tx.execute_batch(SCHEMA)?;
+                tx.execute_batch(SPENT_TABLES)?;
+                tx.execute_batch(SPENT_CALLS_ONCE)?;
+                tx.execute_batch(SPENT_INDEXES)?;
+            }
             v if v > SCHEMA_VERSION => {
                 bail!("the database is from a newer roster (schema {v}); upgrade roster")
             }
             v => {
-                for (_, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > v) {
-                    tx.execute_batch(sql)?;
+                for (_, migration) in MIGRATIONS.iter().filter(|(to, _)| *to > v) {
+                    match migration {
+                        Sql(sql) => tx.execute_batch(sql)?,
+                        Code(migrate) => migrate(&tx)?,
+                    }
                 }
             }
         }
@@ -259,7 +420,28 @@ impl Db {
             // Busy (another roster at it): the next start tries again.
             conn.execute_batch("VACUUM").ok();
         }
-        Ok(Db { conn })
+        let db = Db { conn };
+        // Much of the file free (what schema 12 left of what was spent
+        // before, three times as much): it goes back to the disk, whenever
+        // it's found, so a roster ended before it was done leaves it to the
+        // next. Busy (another roster at it): the next start tries again.
+        if db.mostly_free().unwrap_or(false) {
+            db.give_back_free_pages_slowly().ok();
+        }
+        Ok(db)
+    }
+
+    /// Whether a good part of the file is free pages: over a quarter of it,
+    /// and over 4 MB.
+    fn mostly_free(&self) -> Result<bool> {
+        let pragma =
+            |name| -> Result<i64> { Ok(self.conn.pragma_query_value(None, name, |r| r.get(0))?) };
+        let (free, pages, size) = (
+            pragma("freelist_count")?,
+            pragma("page_count")?,
+            pragma("page_size")?,
+        );
+        Ok(free * 4 > pages && free * size > 4 << 20)
     }
 
     // Projects
@@ -742,10 +924,34 @@ impl Db {
     /// Gives the file's free pages back to the disk. SQLite does it a page per
     /// step, so the statement runs to its end.
     fn give_back_free_pages(&self) -> Result<()> {
-        let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        self.vacuum("PRAGMA incremental_vacuum")
+    }
+
+    fn vacuum(&self, pragma: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare(pragma)?;
         let mut rows = stmt.query([])?;
         while rows.next()?.is_some() {}
         Ok(())
+    }
+
+    /// Gives many free pages back (hundreds of MB, say), a few MB at a time
+    /// with a pause between, for hooks' reports to be written meanwhile
+    /// (they wait half a second at most); then the log of those writes,
+    /// which holds as much again until no roster has the file open (the TUI
+    /// may run for days), gives its room back too.
+    fn give_back_free_pages_slowly(&self) -> Result<()> {
+        const PAGES: i64 = 1000;
+        loop {
+            self.vacuum(&format!("PRAGMA incremental_vacuum({PAGES})"))?;
+            let free: i64 = self
+                .conn
+                .pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+            if free == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        self.vacuum("PRAGMA wal_checkpoint(TRUNCATE)")
     }
 
     /// Events with id > `after`, oldest first, optionally for one session.
@@ -854,7 +1060,7 @@ impl Db {
     pub fn spent_files(&self) -> Result<HashMap<String, SpentFile>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, agent, session, modified, size FROM spent_files")?;
+            .prepare("SELECT path, agent, session, modified, size, version FROM spent_files")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -863,6 +1069,7 @@ impl Db {
                     session: r.get(2)?,
                     modified: r.get(3)?,
                     size: r.get::<_, i64>(4)? as u64,
+                    version: r.get(5)?,
                 },
             ))
         })?;
@@ -881,49 +1088,70 @@ impl Db {
         size: u64,
         calls: &[crate::tokens::Call],
     ) -> Result<()> {
-        self.save_spent_files(&[SpentSave {
+        let save = SpentSave {
             path: path.into(),
             agent: agent.into(),
             session: session.into(),
             modified,
             size,
             calls: calls.to_vec(),
-        }])
+        };
+        self.save_spent_files(&[save], crate::tokens::VERSION)
     }
 
     /// Saves the calls in each of `files` in place of what was saved of it,
-    /// in one transaction. A call saved already from another file (copied
-    /// there by a fork) stays that file's; one that spent nothing (it
-    /// failed) isn't saved.
-    pub fn save_spent_files(&self, files: &[SpentSave]) -> Result<()> {
+    /// as of `version` (`tokens::Prices::version`), in one transaction. A
+    /// call saved already from another file (copied there by a fork) stays
+    /// that file's; one that spent nothing (it failed) isn't saved.
+    pub fn save_spent_files(&self, files: &[SpentSave], version: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let mut forget = tx.prepare("DELETE FROM spent WHERE path = ?1")?;
         let mut file = tx.prepare(
-            "INSERT INTO spent_files (path, agent, session, modified, size)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO spent_files (path, agent, session, modified, size, version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (path) DO UPDATE SET agent = excluded.agent,
-                 session = excluded.session, modified = excluded.modified, size = excluded.size",
+                 session = excluded.session, modified = excluded.modified,
+                 size = excluded.size, version = excluded.version
+             RETURNING id",
+        )?;
+        let mut forget = tx.prepare("DELETE FROM spent WHERE file = ?1")?;
+        let mut model = tx.prepare(
+            "INSERT INTO spent_models (name) VALUES (?1)
+             ON CONFLICT (name) DO UPDATE SET name = excluded.name
+             RETURNING id",
         )?;
         let mut insert = tx.prepare(
-            "INSERT OR IGNORE INTO spent (id, path, model, at, input, cache_read, cache_write,
-                 output, cost, saved)
+            "INSERT OR IGNORE INTO spent (call, file, model, at, input, cache_read,
+                 cache_write, output, cost, saved)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
+        let mut models: HashMap<&str, i64> = HashMap::new();
         for f in files {
-            forget.execute([&f.path])?;
-            file.execute(params![
-                f.path,
-                f.agent,
-                f.session,
-                f.modified,
-                f.size as i64
-            ])?;
+            let id: i64 = file.query_row(
+                params![
+                    f.path,
+                    f.agent,
+                    f.session,
+                    f.modified,
+                    f.size as i64,
+                    version
+                ],
+                |r| r.get(0),
+            )?;
+            forget.execute([id])?;
             for call in f.calls.iter().filter(|c| c.counts.total() > 0) {
+                let model_id = match models.get(call.model.as_str()) {
+                    Some(&known) => known,
+                    None => {
+                        let new: i64 = model.query_row([&call.model], |r| r.get(0))?;
+                        models.insert(&call.model, new);
+                        new
+                    }
+                };
                 let (t, cost) = (&call.counts, call.cost());
                 insert.execute(params![
-                    call.id,
-                    f.path,
-                    call.model,
+                    call_key(&call.id),
+                    id,
+                    model_id,
                     call.at,
                     t.input as i64,
                     t.cache_read as i64,
@@ -934,7 +1162,7 @@ impl Db {
                 ])?;
             }
         }
-        drop((forget, file, insert));
+        drop((file, forget, model, insert));
         tx.commit()?;
         Ok(())
     }
@@ -942,7 +1170,10 @@ impl Db {
     /// Forgets what was saved of the file at `path` (it moved).
     pub fn forget_spent(&self, path: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM spent WHERE path = ?1", [path])?;
+        tx.execute(
+            "DELETE FROM spent WHERE file = (SELECT id FROM spent_files WHERE path = ?1)",
+            [path],
+        )?;
         tx.execute("DELETE FROM spent_files WHERE path = ?1", [path])?;
         tx.commit()?;
         Ok(())
@@ -953,14 +1184,15 @@ impl Db {
     pub fn spent_hours(&self, from: i64, to: i64) -> Result<Vec<crate::tokens::Hour>> {
         use crate::tokens::{Counts, Hour, Spent};
         let mut stmt = self.conn.prepare(
-            "SELECT f.agent, f.session, s.model, s.at / 3600000 * 3600000 AS hour,
+            "SELECT f.agent, f.session, m.name, s.at / 3600000 * 3600000 AS hour,
                  SUM(s.input), SUM(s.cache_read), SUM(s.cache_write), SUM(s.output),
                  TOTAL(s.cost), TOTAL(s.saved),
                  TOTAL(CASE WHEN s.cost IS NULL
                      THEN s.input + s.cache_read + s.cache_write + s.output END)
-             FROM spent s JOIN spent_files f USING (path)
+             FROM spent s JOIN spent_files f ON f.id = s.file
+                 JOIN spent_models m ON m.id = s.model
              WHERE s.at >= ?1 AND s.at <= ?2
-             GROUP BY f.agent, f.session, s.model, hour",
+             GROUP BY f.agent, f.session, m.name, hour",
         )?;
         let rows = stmt.query_map([from, to], |r| {
             let n = |i| r.get::<_, i64>(i).map(|v| v as u64);
@@ -1371,6 +1603,183 @@ mod tests {
             .unwrap();
         let hours = db.spent_hours(0, 10 * hour).unwrap();
         assert!(hours.iter().all(|h| h.session == "c2"));
+    }
+
+    #[test]
+    fn what_was_spent_is_kept_by_number_from_schema_12_on() {
+        // A database of schema 10, what was spent kept by its texts, with
+        // the one marker of the version it was read with.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1_SCHEMA).unwrap();
+        for (_, migration) in MIGRATIONS.iter().filter(|(to, _)| *to <= 10) {
+            if let Sql(sql) = migration {
+                conn.execute_batch(sql).unwrap();
+            }
+        }
+        let hour = 3_600_000;
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = 10;
+             INSERT INTO meta (key, value) VALUES ('spent:version', '4');
+             INSERT INTO spent_files VALUES ('/a.jsonl', 'claude', 'c1', 10, 100);
+             INSERT INTO spent_files VALUES ('/b.jsonl', 'pi', 'p1', 20, 200);
+             INSERT INTO spent VALUES ('claude:m1', '/a.jsonl', 'claude-opus-5-5', {hour}, 5, 100, 0, 9, 0.5, 0.1);
+             INSERT INTO spent VALUES ('claude:m2', '/a.jsonl', 'claude-opus-5-5', {}, 1, 0, 0, 0, 0.25, 0.0);
+             INSERT INTO spent VALUES ('pi:x@t', '/b.jsonl', 'vllm/qwen3', {hour}, 7, 0, 0, 0, NULL, NULL);",
+            hour + 60_000
+        ))
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        // The same sums.
+        let mut hours = db.spent_hours(0, 10 * hour).unwrap();
+        hours.sort_by(|a, b| a.agent.cmp(&b.agent));
+        let sums: Vec<(&str, &str, &str, u64, f64, u64)> = hours
+            .iter()
+            .map(|h| {
+                let s = &h.spent;
+                (
+                    h.agent.as_str(),
+                    h.session.as_str(),
+                    h.model.as_str(),
+                    s.tokens.total(),
+                    s.cost,
+                    s.unpriced,
+                )
+            })
+            .collect();
+        assert_eq!(
+            sums,
+            [
+                ("claude", "c1", "claude-opus-5-5", 115, 0.75, 0),
+                ("pi", "p1", "vllm/qwen3", 7, 0.0, 7),
+            ]
+        );
+        // Each file with the version the marker said, the marker gone.
+        let files = db.spent_files().unwrap();
+        assert_eq!(
+            (files["/a.jsonl"].version.as_str(), files["/b.jsonl"].size),
+            ("4", 200)
+        );
+        assert_eq!(db.meta("spent:version").unwrap(), None);
+        // A call copied into another file still counts once.
+        db.save_spent(
+            "/c.jsonl",
+            "claude",
+            "c2",
+            30,
+            300,
+            &[crate::tokens::Call {
+                id: "claude:m1".into(),
+                at: hour,
+                model: "claude-opus-5-5".into(),
+                counts: crate::tokens::Counts {
+                    input: 5,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let total: u64 = db
+            .spent_hours(0, 10 * hour)
+            .unwrap()
+            .iter()
+            .map(|h| h.spent.tokens.total())
+            .sum();
+        assert_eq!(total, 122);
+        // Indexed as a new database is.
+        let indexes = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT sql FROM sqlite_master WHERE tbl_name LIKE 'spent%' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, Option<String>>(0))
+                .unwrap()
+                .map(|sql| sql.unwrap().unwrap_or_default())
+                .collect()
+        };
+        let new = Db::open_in_memory().unwrap();
+        assert_eq!(indexes(&db.conn), indexes(&new.conn));
+    }
+
+    #[test]
+    fn calls_sharing_a_hash_as_theyre_indexed_keep_the_first() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SPENT_TABLES).unwrap();
+        let tx = conn.transaction().unwrap();
+        let add = |call: i64, input: i64| {
+            tx.execute(
+                "INSERT INTO spent VALUES (?1, 1, 1, 0, ?2, 0, 0, 0, NULL, NULL)",
+                params![call, input],
+            )
+            .unwrap();
+        };
+        add(1, 10);
+        add(2, 20);
+        assert_eq!(index_calls_once(&tx).unwrap(), 0);
+        tx.execute_batch("DROP INDEX spent_call").unwrap();
+        add(1, 11);
+        add(2, 21);
+        add(2, 22);
+        assert_eq!(index_calls_once(&tx).unwrap(), 3);
+        let inputs: Vec<i64> = tx
+            .prepare("SELECT input FROM spent ORDER BY call")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|i| i.unwrap())
+            .collect();
+        assert_eq!(inputs, [10, 20]);
+        // Indexed: one more is refused.
+        assert!(
+            tx.execute(
+                "INSERT INTO spent VALUES (1, 1, 1, 0, 0, 0, 0, 0, NULL, NULL)",
+                []
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn free_room_left_behind_goes_back_to_the_disk_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.db");
+        drop(Db::open(&path).unwrap());
+        // A file mostly free, as a roster ended before giving back what the
+        // migration left would leave it.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE filler (x BLOB);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000)
+             INSERT INTO filler SELECT zeroblob(4000) FROM n;
+             DROP TABLE filler;",
+        )
+        .unwrap();
+        let free = |conn: &Connection| -> i64 {
+            conn.pragma_query_value(None, "freelist_count", |r| r.get(0))
+                .unwrap()
+        };
+        assert!(free(&conn) > 2000, "{}", free(&conn));
+        drop(conn);
+        // Another roster has it open meanwhile (the TUI, for days).
+        let other = Connection::open(&path).unwrap();
+        let _: i64 = other
+            .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+            .unwrap();
+        let db = Db::open(&path).unwrap();
+        assert!(free(&db.conn) < 100, "{}", free(&db.conn));
+        assert!(!db.mostly_free().unwrap());
+        // The log of giving it back gave its room back too.
+        let log = std::fs::metadata(dir.path().join("roster.db-wal")).map_or(0, |m| m.len());
+        assert!(log < 1 << 20, "{log}");
+        drop(other);
+    }
+
+    #[test]
+    fn a_calls_id_is_kept_as_the_same_hash_everywhere() {
+        // FNV-1a's, as any implementation of it gives.
+        assert_eq!(call_key(""), 0xcbf2_9ce4_8422_2325_u64 as i64);
+        assert_eq!(call_key("a"), 0xaf63_dc4c_8601_ec8c_u64 as i64);
+        assert_ne!(call_key("claude:m1"), call_key("claude:m2"));
     }
 
     #[test]

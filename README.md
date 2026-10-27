@@ -169,7 +169,11 @@ and by model. Prices are roster's own table, from pi's model catalog; a model it
 price for shows as unpriced, and pi's own costs count as pi says them. Roster keeps it in
 its database, call by call, so it stays once a conversation is gone: Claude deletes its
 after 30 days (`cleanupPeriodDays`), and you may delete them yourself.
-It goes back as far as the agents' files did when roster first read them.
+It goes back as far as the agents' files did when roster first read them. A newer
+roster may update how it's kept, once, as it first opens the database: a few seconds
+for a million calls (it says so), during which hooks' reports are lost and the file
+takes up to twice its room, then gives back what it no longer needs, a little at a
+time.
 
 Everything is also available from the CLI:
 

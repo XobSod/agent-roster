@@ -193,6 +193,17 @@ pub fn local_time(ms: i64) -> String {
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// The local date of `ms`: year, month and day.
+pub fn local_date(ms: i64) -> Option<(i32, u32, u32)> {
+    let secs = ms.div_euclid(1000) as libc::time_t;
+    // SAFETY: localtime_r only writes into the tm struct we pass.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return None;
+    }
+    Some((tm.tm_year + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32))
+}
+
 /// When `ms` is in local time, to the nearest minute: "19:20" today, else
 /// with its day, "Sun 1 Nov 10:34" (as of `now`).
 pub fn local_when(ms: i64, now: i64) -> String {

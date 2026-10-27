@@ -25,6 +25,36 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 pub struct TestEnv {
     dir: tempfile::TempDir,
     pub socket: String,
+    /// The `PATH` roster runs with (`without_agents`).
+    search_path: String,
+}
+
+/// The agents roster finds installed on `PATH` (as `agent::BUILT_IN`).
+const AGENTS: &[&str] = &["claude", "pi", "codex"];
+
+/// The inherited `PATH` with no agent on it, so one installed on the machine
+/// running the tests isn't found and run: each directory holding one is
+/// replaced by a copy in `shadows` without it (links to everything else).
+fn without_agents(shadows: &std::path::Path) -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::env::split_paths(&path).enumerate().map(|(i, dir)| {
+        if !AGENTS.iter().any(|a| dir.join(a).exists()) {
+            return dir;
+        }
+        let shadow = shadows.join(i.to_string());
+        fs::create_dir_all(&shadow).unwrap();
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            if !AGENTS.iter().any(|a| name == *a) {
+                let _ = std::os::unix::fs::symlink(entry.path(), shadow.join(&name));
+            }
+        }
+        shadow
+    });
+    std::env::join_paths(dirs.collect::<Vec<_>>())
+        .unwrap()
+        .into_string()
+        .unwrap()
 }
 
 impl TestEnv {
@@ -37,6 +67,7 @@ impl TestEnv {
         let dir = tempfile::tempdir().unwrap();
         let env = TestEnv {
             socket: format!("roster-test-{}-{name}", std::process::id()),
+            search_path: without_agents(&dir.path().join("path")),
             dir,
         };
         let agent = env.path("fake-agent");
@@ -133,6 +164,7 @@ impl TestEnv {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("ROSTER_TMUX_SOCKET", &self.socket)
+            .env("PATH", &self.search_path)
             .env("CLAUDE_CONFIG_DIR", self.claude_dir())
             .env("PI_CODING_AGENT_DIR", self.pi_dir())
             .env("CODEX_HOME", self.codex_dir())
@@ -148,10 +180,11 @@ impl TestEnv {
     /// The same as a shell command line, for running roster in a terminal.
     pub fn shell_command(&self) -> String {
         format!(
-            "env -u TMUX -u TMUX_PANE -u PI_CODING_AGENT_SESSION_DIR XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' CLAUDE_CONFIG_DIR='{}' PI_CODING_AGENT_DIR='{}' CODEX_HOME='{}' '{}'",
+            "env -u TMUX -u TMUX_PANE -u PI_CODING_AGENT_SESSION_DIR XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' PATH='{}' CLAUDE_CONFIG_DIR='{}' PI_CODING_AGENT_DIR='{}' CODEX_HOME='{}' '{}'",
             self.path("config").display(),
             self.path("state").display(),
             self.socket,
+            self.search_path,
             self.claude_dir().display(),
             self.pi_dir().display(),
             self.codex_dir().display(),

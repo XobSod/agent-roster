@@ -22,7 +22,8 @@
 //! - `needs-input`: it's waiting for you in the middle of a turn.
 //! - `idle`: the turn is over, unless subagents it started run on.
 //! - `subagent-start`, `subagent-stop`: one of its subagents started or
-//!   stopped (Claude's); a turn of its own ends working while any runs.
+//!   stopped (Claude's, codex's); a turn of its own ends working while any
+//!   runs.
 //! - anything else (pi's extension says `info`): only its payload counts.
 //!
 //! An agent that reports needs to report the start of a turn as well as its
@@ -72,6 +73,12 @@ pub trait Adapter: Sync {
     /// (`subagent-start`, `subagent-stop`): then one heard of that wasn't
     /// heard starting started all the same, its start's report lost.
     fn says_subagents_start(&self) -> bool {
+        false
+    }
+
+    /// Whether its subagents run on when its turn is interrupted (codex's),
+    /// rather than ending with it.
+    fn subagents_outlive_interrupts(&self) -> bool {
         false
     }
 
@@ -621,6 +628,55 @@ pub fn launch(s: &Session, config: &Config, cx: &Context) -> Result<Launch> {
     let mut argv = vec![agent.command.clone().unwrap_or_else(|| s.agent.clone())];
     argv.extend(agent.args.iter().cloned());
     adapter.launch(s, argv, cx)
+}
+
+/// How long a subagent's step is let be: a line on a card, and a bit to cut.
+pub(crate) const STEP_CHARS: usize = 200;
+
+/// A fetched URL's host, nothing else of it: not a login before an `@`, nor
+/// a query (a token, say).
+pub(crate) fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority.rsplit('@').next().unwrap_or(authority)
+}
+
+/// An MCP server's tool (`mcp__<server>__<tool>`) as `<tool> (<server>)`.
+pub(crate) fn mcp(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    Some(format!("{tool} ({server})"))
+}
+
+/// A subagent's step, `said`, on one line, without what a terminal would
+/// take for more than text (control characters, which a card would show the
+/// rest of, and direction overrides), at most `STEP_CHARS` long.
+pub(crate) fn clean(said: &str) -> String {
+    let bidi = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    let kept: String = (said.chars())
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !bidi(*c))
+        .collect();
+    crate::util::one_line(&kept)
+        .chars()
+        .take(STEP_CHARS)
+        .collect()
+}
+
+/// The whole lines in the last `bytes` of the file at `path`, first to last:
+/// a line cut where they start isn't one.
+pub(crate) fn tail_lines(path: &Path, bytes: u64) -> Option<Vec<Vec<u8>>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let from = len.saturating_sub(bytes);
+    f.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    let mut lines: Vec<Vec<u8>> = tail.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
+    if from > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    Some(lines)
 }
 
 #[cfg(test)]

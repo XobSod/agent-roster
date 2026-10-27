@@ -574,14 +574,19 @@ impl Session {
             .count()
     }
 
-    /// Forgets the subagents not heard of for a while (`SUBAGENT_QUIET_MS`);
-    /// its own turn over, with none left, it's idle. Whether anything
-    /// changed.
+    /// Forgets the subagents not heard of for a while (`SUBAGENT_QUIET_MS`),
+    /// a question one of them asked with it, as if it stopped; its own turn
+    /// over, with none left, it's idle. Whether anything changed.
     pub fn forget_quiet_subagents(&mut self, now: i64) -> bool {
         let before = self.subagents.len();
         self.subagents
             .retain(|_, s| now - s.heard <= SUBAGENT_QUIET_MS);
         let forgot = self.subagents.len() != before;
+        let asker_gone =
+            (self.asked_by.as_ref()).is_some_and(|id| !self.subagents.contains_key(id));
+        if self.state == State::NeedsInput && asker_gone {
+            self.set_state(State::Working, now);
+        }
         // Waiting on none (forgotten, or kept so by a save that raced
         // another's): it's over.
         let ended = self.end_awaited_turn(now);
@@ -605,10 +610,16 @@ impl Session {
 
     /// Turns a stale "working" into idle once the screen has stopped changing.
     /// Doesn't mark it unread: for Claude this only happens after an interrupt,
-    /// which the user did while attached.
-    pub fn correct_stale_working(&mut self, now: i64) -> bool {
+    /// which the user did while attached. Subagents its agent's interrupt
+    /// leaves running (`subagents_outlive`, codex's) keep it working, its own
+    /// turn over, as at the end of a turn they outlive.
+    pub fn correct_stale_working(&mut self, now: i64, subagents_outlive: bool) -> bool {
         let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
         if self.needs_screen_check(now) && still {
+            if subagents_outlive && !self.subagents.is_empty() {
+                self.awaiting_subagents = true;
+                return true;
+            }
             self.set_state(State::Idle, now);
             // Interrupted (Esc), its subagents said nothing: gone with the
             // turn, or ones left running take theirs up in a turn of their own.
@@ -1115,11 +1126,31 @@ pub mod tests {
         apply(&mut s, "prompt", 6_000);
         s.apply(&event("subagent-start", 6_100), &subagent("f2"));
         s.observe_screen("still", 6_200);
-        assert!(s.correct_stale_working(6_200 + QUIET_MS));
+        let mut outliving = s.clone();
+        assert!(s.correct_stale_working(6_200 + QUIET_MS, false));
         assert!(s.subagents.is_empty());
+        // Codex's run on: working on, its own turn over, till it stops.
+        assert!(outliving.correct_stale_working(6_200 + QUIET_MS, true));
+        assert_eq!(
+            (outliving.state, outliving.awaiting_subagents),
+            (State::Working, true)
+        );
+        assert!(!outliving.needs_screen_check(6_200 + 2 * QUIET_MS));
+        outliving.apply(&event("subagent-stop", 30_000), &subagent("f2"));
+        assert_eq!((outliving.state, outliving.unread), (State::Idle, true));
         apply(&mut s, "prompt", 20_000);
         apply(&mut s, "idle", 21_000);
         assert_eq!((s.state, s.unread), (State::Idle, true));
+        // b3 asks, then is heard of no more: its question goes with it.
+        apply(&mut s, "prompt", 21_100);
+        s.apply(&event("subagent-start", 21_200), &subagent("b3"));
+        apply(&mut s, "idle", 21_300);
+        s.apply(&event("needs-input", 21_400), &subagent("b3"));
+        assert!(s.forget_quiet_subagents(21_400 + SUBAGENT_QUIET_MS + 1));
+        assert_eq!(
+            (s.state, s.asked_by.as_deref(), s.awaiting_subagents),
+            (State::Idle, None, false)
+        );
         // Kept waiting on none (a save that raced another's): settled.
         s.state = State::Working;
         s.awaiting_subagents = true;
@@ -1154,13 +1185,13 @@ pub mod tests {
         apply(&mut s, "working", 0);
         s.observe_screen("h1", 1000);
         // Hook event too recent.
-        assert!(!s.correct_stale_working(3000));
+        assert!(!s.correct_stale_working(3000, false));
         // Screen still changing.
         s.observe_screen("h2", 4500);
-        assert!(!s.correct_stale_working(6000));
+        assert!(!s.correct_stale_working(6000, false));
         // Unchanged for QUIET_MS.
         s.observe_screen("h2", 8000);
-        assert!(s.correct_stale_working(4500 + QUIET_MS));
+        assert!(s.correct_stale_working(4500 + QUIET_MS, false));
         assert_eq!((s.state, s.unread), (State::Idle, false));
     }
 
@@ -1218,7 +1249,7 @@ pub mod tests {
         let mut s = session("a");
         apply(&mut s, "needs-input", 0);
         s.observe_screen("h", 0);
-        assert!(!s.correct_stale_working(60_000));
+        assert!(!s.correct_stale_working(60_000, false));
         assert_eq!(s.state, State::NeedsInput);
     }
 }

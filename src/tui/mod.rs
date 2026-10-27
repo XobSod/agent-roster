@@ -623,6 +623,7 @@ fn transcript_info(
         app.preview.transcripts.insert(s.id.clone(), reader);
     }
     let reader = app.preview.transcripts.get_mut(&s.id)?;
+    reader.counting();
     reader.update().ok()?;
     let stats = roster.with_window(reader.stats(s.running_model.as_deref()), s);
     Some((stats, reader.recent_prompts()))

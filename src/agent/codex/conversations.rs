@@ -120,7 +120,8 @@ impl Lines for Names {
     }
 }
 
-/// What one rollout says about itself, from its start and end.
+/// What one rollout says about itself, from its start and end; None for a
+/// subagent's.
 fn read(path: &Path) -> Option<Conversation> {
     let (entries, modified) = crate::agent::file_ends(path)?;
     let mut c = Conversation {
@@ -155,6 +156,12 @@ fn read(path: &Path) -> Option<Conversation> {
             // it was forked from, that one's header first.
             Some("session_meta") if !headed => {
                 headed = true;
+                // A subagent's thread is its parent's, as Claude's are.
+                if payload["thread_source"] == "subagent"
+                    || payload["source"]["subagent"].is_object()
+                {
+                    return None;
+                }
                 if let Some(id) = payload["id"].as_str() {
                     c.id = id.to_string();
                 }
@@ -347,6 +354,17 @@ be brief
         assert_eq!(found[0].id, fork);
         assert_eq!(found[0].cwd, PathBuf::from("/work/child"));
         assert_eq!(found[0].branch.as_deref(), Some("fork"));
+        // A subagent's thread, a fork too, is its parent's: not one to adopt.
+        let subagent = "019d880a-44de-7563-a769-7d41f3a33333";
+        rollout(
+            dir.path(),
+            subagent,
+            "33",
+            &[&format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{subagent}","forked_from_id":"{parent}","cwd":"/work/child","thread_source":"subagent","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{parent}","agent_path":"/root/fix"}}}}}}}}}}"#
+            )],
+        );
+        assert_eq!(conversations(dir.path(), |_| true).len(), 1);
     }
 
     #[test]

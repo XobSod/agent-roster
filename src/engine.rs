@@ -244,7 +244,10 @@ impl Roster {
                                 s.redrawn(&hash);
                             } else {
                                 s.observe_screen(&hash, now);
-                                s.correct_stale_working(now);
+                                s.correct_stale_working(
+                                    now,
+                                    adapter.subagents_outlive_interrupts(),
+                                );
                             }
                         }
                     } else if let Some(hash) = self.screen_hash(&s) {
@@ -1242,6 +1245,7 @@ impl Roster {
     pub fn agent_stats(&self, s: &Session) -> Option<AgentStats> {
         let path = Path::new(s.transcript_path.as_deref()?);
         let mut transcript = agent::transcript_of(s, path)?;
+        transcript.counting();
         transcript.update().ok()?;
         Some(self.with_window(transcript.stats(s.running_model.as_deref()), s))
     }

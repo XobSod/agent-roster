@@ -16,12 +16,13 @@ use crate::tokens::Calls;
 /// Reads a Claude conversation as it grows: its transcript, and its
 /// subagents' beside it (`<id>/subagents/`), whose replies aren't in it,
 /// for their output (Claude's own cost, in the transcript, has them). Those
-/// only once its statistics are asked for: for its prompts alone (a
-/// heading's preview, a title), they'd be read for nothing.
+/// only once it's told its statistics will be asked for (`counting`): for
+/// its prompts alone (a heading's preview, a title), they'd be read for
+/// nothing.
 pub struct ClaudeTranscript {
     main: Jsonl<Totals>,
     subagents: HashMap<PathBuf, Jsonl<Replies>>,
-    counted: std::cell::Cell<bool>,
+    counting: bool,
     /// A copy's: the conversation it was copied from, and when, until that
     /// conversation is read (at the first update).
     fork: Option<(String, i64)>,
@@ -32,7 +33,7 @@ impl ClaudeTranscript {
         ClaudeTranscript {
             main: Jsonl::new(path),
             subagents: HashMap::new(),
-            counted: std::cell::Cell::new(false),
+            counting: false,
             fork: None,
         }
     }
@@ -79,15 +80,13 @@ impl Transcript for ClaudeTranscript {
             self.main.tally_mut().copy = Some(self.copy_of(&from, at));
         }
         self.main.update()?;
-        if self.counted.get() {
+        if self.counting {
             self.read_subagents();
         }
         Ok(())
     }
 
     fn stats(&self, model: Option<&str>) -> AgentStats {
-        // From the next update on, its subagents' are read too.
-        self.counted.set(true);
         let mut stats = self.main.stats(model);
         // Each reply once, whichever of their files it's in; one the
         // transcript has too is the session's own (a forked subagent's file
@@ -117,6 +116,10 @@ impl Transcript for ClaudeTranscript {
     /// uuid), and Claude carries that conversation's cost over.
     fn forked(&mut self, from: &str, at: i64) {
         self.fork = Some((from.to_string(), at));
+    }
+
+    fn counting(&mut self) {
+        self.counting = true;
     }
 }
 
@@ -543,6 +546,7 @@ mod tests {
             "message": {"id": "s1", "usage": {"input_tokens": 3, "output_tokens": 40}}}));
         std::fs::write(&path, &text).unwrap();
         let mut t = ClaudeTranscript::new(&path);
+        t.counting();
         t.update().unwrap();
         let s = t.stats(None);
         assert_eq!(
@@ -557,7 +561,7 @@ mod tests {
                 "message": {"id": "s2", "model": "claude-haiku-5-5", "usage": {"input_tokens": 9, "output_tokens": 60}}})),
         )
         .unwrap();
-        // Read once its statistics were asked for (above), from then on.
+        // Read as it's updated, its statistics wanted.
         t.update().unwrap();
         let s = t.stats(None);
         assert_eq!((s.output_tokens, s.context_used), (Some(600), Some(1012)));
@@ -569,7 +573,12 @@ mod tests {
         std::fs::write(dir.path().join("c1/subagents/agent-a2.jsonl"), copy).unwrap();
         t.update().unwrap();
         assert_eq!(t.stats(None).output_tokens, Some(600));
-        // For its prompts alone, they're not read.
+        // Read at the first update, for one read once (`roster info`)...
+        let mut t = ClaudeTranscript::new(&path);
+        t.counting();
+        t.update().unwrap();
+        assert_eq!(t.stats(None).output_tokens, Some(600));
+        // ...but not for its prompts alone.
         let mut t = ClaudeTranscript::new(&path);
         t.update().unwrap();
         assert!(t.subagents.is_empty());

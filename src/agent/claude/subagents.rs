@@ -5,12 +5,12 @@
 //! model asked for, if one was.
 
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::agent::SubagentInfo;
+use crate::agent::{SubagentInfo, clean, host, mcp};
 
 /// How much of a subagent's transcript is read for the model its first
 /// reply came from: its task, then that reply.
@@ -73,12 +73,6 @@ const TAIL: u64 = 256 << 10;
 /// a result larger than what's read follows it (`TAIL`), which the caller
 /// keeps the step it had over.
 pub(super) fn doing(file: &Path) -> Option<String> {
-    let mut f = fs::File::open(file).ok()?;
-    let len = f.metadata().ok()?.len();
-    let from = len.saturating_sub(TAIL);
-    f.seek(SeekFrom::Start(from)).ok()?;
-    let mut tail = Vec::new();
-    f.read_to_end(&mut tail).ok()?;
     #[derive(Deserialize)]
     struct Row {
         #[serde(rename = "type")]
@@ -89,17 +83,14 @@ pub(super) fn doing(file: &Path) -> Option<String> {
     struct Message {
         content: Option<serde_json::Value>,
     }
-    // From the end, the first call found; a line cut where the tail starts
-    // isn't one. Claude writes a row per block, a call's once it's whole.
-    let mut lines: Vec<&[u8]> = tail.split(|b| *b == b'\n').collect();
-    if from > 0 && !lines.is_empty() {
-        lines.remove(0);
-    }
+    // From the end, the first call found. Claude writes a row per block, a
+    // call's once it's whole.
+    let lines = crate::agent::tail_lines(file, TAIL)?;
     lines
         .into_iter()
         .rev()
         .filter(|line| memchr::memmem::find(line, br#""tool_use""#).is_some())
-        .filter_map(|line| serde_json::from_slice::<Row>(line).ok())
+        .filter_map(|line| serde_json::from_slice::<Row>(&line).ok())
         .filter(|row| row.kind.as_deref() == Some("assistant"))
         .filter_map(|row| row.message?.content)
         .find_map(|content| match content {
@@ -112,9 +103,6 @@ pub(super) fn doing(file: &Path) -> Option<String> {
         .as_ref()
         .and_then(step)
 }
-
-/// How long a step is let be: a line on a card, and a bit to cut.
-const STEP_CHARS: usize = 200;
 
 /// A tool call, in a few words: what it's for where the call says (a
 /// command's description, a todo at work), else what it's on. Claude's
@@ -161,35 +149,6 @@ fn step(call: &serde_json::Value) -> Option<String> {
     };
     let said = clean(&said.unwrap_or_else(|| name.to_string()));
     (!said.is_empty()).then_some(said)
-}
-
-/// A fetched URL's host, nothing else of it: not a login before an `@`, nor
-/// a query (a token, say).
-fn host(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    authority.rsplit('@').next().unwrap_or(authority)
-}
-
-/// An MCP server's tool (`mcp__<server>__<tool>`) as `<tool> (<server>)`.
-fn mcp(name: &str) -> Option<String> {
-    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
-    Some(format!("{tool} ({server})"))
-}
-
-/// `said` on one line, without what a terminal would take for more than
-/// text (control characters, which a card would show the rest of, and
-/// direction overrides), at most `STEP_CHARS` long.
-fn clean(said: &str) -> String {
-    let bidi = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-    let kept: String = (said.chars())
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .filter(|c| !c.is_control() && !bidi(*c))
-        .collect();
-    crate::util::one_line(&kept)
-        .chars()
-        .take(STEP_CHARS)
-        .collect()
 }
 
 #[derive(Default, Deserialize)]
@@ -485,7 +444,7 @@ mod tests {
         let long_said = call("Bash", serde_json::json!({"description": "y".repeat(500)}));
         assert_eq!(
             doing(&[task.clone(), long_said]).unwrap().chars().count(),
-            STEP_CHARS
+            crate::agent::STEP_CHARS
         );
         // Past a long result, read from the end: a line cut there isn't one.
         let long = format!(

@@ -40,6 +40,10 @@ pub trait Transcript: Send {
     /// `at` (ms): its file begins with that conversation, where it may not
     /// say so itself. Before its first update.
     fn forked(&mut self, _from: &str, _at: i64) {}
+    /// Tells it its statistics will be asked for, not its prompts alone:
+    /// from its next update on, it reads what they need beyond its own file
+    /// (Claude's subagents').
+    fn counting(&mut self) {}
 }
 
 /// What a JSONL file adds up to, line by line: what its reader knows of its

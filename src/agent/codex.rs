@@ -9,6 +9,7 @@
 
 pub mod conversations;
 mod limits;
+mod subagents;
 mod tokens;
 mod transcript;
 
@@ -42,6 +43,8 @@ const HOOKS: &[(&str, &str)] = &[
     ("PostToolUse", "working"),
     ("PermissionRequest", "needs-input"),
     ("Stop", "idle"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
 ];
 
 /// What a one-off run turns off, as config overrides: every feature that
@@ -96,6 +99,15 @@ impl Adapter for Codex {
     }
 
     fn names_its_conversation(&self) -> bool {
+        true
+    }
+
+    fn says_subagents_start(&self) -> bool {
+        true
+    }
+
+    /// Esc ends its own turn only: they finish theirs, and say so.
+    fn subagents_outlive_interrupts(&self) -> bool {
         true
     }
 
@@ -223,6 +235,18 @@ impl Adapter for Codex {
 
     fn transcript(&self, path: &std::path::Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(CodexTranscript::new(path)))
+    }
+
+    fn subagent_info(&self, transcript: &std::path::Path, id: &str) -> super::SubagentInfo {
+        subagents::info(transcript, id)
+    }
+
+    fn subagent_finished(&self, transcript: &std::path::Path, id: &str, heard: i64) -> bool {
+        subagents::finished(transcript, id, heard)
+    }
+
+    fn subagent_doing(&self, file: &std::path::Path) -> Option<String> {
+        subagents::doing(file)
     }
 
     fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
@@ -522,10 +546,10 @@ mod tests {
                 ..Report::default()
             }
         );
-        // Its subagents' starts aren't taken (yet): none is taken to have
-        // started from its other reports.
+        // Its subagents' starts are reported: one heard of without its start
+        // started all the same.
         let payload = r#"{"session_id":"01a1","agent_id":"019a","agent_type":"worker"}"#;
-        assert!(!crate::agent::read_report("codex", Some(payload)).subagents_start_said);
+        assert!(crate::agent::read_report("codex", Some(payload)).subagents_start_said);
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }

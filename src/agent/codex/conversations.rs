@@ -139,6 +139,7 @@ fn read(path: &Path) -> Option<Conversation> {
         open_in: None,
     };
     let mut cwd = None;
+    let mut headed = false;
     let mut typed = Typed::default();
     let mut prompt = |text: String| {
         if c.first_prompt.is_none() {
@@ -150,7 +151,10 @@ fn read(path: &Path) -> Option<Conversation> {
         let payload = &e["payload"];
         match e["type"].as_str() {
             // The header: its id, where it ran, and the repository it was in.
-            Some("session_meta") => {
+            // The first only: a fork's rollout goes on with a copy of the one
+            // it was forked from, that one's header first.
+            Some("session_meta") if !headed => {
+                headed = true;
                 if let Some(id) = payload["id"].as_str() {
                     c.id = id.to_string();
                 }
@@ -315,6 +319,34 @@ be brief
             1
         );
         assert!(conversations(dir.path(), |i| i.starts_with("ffff")).is_empty());
+    }
+
+    #[test]
+    fn a_fork_is_its_own_not_the_one_it_was_forked_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let (fork, parent) = (
+            "019d880a-44de-7563-a769-7d41f3a32222",
+            "019d880a-44de-7563-a769-7d41f3a31111",
+        );
+        rollout(
+            dir.path(),
+            fork,
+            "22",
+            &[
+                &format!(
+                    r#"{{"type":"session_meta","payload":{{"id":"{fork}","forked_from_id":"{parent}","cwd":"/work/child","git":{{"branch":"fork"}}}}}}"#
+                ),
+                &format!(
+                    r#"{{"type":"session_meta","payload":{{"id":"{parent}","cwd":"/work/parent","git":{{"branch":"main"}}}}}}"#
+                ),
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fix it"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}}"#,
+            ],
+        );
+        let found = conversations(dir.path(), |_| true);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].id, fork);
+        assert_eq!(found[0].cwd, PathBuf::from("/work/child"));
+        assert_eq!(found[0].branch.as_deref(), Some("fork"));
     }
 
     #[test]

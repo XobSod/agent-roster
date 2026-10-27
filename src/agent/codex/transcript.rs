@@ -154,11 +154,15 @@ impl Totals {
             match change.kind.as_deref() {
                 Some("add") => self.added += lines(&change.content),
                 Some("delete") => self.removed += lines(&change.content),
+                // Its hunks: codex writes no file header (`--- a/x`), and
+                // one would come before the first, so a line `--- x` in a
+                // hunk is a line removed.
                 Some("update") => {
-                    for line in change.unified_diff.as_deref().unwrap_or("").lines() {
-                        if line.starts_with('+') && !line.starts_with("+++") {
+                    let diff = change.unified_diff.as_deref().unwrap_or("");
+                    for line in diff.lines().skip_while(|l| !l.starts_with("@@")) {
+                        if line.starts_with('+') {
                             self.added += 1;
-                        } else if line.starts_with('-') && !line.starts_with("---") {
+                        } else if line.starts_with('-') {
                             self.removed += 1;
                         }
                     }
@@ -597,6 +601,19 @@ mod tests {
             json!({"/w/notes.txt": {"type": "update", "move_path": null,
                 "unified_diff": "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"}}),
         ));
+        // Lines that look like a diff's file header are lines too: a comment
+        // in SQL removed, an increment added.
+        lines.push(file_change(
+            "completed",
+            json!({"/w/q.sql": {"type": "update", "move_path": null,
+                "unified_diff": "@@ -1,2 +1,2 @@\n--- old comment\n-x\n+++i;\n+y\n"}}),
+        ));
+        // A header, which codex doesn't write, isn't.
+        lines.push(file_change(
+            "completed",
+            json!({"/w/z.txt": {"type": "update", "move_path": null,
+                "unified_diff": "--- a/w/z.txt\n+++ b/w/z.txt\n@@ -1 +1 @@\n-a\n+b\n"}}),
+        ));
         // One that failed changed nothing.
         lines.push(file_change(
             "failed",
@@ -609,7 +626,7 @@ mod tests {
             .to_string(),
         );
         let (stats, _) = totals(&lines);
-        assert_eq!((stats.lines_added, stats.lines_removed), (Some(4), Some(3)));
+        assert_eq!((stats.lines_added, stats.lines_removed), (Some(7), Some(6)));
         // Nothing edited: nothing to show.
         let (stats, _) = totals(&turn("look", 5, 115, 400_000));
         assert_eq!((stats.lines_added, stats.lines_removed), (Some(0), Some(0)));

@@ -291,6 +291,8 @@ mod tests {
                 transcript_path: Some("/s/c-1.jsonl".into()),
                 cleared: false,
                 started: true,
+                compacted: false,
+                subagent: None,
                 model: Some("claude-opus-4-8".into()),
                 effort: Some("medium".into()),
                 title: Some(None),

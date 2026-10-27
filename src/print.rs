@@ -570,8 +570,14 @@ pub fn summarize(agent: &str, payload: Option<&str>) -> String {
     if let Some(id) = &report.conversation_id {
         parts.push(format!("conversation={}", id.get(..8).unwrap_or(id)));
     }
+    if report.compacted {
+        parts.push("compacted".into());
+    }
     if report.cleared {
         parts.push("cleared".into());
+    }
+    if let Some(agent) = &report.subagent {
+        parts.push(format!("subagent={}", agent.get(..8).unwrap_or(agent)));
     }
     for (key, value) in [("model", &report.model), ("effort", &report.effort)] {
         if let Some(value) = value {
@@ -597,12 +603,21 @@ mod tests {
             summarize("claude", Some(claude)),
             "SessionStart source=clear conversation=c0ffee12 cleared model=claude-opus-5-5"
         );
+        assert_eq!(
+            summarize("claude", Some(r#"{"source":"compact"}"#)),
+            "source=compact compacted"
+        );
         let pi = r#"{"conversation_id":"01a16240-5d71","title":"Fix the parser","effort":"high"}"#;
         assert_eq!(
             summarize("pi", Some(pi)),
             r#"conversation=01a16240 effort=high title="Fix the parser""#
         );
         assert_eq!(summarize("pi", Some(r#"{"title":null}"#)), "untitled");
+        let subagent = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"c0ffee123456","agent_id":"019a0000-0000-7000","model":"gpt-6-luna"}"#;
+        assert_eq!(
+            summarize("codex", Some(subagent)),
+            "PostToolUse tool_name=Bash subagent=019a0000"
+        );
         assert_eq!(summarize("aider", Some("not json")), "not json");
     }
 }

@@ -196,16 +196,15 @@ impl Adapter for Codex {
     }
 
     /// A hook's payload, as Claude's are (`super::hook_report`). Codex's
-    /// don't say the effort, which its rollout, named in them, does.
+    /// don't say the effort, which its rollout, named in them, does (the
+    /// session's own: a subagent's names none).
     fn report(&self, payload: &Value) -> Report {
-        let effort = payload
-            .get("transcript_path")
-            .and_then(Value::as_str)
+        let report = super::hook_report(payload);
+        let effort = report
+            .transcript_path
+            .as_deref()
             .and_then(|path| transcript::last_effort(std::path::Path::new(path)));
-        Report {
-            effort,
-            ..super::hook_report(payload)
-        }
+        Report { effort, ..report }
     }
 
     fn names_its_task(&self) -> bool {
@@ -493,6 +492,23 @@ mod tests {
         let source = |source: &str| Codex.report(&serde_json::json!({"source": source}));
         assert!(source("startup").started && !source("startup").cleared);
         assert!(!source("resume").started && !source("resume").cleared);
+        assert!(source("compact").compacted && !source("compact").started);
+        // A subagent's: its parent's conversation, but its own rollout and
+        // model, of which the session takes neither.
+        let report = Codex.report(&serde_json::json!({
+            "session_id": "01a1",
+            "transcript_path": rollout,
+            "model": "gpt-6-luna",
+            "agent_id": "019a0000-0000-7000-8000-000000000002",
+            "agent_type": "worker",
+        }));
+        assert_eq!(
+            report,
+            Report {
+                subagent: Some("019a0000-0000-7000-8000-000000000002".into()),
+                ..Report::default()
+            }
+        );
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }

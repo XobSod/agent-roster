@@ -145,6 +145,9 @@ pub struct Session {
     /// For an adopted copy: the conversation it was copied from, forked again on
     /// each start until the copy has a transcript of its own.
     pub fork_from: Option<String>,
+    /// The subagent whose question it needs input for (its agent's id for
+    /// it); None while it needs input for its own, or none.
+    pub asked_by: Option<String>,
     /// What the user wrote about it (saved apart from the rest, so a save of
     /// the session doesn't overwrite a note saved meanwhile).
     pub note: Option<Note>,
@@ -198,6 +201,7 @@ impl Session {
             turns: 0,
             worked_ms: 0,
             fork_from: None,
+            asked_by: None,
             note: None,
         }
     }
@@ -241,6 +245,9 @@ impl Session {
         }
         if state == State::Working && self.state == State::Idle {
             self.turns += 1;
+        }
+        if state != State::NeedsInput {
+            self.asked_by = None;
         }
         self.state = state;
         self.state_since = Some(at);
@@ -366,6 +373,15 @@ impl Session {
             self.title = title.clone();
         }
         match e.kind.as_str() {
+            // A subagent at work, or given its task, is inside the session's
+            // turn, or after it (one left running): either way not a turn of
+            // its own. Its question is the session's to answer, though, and
+            // once it works on, it's answered.
+            "working" | "prompt" if report.subagent.is_some() => {
+                if self.state == State::NeedsInput && self.asked_by == report.subagent {
+                    self.set_state(State::Working, e.at);
+                }
+            }
             // A prompt you submitted starts a turn.
             "working" | "prompt" => self.set_state(State::Working, e.at),
             "idle" => {
@@ -373,9 +389,18 @@ impl Session {
                 self.unread = true;
             }
             "needs-input" => {
+                // Whose question it is: its own waits for you whatever a
+                // subagent asks meanwhile.
+                let its_own = self.state == State::NeedsInput && self.asked_by.is_none();
                 self.set_state(State::NeedsInput, e.at);
+                if !its_own {
+                    self.asked_by = report.subagent.clone();
+                }
                 self.unread = true;
             }
+            // A compaction, which Claude and codex make mid-turn when the
+            // context is full, leaves it as it was.
+            "session" if report.compacted => {}
             // The agent (re)started or cleared its conversation and waits for a prompt.
             "session" => self.set_state(State::Idle, e.at),
             _ => return,
@@ -685,6 +710,61 @@ pub mod tests {
         assert_eq!((s.turns, s.worked_ms), (1, 4_000));
         apply(&mut s, "working", 20_000);
         assert_eq!((s.turns, s.worked(25_000)), (2, 9_000));
+    }
+
+    #[test]
+    fn a_compaction_mid_turn_leaves_it_working_in_the_same_turn() {
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.state_since = Some(0);
+        apply(&mut s, "working", 1_000);
+        let compacted = Report {
+            compacted: true,
+            ..Report::default()
+        };
+        s.apply(&event("session", 2_000), &compacted);
+        assert_eq!(s.state, State::Working);
+        apply(&mut s, "working", 3_000);
+        apply(&mut s, "idle", 4_000);
+        assert_eq!((s.turns, s.worked_ms), (1, 3_000));
+        // A start is still one: waiting for a prompt.
+        apply(&mut s, "working", 5_000);
+        s.apply(&event("session", 6_000), &Report::default());
+        assert_eq!(s.state, State::Idle);
+    }
+
+    #[test]
+    fn a_subagent_neither_starts_nor_ends_a_turn_but_its_question_is_asked() {
+        let subagent = |id: &str| Report {
+            subagent: Some(id.into()),
+            ..Report::default()
+        };
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.state_since = Some(0);
+        s.transcript_path = Some("/s/root.jsonl".into());
+        // One left running after the turn: still idle, no turn more.
+        s.apply(&event("working", 1_000), &subagent("a1"));
+        s.apply(&event("prompt", 1_500), &subagent("a1"));
+        assert_eq!((s.state, s.turns), (State::Idle, 0));
+        // Inside a turn, its question waits on you; another subagent at work
+        // doesn't answer it, its own working on does.
+        apply(&mut s, "working", 2_000);
+        s.apply(&event("needs-input", 3_000), &subagent("a1"));
+        assert_eq!(s.state, State::NeedsInput);
+        assert_eq!(s.transcript_path.as_deref(), Some("/s/root.jsonl"));
+        s.apply(&event("working", 3_500), &subagent("a2"));
+        assert_eq!(s.state, State::NeedsInput);
+        s.apply(&event("working", 4_000), &subagent("a1"));
+        assert_eq!((s.state, s.asked_by.as_deref()), (State::Working, None));
+        // The session's own question no subagent answers, nor takes over.
+        apply(&mut s, "needs-input", 5_000);
+        s.apply(&event("needs-input", 5_500), &subagent("a1"));
+        s.apply(&event("working", 6_000), &subagent("a1"));
+        assert_eq!((s.state, s.asked_by.as_deref()), (State::NeedsInput, None));
+        apply(&mut s, "working", 7_000);
+        assert_eq!(s.state, State::Working);
+        assert_eq!(s.turns, 1);
     }
 
     #[test]

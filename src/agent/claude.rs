@@ -149,15 +149,16 @@ impl Adapter for Claude {
     }
 
     /// A hook's payload (`super::hook_report`): SessionStart names the
-    /// model, Stop the effort too.
+    /// model, Stop the effort too (a subagent's is its own, not the
+    /// session's).
     fn report(&self, payload: &Value) -> Report {
-        Report {
-            effort: payload
-                .pointer("/effort/level")
-                .and_then(Value::as_str)
-                .map(String::from),
-            ..super::hook_report(payload)
-        }
+        let report = super::hook_report(payload);
+        let effort = payload
+            .pointer("/effort/level")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .filter(|_| report.subagent.is_none());
+        Report { effort, ..report }
     }
 
     fn names_its_task(&self) -> bool {
@@ -382,9 +383,25 @@ mod tests {
             }
         );
         let report = read_report(CLAUDE, Some(r#"{"session_id":"c-2","source":"clear"}"#));
-        assert!(report.cleared && !report.started);
+        assert!(report.cleared && !report.started && !report.compacted);
+        let report = read_report(CLAUDE, Some(r#"{"session_id":"c-2","source":"compact"}"#));
+        assert!(report.compacted && !report.cleared && !report.started);
         let report = read_report(CLAUDE, Some(r#"{"effort":{"level":"xhigh"}}"#));
         assert_eq!(report.effort.as_deref(), Some("xhigh"));
+        // A subagent's: its effort isn't the session's, nor anything else.
+        let report = read_report(
+            CLAUDE,
+            Some(
+                r#"{"session_id":"c-1","transcript_path":"/t/c-1.jsonl","agent_id":"a1","effort":{"level":"low"}}"#,
+            ),
+        );
+        assert_eq!(
+            report,
+            Report {
+                subagent: Some("a1".into()),
+                ..Report::default()
+            }
+        );
         assert_eq!(read_report(CLAUDE, Some("not json")), Report::default());
         assert_eq!(read_report(CLAUDE, None), Report::default());
     }

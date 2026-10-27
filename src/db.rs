@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, named_pa
 use crate::model::{Event, Project, Session, State};
 use crate::note::{Note, Whose};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -58,7 +58,8 @@ CREATE TABLE sessions (
     fork_from         TEXT,
     note              TEXT,
     note_pin          INTEGER,
-    note_at           INTEGER
+    note_at           INTEGER,
+    asked_by          TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -96,7 +97,7 @@ const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms, s.fork_from, s.note, s.note_pin, s.note_at";
+    s.worked_ms, s.fork_from, s.asked_by, s.note, s.note_pin, s.note_at";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort, note, note_pin, note_at";
 
@@ -162,6 +163,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE projects ADD COLUMN note_pin INTEGER;
          ALTER TABLE projects ADD COLUMN note_at INTEGER;",
     ),
+    (10, "ALTER TABLE sessions ADD COLUMN asked_by TEXT;"),
 ];
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives
@@ -486,6 +488,7 @@ impl Db {
             turns,
             worked_ms,
             fork_from,
+            asked_by,
         } = after;
         let state_name = state.as_str();
         let mut set: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
@@ -520,7 +523,8 @@ impl Db {
             title_override,
             turns,
             worked_ms,
-            fork_from
+            fork_from,
+            asked_by
         );
         if set.is_empty() {
             return Ok(());
@@ -1076,7 +1080,8 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              title_override = :title_override,
              turns = :turns,
              worked_ms = :worked_ms,
-             fork_from = :fork_from
+             fork_from = :fork_from,
+             asked_by = :asked_by
          WHERE id = :id",
         named_params! {
             ":id": s.id,
@@ -1102,6 +1107,7 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":turns": s.turns,
             ":worked_ms": s.worked_ms,
             ":fork_from": s.fork_from,
+            ":asked_by": s.asked_by,
         },
     )
     .map_err(|e| {
@@ -1206,6 +1212,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         turns: r.get("turns")?,
         worked_ms: r.get("worked_ms")?,
         fork_from: r.get("fork_from")?,
+        asked_by: r.get("asked_by")?,
         note: note_from_row(r)?,
     })
 }
@@ -1436,6 +1443,7 @@ mod tests {
         after.turns = 6;
         after.worked_ms = 7;
         after.fork_from = Some("f".into());
+        after.asked_by = Some("a1".into());
         db.save_changes(&before, &after).unwrap();
         assert_eq!(db.session(&s.id).unwrap(), after);
     }

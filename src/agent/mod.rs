@@ -358,6 +358,12 @@ pub struct Report {
     /// The agent itself just started (not resumed, cleared or compacted in
     /// it), so the model it runs is the one its start asked for.
     pub started: bool,
+    /// It compacted its conversation, mid-turn as likely as not: neither a
+    /// start nor the turn's end.
+    pub compacted: bool,
+    /// From one of its subagents (its agent's id for it), inside a turn: of
+    /// the session's own conversation, model and turn it says nothing.
+    pub subagent: Option<String>,
     /// The model and effort it's running.
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -376,17 +382,29 @@ fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Optio
 /// What a hook's payload says in the shape Claude's have, which codex's
 /// copy: the conversation it's on and the file it's kept in, both of which a
 /// /clear changes; how it started (`source`: `startup` the agent's own
-/// start, `clear` a new task; `resume`, `compact` and codex's `fork`
-/// neither); and the model.
+/// start, `clear` a new task, `compact` the conversation compacted; `resume`
+/// and codex's `fork` none of these); and the model. Both mark a subagent's
+/// with its `agent_id`, and codex's name the subagent's own file and model
+/// (Claude's the session's file, and no model): it gives none of them.
 pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
     use serde_json::Value;
     let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
+    match payload.get("agent_id") {
+        None | Some(Value::Null) => {}
+        Some(id) => {
+            return Report {
+                subagent: Some(id.as_str().map_or_else(|| id.to_string(), String::from)),
+                ..Report::default()
+            };
+        }
+    }
     let source = payload.get("source").and_then(Value::as_str);
     Report {
         conversation_id: text(payload.get("session_id")),
         transcript_path: text(payload.get("transcript_path")),
         cleared: source == Some("clear"),
         started: source == Some("startup"),
+        compacted: source == Some("compact"),
         model: text(payload.get("model")),
         ..Report::default()
     }

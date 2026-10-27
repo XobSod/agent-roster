@@ -74,8 +74,9 @@ pub struct Roster {
     /// errors of the refresh, which goes on for the other sessions.
     undelivered: Vec<Undelivered>,
     /// What went wrong that isn't worth failing for: roster's tmux not
-    /// taking its config, on opening or as a start starts the server.
-    notices: Vec<String>,
+    /// taking its config, on opening or as a start starts the server, and
+    /// settings roster no longer has.
+    pub(crate) notices: Vec<String>,
 }
 
 /// A first prompt `refresh` couldn't type into session `id`, and why;
@@ -113,7 +114,7 @@ impl Roster {
         let tmux = Tmux::new(paths::tmux_socket(), paths.tmux_conf());
         // A changed detach key or user tmux.conf also applies to a running
         // server. One it doesn't take is said, and roster goes on.
-        let mut notices = Vec::new();
+        let mut notices = config.gone();
         if apply_tmux_config
             && let Some(e) = tmux.apply_config(
                 &config.keys.detach,

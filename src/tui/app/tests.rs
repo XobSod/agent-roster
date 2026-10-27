@@ -870,6 +870,7 @@ fn s_o_opens_the_note_and_its_keys_go_to_it() {
                 force: false,
             }],
             close: true,
+            unsaved: None,
         })
     );
     // :q! closes, and the list has its keys back.
@@ -914,10 +915,25 @@ fn a_projects_note_opens_beside_its_sessions_as_a_buffer() {
     );
     assert_eq!(enter(&mut app, ":qa"), None);
     assert!(app.note.is_some());
-    // :wqa saves what has changes, the shown note first, and closes.
+    // :wq saves the shown one, and stays open, saying why.
     keys(&mut app, "Ax");
     app.on_key(key(KeyCode::Esc));
-    let Some(Op::SaveNotes { saves, close: true }) = enter(&mut app, ":wqa") else {
+    let Some(Op::SaveNotes {
+        saves,
+        close: false,
+        unsaved: Some(why),
+    }) = enter(&mut app, ":wq")
+    else {
+        panic!("not saved");
+    };
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0].whose, Whose::Session("s1".into()));
+    assert!(why.contains(":wqa"), "{why}");
+    // :wqa saves what has changes, the shown note first, and closes.
+    let Some(Op::SaveNotes {
+        saves, close: true, ..
+    }) = enter(&mut app, ":wqa")
+    else {
         panic!("not saved");
     };
     let saved: Vec<(&Whose, &str)> = saves.iter().map(|s| (&s.whose, s.text.as_str())).collect();

@@ -103,9 +103,7 @@ impl App {
                     let builtin = self.chat_project == Some(p.id);
                     self.open_form(Form::edit_project(&p, &self.agents, builtin))
                 }
-                None => {
-                    self.fail("Select a project (group by project) or one of its sessions first")
-                }
+                None => self.no_project(),
             },
             Action::RemoveProject => self.remove_project(),
             Action::ProjectNote => return self.project_note(),
@@ -314,12 +312,11 @@ impl App {
         }
     }
 
-    /// The project the selection belongs to; with only one project, that one.
     /// `p o`: the selected project's note, opened beside the selected
     /// session's (`[` shows that), if it's one of the project's.
     fn project_note(&mut self) -> Option<Op> {
         let Some(p) = self.selected_project() else {
-            self.fail("Select a project (group by project) or one of its sessions first");
+            self.no_project();
             return None;
         };
         let session = self
@@ -348,6 +345,15 @@ impl App {
         }
     }
 
+    /// Says a project's action found none selected, and how to select one.
+    fn no_project(&mut self) {
+        let filter = self.chord(Menu::Project, Action::FilterProject);
+        self.fail(format!(
+            "Select a project or its session first ({filter}, or group_by = project)"
+        ));
+    }
+
+    /// The project the selection belongs to; with only one project, that one.
     pub(super) fn selected_project(&self) -> Option<Project> {
         if self.mode == Mode::Projects {
             return self.projects.get(self.project_row).cloned();
@@ -433,7 +439,7 @@ impl App {
 
     pub(super) fn remove_project(&mut self) {
         let Some(p) = self.selected_project() else {
-            self.fail("Select a project (group by project) or one of its sessions first");
+            self.no_project();
             return;
         };
         let (archived, live): (Vec<&Session>, Vec<&Session>) = self

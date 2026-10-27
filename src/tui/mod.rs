@@ -744,7 +744,11 @@ fn perform(
             });
             format!("Asking {agent} for a title for {}…", app.session_label(&id))
         }),
-        Op::SaveNotes { saves, close } => save_notes(roster, app, saves, close),
+        Op::SaveNotes {
+            saves,
+            close,
+            unsaved,
+        } => save_notes(roster, app, saves, close, unsaved),
         Op::EditNote(whose) => edit_note(terminal, roster, app, &whose)?,
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);
@@ -820,12 +824,14 @@ fn in_terminal<T>(terminal: &mut DefaultTerminal, run: impl FnOnce() -> T) -> Re
 }
 
 /// Saves notes from the editor in turn, each marked saved there, until one
-/// can't be; then closes it if all were and `close`. What was saved, to say.
+/// can't be; then closes it if all were and `close`. What was saved, to say,
+/// and `unsaved` after it as an error.
 fn save_notes(
     roster: &Roster,
     app: &mut App,
     saves: Vec<op::NoteSave>,
     close: bool,
+    unsaved: Option<String>,
 ) -> Result<String> {
     let mut said = Vec::new();
     for s in saves {
@@ -846,6 +852,13 @@ fn save_notes(
     }
     if close {
         app.note = None;
+    }
+    if let Some(mut why) = unsaved {
+        // After what was saved, mid-sentence.
+        if let Some(first) = why.get_mut(..1) {
+            first.make_ascii_lowercase();
+        }
+        anyhow::bail!("{}; {why}", said.join("; "));
     }
     Ok(said.join("; "))
 }

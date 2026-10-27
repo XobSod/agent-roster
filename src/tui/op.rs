@@ -44,10 +44,12 @@ pub enum Op {
     },
     RetitleSession(String),
     /// Notes as written, in turn, then the editor closed if all were saved
-    /// and `close`, else left open.
+    /// and `close`, else left open; `unsaved` said after, as why it stays
+    /// open (`:wq` while the other note has changes).
     SaveNotes {
         saves: Vec<NoteSave>,
         close: bool,
+        unsaved: Option<String>,
     },
     /// A note in `$EDITOR`: the open editor's text, or the saved note.
     EditNote(crate::note::Whose),

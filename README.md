@@ -115,8 +115,10 @@ session's are by `✎` (on a narrow preview, above them); a note that isn't ther
 no room. With a session selected, `p o` opens beside its note: in the editor `[` shows
 the project's and `]` the session's, as the preview has them, left and right. Each
 keeps what you changed while the other shows, as vim's buffers do: `:wa` saves both,
-`:wqa` (`:xa`) saves both and closes, `:qa!` closes leaving both; `:q`, `:wq` and `:x`
-don't close while the other has unsaved changes. In the editor too, the pinned line is
+`:wqa` (`:xa`) saves both and closes, `:qa!` closes leaving both; `:q`, `:wq`, `:x`, `ZZ`
+and `ZQ` don't close while the other has unsaved changes (`:wq`, `:x` and `ZZ` save the
+one shown first, as vim does). A line yanked in one puts in the other: they share one
+register, as vim's buffers do. In the editor too, the pinned line is
 marked `▤` in the project's note. `▤` after a project's name marks it having a note,
 on cards and headings and in the projects view. It goes when the project is removed.
 

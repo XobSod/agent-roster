@@ -958,9 +958,16 @@ fn edit_unread_config(why: anyhow::Error) -> Result<()> {
     }
     config::Config::load_text(&file).context("config.toml still has an error")?;
     let mut r = Roster::open()?;
-    let notices = r.take_notices();
-    if !notices.is_empty() {
-        bail!("config.toml is saved, but {}", notices.join("; "));
+    // What it sets that roster no longer has is only said; roster's tmux
+    // refusing what it sets is a failure.
+    let gone = r.config.gone();
+    let (said, refused): (Vec<String>, Vec<String>) =
+        r.take_notices().into_iter().partition(|n| gone.contains(n));
+    for notice in said {
+        eprintln!("roster: {notice}");
+    }
+    if !refused.is_empty() {
+        bail!("config.toml is saved, but {}", refused.join("; "));
     }
     println!("config.toml saved");
     Ok(())

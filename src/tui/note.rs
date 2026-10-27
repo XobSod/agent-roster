@@ -7,6 +7,7 @@
 //! insert mode. Esc never closes it: it's pressed out of habit, often twice.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use edtui::actions::delete::{DeleteToEndOfLine, DeleteWordBackward, RemoveChar, ReplaceChar};
@@ -14,6 +15,7 @@ use edtui::actions::{
     Chainable, CopySelection, MoveBackward, MoveForward, MoveToFirst, MoveToStartOfLine, Paste,
     SwitchMode,
 };
+use edtui::clipboard::ClipboardTrait;
 use edtui::events::{KeyEventRegister, KeyInput};
 use edtui::{EditorEventHandler, EditorMode, EditorState, Index2, Lines};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -39,12 +41,29 @@ fn mark() -> KeyInput {
 /// follow the one before.
 pub type Escape = (Vec<char>, Duration);
 
+/// What was yanked, one for the notes open together, as vim has one unnamed
+/// register for its buffers (`.` is each note's own: edtui keeps it).
+#[derive(Clone, Default)]
+pub struct Clip(Rc<RefCell<String>>);
+
+impl ClipboardTrait for Clip {
+    fn set_text(&mut self, text: String) {
+        *self.0.borrow_mut() = text;
+    }
+
+    fn get_text(&mut self) -> String {
+        self.0.borrow().clone()
+    }
+}
+
 pub struct NoteEditor {
     pub whose: Whose,
     /// What to call whose it is: "api/fix", "project api".
     pub label: String,
     /// edtui's state; drawing it needs it mutable (it keeps its scroll there).
     pub state: RefCell<EditorState>,
+    /// What was yanked, into it and out of it.
+    clip: Clip,
     keys: EditorEventHandler,
     pub pin: Option<usize>,
     /// The text (tidied) and pin as last saved.
@@ -58,6 +77,8 @@ pub struct NoteEditor {
     pending: Option<char>,
     /// The change of roster's own (`x` or `X`) the mark stands for.
     repeat: Option<char>,
+    /// The last two keys typed in normal mode, the last last.
+    typed: [Option<char>; 2],
     /// The key (`f`, `t` or `r`) after which the next is a character for it,
     /// not a command.
     char_arg: Option<char>,
@@ -164,9 +185,13 @@ impl OpenNotes {
             .find(|e| e.whose == *whose)
     }
 
-    /// Shows `side`'s note, opened with `open` if it isn't yet.
+    /// Shows `side`'s note, opened with `open` if it isn't yet, yanking into
+    /// and out of what the other does.
     pub fn show(&mut self, side: Side, open: impl FnOnce() -> NoteEditor) {
-        self.editors[side as usize].get_or_insert_with(open);
+        let clip = self.shown().clip.clone();
+        self.editors[side as usize]
+            .get_or_insert_with(open)
+            .set_clip(clip);
         self.shown = side;
     }
 
@@ -177,11 +202,26 @@ impl OpenNotes {
         shown.into_iter().chain(other).collect()
     }
 
-    /// What the footer says of the keys: the shown note's, then `[` and `]`
-    /// where there are two to show.
+    /// What the footer says of the keys: the shown note's, closing both
+    /// while the other has changes, then `[` and `]` where there are two to
+    /// show.
     pub fn hints(&self) -> Vec<(String, &'static str)> {
-        let mut hints = self.shown().hints();
-        if self.session.is_some() && self.shown().mode() == EditorMode::Normal {
+        let shown = self.shown();
+        let mut hints = shown.hints();
+        if shown.command.is_some() || shown.mode() != EditorMode::Normal {
+            return hints;
+        }
+        // `:wq` saves this one and stays open, `:q!` doesn't close.
+        if self.other().is_some_and(NoteEditor::dirty) {
+            for (key, what) in &mut hints {
+                match key.as_str() {
+                    ":wq" => (*key, *what) = (":wqa".into(), "save both and close"),
+                    ":q!" => *key = ":qa!".into(),
+                    _ => {}
+                }
+            }
+        }
+        if self.session.is_some() {
             let to = match self.shown {
                 Side::Session => ("[", "project's note"),
                 Side::Project => ("]", "session's note"),
@@ -203,11 +243,14 @@ impl NoteEditor {
         if let Some(pin) = pin {
             state.cursor = Index2::new(pin, 0);
         }
+        let clip = Clip::default();
+        state.set_clipboard(clip.clone());
         let lines = rows(&state);
         NoteEditor {
             whose: n.whose.clone(),
             label: n.label.clone(),
             state: RefCell::new(state),
+            clip,
             keys: vim_keys(),
             pin,
             saved: (text, pin),
@@ -215,6 +258,7 @@ impl NoteEditor {
             lines,
             pending: None,
             repeat: None,
+            typed: [None, None],
             char_arg: None,
             command: None,
             escape,
@@ -292,6 +336,8 @@ impl NoteEditor {
         }
         if n + 1 == keys.len() {
             self.held = None;
+            // Esc, which ends what was typed before it (`yi` of `yi[`).
+            self.typed = [None, None];
             self.feed(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         } else {
             self.held = Some((n + 1, now));
@@ -323,12 +369,20 @@ impl NoteEditor {
         self.base = note.cloned();
     }
 
-    /// The text as `$EDITOR` left it; the pin follows its line.
+    /// Yanks into `clip`, and puts what's in it.
+    fn set_clip(&mut self, clip: Clip) {
+        self.state.borrow_mut().set_clipboard(clip.clone());
+        self.clip = clip;
+    }
+
+    /// The text as `$EDITOR` left it; the pin follows its line, and what was
+    /// yanked stays.
     pub fn replace(&mut self, text: &str) {
         let mut state = self.state.borrow_mut();
         let cursor = state.cursor;
         let mode = state.mode;
         *state = EditorState::new(Lines::from(text));
+        state.set_clipboard(self.clip.clone());
         let rows = rows(&state);
         let last = rows.len().saturating_sub(1);
         state.cursor = Index2::new(cursor.row.min(last), 0);
@@ -377,13 +431,22 @@ impl NoteEditor {
         if ctrl && e.code == KeyCode::Char('g') {
             // Nothing waits on a key across $EDITOR: not roster, nor edtui.
             self.pending = None;
+            self.typed = [None, None];
             if self.char_arg.take().is_some() || self.mode() == EditorMode::Normal {
                 self.feed(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             }
             return Outcome::External;
         }
         let plain = !ctrl && !e.modifiers.contains(KeyModifiers::ALT);
-        if self.mode() == EditorMode::Normal && self.char_arg.is_none() {
+        let normal = self.mode() == EditorMode::Normal && self.char_arg.is_none();
+        // After an operator and `i` or `a` (`yi`), a bracket is what it acts
+        // on (`yi[`), whether edtui has that or not.
+        let object = normal && matches!(self.typed, [Some('c' | 'd' | 'y'), Some('i' | 'a')]);
+        self.typed = match e.code {
+            KeyCode::Char(c) if normal && plain => [self.typed[1], Some(c)],
+            _ => [None, None],
+        };
+        if normal {
             if let Some(first) = self.pending.take() {
                 return match (first, e.code) {
                     ('Z', KeyCode::Char('Z')) if plain => self.write_and_close(false),
@@ -396,13 +459,13 @@ impl NoteEditor {
                 };
             }
             // `[` and `]` show a note, unless they end a sequence edtui
-            // was in (`ci[`): edtui is given them, and runs what they do
-            // alone only if it wasn't (`vim_keys`).
-            if let KeyCode::Char(c @ ('[' | ']')) = e.code
-                && plain
-            {
+            // was in (`ci[`), or one it gave up on (`yi[`, which it lacks):
+            // edtui is given them, and runs what they do alone only if it
+            // wasn't in one (`vim_keys`). With Alt too, which edtui takes
+            // for them.
+            if let KeyCode::Char(c @ ('[' | ']')) = e.code {
                 self.feed(e);
-                if !self.unmarked() {
+                if !self.unmarked() || object {
                     return Outcome::None;
                 }
                 return Outcome::Show(match c {
@@ -467,11 +530,15 @@ impl NoteEditor {
             }
             _ => self.feed(e),
         }
-        // `.` that replayed the mark: roster's change again. However edtui
-        // took it as `.`: Alt+`.` too, and after `yf`, which it doesn't know.
-        if e.code == KeyCode::Char('.')
-            && mode == EditorMode::Normal
+        // Search mode after a key but `/` is the mark's, or a bracket's
+        // alone (`vim_keys`), however edtui came to run it: `.` replaying the
+        // mark (Alt+`.` too), a key roster took for f's character after a
+        // `yf`, which edtui doesn't know (`yf]`). Normal mode again, and for
+        // `.`, roster's change again.
+        if mode == EditorMode::Normal
+            && e.code != KeyCode::Char('/')
             && self.unmarked()
+            && e.code == KeyCode::Char('.')
             && let Some(change) = self.repeat
         {
             self.take_char(change);
@@ -890,6 +957,33 @@ mod tests {
     }
 
     #[test]
+    fn a_bracket_with_alt_or_after_a_sequence_leaves_normal_mode_as_it_was() {
+        let mut e = editor(Some("- [ ] one"), None);
+        let with = |c, modifiers| KeyEvent::new(KeyCode::Char(c), modifiers);
+        // Alt+] is ], as edtui takes it; Ctrl+] nothing.
+        assert_eq!(
+            e.on_key(with(']', KeyModifiers::ALT)),
+            Outcome::Show(Side::Session)
+        );
+        assert_eq!(e.mode(), EditorMode::Normal);
+        assert_eq!(e.on_key(with('[', KeyModifiers::CONTROL)), Outcome::None);
+        assert_eq!(e.mode(), EditorMode::Normal);
+        // After a sequence edtui lacks (yi[, da]), or a yf it doesn't know,
+        // a bracket is the sequence's: no note shown, nothing changed.
+        for typed in ["yi[", "da]", "yf]", "yf["] {
+            assert_eq!(keys(&mut e, typed), [], "{typed}");
+            assert_eq!(e.mode(), EditorMode::Normal, "{typed}");
+        }
+        assert_eq!(e.text(), "- [ ] one");
+        assert_eq!(keys(&mut e, "["), [Outcome::Show(Side::Project)]);
+        // Insert mode left by keys typed quickly (`jk`) ends what came before
+        // it, as Esc does: yy, a, jk, then ] shows the session's note.
+        e.escape = Some((vec!['j', 'k'], Duration::from_millis(300)));
+        assert_eq!(keys(&mut e, "yyajk]"), [Outcome::Show(Side::Session)]);
+        assert_eq!(keys(&mut e, "ddijk["), [Outcome::Show(Side::Project)]);
+    }
+
+    #[test]
     fn notes_open_as_buffers_the_shown_first() {
         let session =
             |text| NoteEditor::new(&noted(Whose::Session("r-1".into()), text, None), None);
@@ -908,10 +1002,43 @@ mod tests {
         assert!(open.of(&Whose::Project(1)).is_some());
         assert!(open.of(&Whose::Project(2)).is_none());
         // The footer says how to show the other, where there is one: from
-        // the project's, ] for the session's.
-        assert!(open.hints().iter().any(|(k, _)| k == "]"));
+        // the project's, ] for the session's; with the other changed, :wqa
+        // and :qa! close.
+        let hints = |open: &OpenNotes| -> Vec<String> {
+            open.hints().into_iter().map(|(k, _)| k).collect()
+        };
+        assert!(hints(&open).contains(&"]".to_string()));
+        assert!(hints(&open).contains(&":wqa".to_string()));
+        assert!(hints(&open).contains(&":qa!".to_string()));
+        assert!(!hints(&open).contains(&":q!".to_string()));
+        // Typing a command, only its own.
+        keys(open.shown_mut(), ":w");
+        assert_eq!(hints(&open), ["Enter", "Esc"]);
+        keys(open.shown_mut(), "\x1b");
         let alone = OpenNotes::new(None, 1, Side::Project, project(None));
         assert!(!alone.hints().iter().any(|(k, _)| k == "[" || k == "]"));
+    }
+
+    #[test]
+    fn the_notes_yank_into_one_register_and_ctrl_g_keeps_it() {
+        let session =
+            |text| NoteEditor::new(&noted(Whose::Session("r-1".into()), text, None), None);
+        let project = |text| NoteEditor::new(&noted(Whose::Project(1), text, None), None);
+        let mut open = OpenNotes::new(Some("r-1".into()), 1, Side::Session, session(Some("todo")));
+        // A line yanked in the session's goes into the project's.
+        keys(open.shown_mut(), "yy");
+        open.show(Side::Project, || project(Some("backlog")));
+        keys(open.shown_mut(), "p");
+        assert_eq!(open.shown().text(), "backlog\ntodo");
+        // And back: x's character, into the session's.
+        keys(open.shown_mut(), "gg0x");
+        open.show(Side::Session, || unreachable!());
+        keys(open.shown_mut(), "$p");
+        assert_eq!(open.shown().text(), "todob");
+        // Back from $EDITOR, what was yanked is still there.
+        open.shown_mut().replace("new");
+        keys(open.shown_mut(), "p");
+        assert_eq!(open.shown().text(), "nbew");
     }
 
     #[test]

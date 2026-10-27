@@ -189,6 +189,10 @@ impl crate::engine::Roster {
     fn use_config(&mut self, config: Config, text: String) -> Result<()> {
         let tmux_changed = config.keys.detach != self.config.keys.detach
             || config.status_line() != self.config.status_line();
+        // What it sets that roster no longer has, said as it's set.
+        let said = self.config.gone();
+        let gone = config.gone().into_iter().filter(|g| !said.contains(g));
+        self.notices.extend(gone);
         self.config = config;
         self.config_text = text;
         if tmux_changed
@@ -824,6 +828,8 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         server,
         settings,
         usage,
+        // Gone, not a setting (`Config::gone`).
+        group: _,
     } = view;
     let v =
         |name: &str, list: &KeyList, doc: &str| keys_setting(&["keys", "view", name], list, doc);

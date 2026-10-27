@@ -260,7 +260,6 @@ impl App {
         self.dialog = Some(Dialog::Form(Box::new(form.with_models(&self.models))));
     }
 
-    /// Replaces the data, keeping the selection on the same entry.
     /// Grouped by project, or on shelves (`group_by` in config.toml).
     pub fn set_grouped(&mut self, grouped: bool) {
         if self.grouped != grouped {
@@ -269,6 +268,7 @@ impl App {
         }
     }
 
+    /// Replaces the data, keeping the selection on the same entry.
     pub fn set_data(&mut self, projects: Vec<Project>, sessions: Vec<Session>) {
         self.projects = projects;
         self.sessions = sessions;
@@ -555,13 +555,15 @@ impl App {
                 close,
                 force,
             } => {
-                if close && other_dirty {
-                    let why = unsaved(open);
-                    self.fail(why);
-                    return None;
-                }
+                // The shown note is saved; the editor stays open while the
+                // other has changes.
                 let saves = vec![save(open.shown(), force)];
-                Some(Op::SaveNotes { saves, close })
+                let unsaved = (close && other_dirty).then(|| unsaved(open));
+                Some(Op::SaveNotes {
+                    saves,
+                    close: close && !other_dirty,
+                    unsaved,
+                })
             }
             note::Outcome::Save {
                 all: true,
@@ -571,7 +573,13 @@ impl App {
                 let saves: Vec<op::NoteSave> =
                     open.dirty().into_iter().map(|e| save(e, force)).collect();
                 match (saves.is_empty(), close) {
-                    (false, _) => return Some(Op::SaveNotes { saves, close }),
+                    (false, _) => {
+                        return Some(Op::SaveNotes {
+                            saves,
+                            close,
+                            unsaved: None,
+                        });
+                    }
                     (true, true) => self.note = None,
                     (true, false) => self.flash("Nothing new to save"),
                 }

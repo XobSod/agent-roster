@@ -420,3 +420,53 @@ fn a_tmux_conf_with_an_error_is_said_when_the_server_starts_too() {
     assert!(out.stderr.is_empty(), "{out:?}");
     assert_eq!(option(), "fixed");
 }
+
+#[test]
+fn a_setting_roster_no_longer_has_is_said_not_refused() {
+    let Some(t) = TestEnv::new("gone") else {
+        return;
+    };
+    let file = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("[keys.view]\ngroup = \"g\"\n");
+    fs::write(&file, &text).unwrap();
+    // The key that grouped by project: every command still runs, and says
+    // what replaced it.
+    let out = t.run(&["ls"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("keys.view.group is gone") && err.contains("group_by"),
+        "{err}"
+    );
+    // Once per command, though config set reads the file again.
+    let out = t.run(&["config", "set", "group_by", "project"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(err.matches("keys.view.group is gone").count(), 1, "{err}");
+    // A config mended with --edit that still has it is saved: said, not
+    // failed.
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("no_such_setting = 1\n");
+    fs::write(&file, &text).unwrap();
+    let mends = t.path("mends.sh");
+    fs::write(&mends, "#!/bin/sh\nsed -i '/no_such_setting/d' \"$1\"\n").unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&mends)
+        .status()
+        .unwrap();
+    let out = t
+        .command(&["config", "--edit"])
+        .env("EDITOR", &mends)
+        .env_remove("VISUAL")
+        .output()
+        .unwrap();
+    let (said, err) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{said}{err}");
+    assert!(said.contains("config.toml saved"), "{said}");
+    assert!(err.contains("keys.view.group is gone"), "{err}");
+}

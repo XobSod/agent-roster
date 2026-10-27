@@ -251,6 +251,9 @@ pub struct ViewKeys {
     pub settings: KeyList,
     /// What the agents' accounts have used of their limits.
     pub usage: KeyList,
+    /// The key that grouped the list by project, gone (`group_by` does it):
+    /// taken, and said to be gone (`Config::gone`).
+    pub group: Option<toml::Value>,
 }
 
 fn keys(names: &[&str]) -> KeyList {
@@ -318,6 +321,7 @@ impl Default for ViewKeys {
             server: keys(&["t"]),
             settings: keys(&["s"]),
             usage: keys(&["u"]),
+            group: None,
         }
     }
 }
@@ -443,6 +447,20 @@ impl Config {
             }
         }
         Ok(config)
+    }
+
+    /// What it sets that roster no longer has, to say: taken all the same,
+    /// so a config that set it still works.
+    pub fn gone(&self) -> Vec<String> {
+        let mut gone = Vec::new();
+        if self.keys.view.group.is_some() {
+            gone.push(
+                "keys.view.group is gone: group_by = \"project\" groups the list by \
+                 project; take it out of config.toml (roster config --edit)"
+                    .to_string(),
+            );
+        }
+        gone
     }
 
     pub fn status_line(&self) -> bool {
@@ -667,8 +685,14 @@ mod tests {
         assert!(Config::parse("group_by = \"project\"").unwrap().grouped());
         assert!(!Config::parse("group_by = \"attention\"").unwrap().grouped());
         assert!(Config::parse("group_by = \"shelf\"").is_err());
-        // Its key is gone: a config still setting it says so.
-        assert!(Config::parse("[keys.view]\ngroup = \"g\"").is_err());
+        // Its key is gone: a config still setting it works, and says so.
+        let old = Config::parse("[keys.view]\ngroup = \"g\"").unwrap();
+        assert!(
+            old.gone().iter().any(|g| g.contains("group_by")),
+            "{:?}",
+            old.gone()
+        );
+        assert!(Config::default().gone().is_empty());
     }
 
     #[test]

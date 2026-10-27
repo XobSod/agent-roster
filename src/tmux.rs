@@ -40,6 +40,68 @@ pub struct Untyped {
     pub error: anyhow::Error,
 }
 
+/// An argument of a tmux command, as tmux reads it: every call says which
+/// it gives, so a value is never read as a format, a pattern, or the end of
+/// a command where it isn't meant as one. Each is given as `render` makes
+/// it, with a `;` at its end escaped too (`literal_end`), as tmux takes one
+/// for the end of a command wherever it is.
+#[derive(Clone, Copy, Debug)]
+enum Arg<'a> {
+    /// A word of roster's own (a command, a flag, an option's name), as the
+    /// code writes it: only a `&'static str` makes one.
+    Word(&'static str),
+    /// A number roster gives (a size, a time, a line).
+    Number(i64),
+    /// A name roster made (a session's, `r-` and an id; a buffer's): never a
+    /// user's, which `-s` and `-b` would read as formats.
+    Name(&'a str),
+    /// The session of that name exactly (`=name`), as a target.
+    Session(&'a str),
+    /// That session's pane (`=name:`), as a target.
+    Pane(&'a str),
+    /// Text tmux takes as it is: the command after `--` (an agent and its
+    /// arguments, a first prompt), which it doesn't expand.
+    Text(&'a OsStr),
+    /// A variable the session gets (`-e`), which tmux doesn't expand either.
+    Env(&'a str, &'a str),
+    /// A path where tmux takes a format (`-c`, `load-buffer`'s file).
+    Path(&'a Path),
+    /// A path where tmux takes a pattern (`source-file`).
+    Pattern(&'a Path),
+    /// Text tmux shows (`display-message`), which it reads as a format and
+    /// a time, then again as it draws it.
+    Message(&'a str),
+    /// A tmux format roster means as one: `-F`, or the status line's markup,
+    /// which roster makes with what it shows escaped (`tui::status_line`).
+    Format(&'a str),
+}
+
+impl From<&'static str> for Arg<'_> {
+    fn from(word: &'static str) -> Self {
+        Arg::Word(word)
+    }
+}
+
+impl Arg<'_> {
+    /// As tmux is given it, to read it as meant.
+    fn render(self) -> std::ffi::OsString {
+        let given = match self {
+            Arg::Word(word) => word.into(),
+            Arg::Number(n) => n.to_string().into(),
+            Arg::Name(name) => name.into(),
+            Arg::Session(name) => format!("={name}").into(),
+            Arg::Pane(name) => format!("={name}:").into(),
+            Arg::Text(text) => text.to_os_string(),
+            Arg::Env(name, value) => format!("{name}={value}").into(),
+            Arg::Path(path) => literal_path(path),
+            Arg::Pattern(path) => glob_literal(path.as_os_str()),
+            Arg::Message(text) => message_text(text).into(),
+            Arg::Format(format) => format.into(),
+        };
+        literal_end(&given)
+    }
+}
+
 /// State of the pane that runs an agent.
 #[derive(Clone, Debug)]
 pub struct Pane {
@@ -109,7 +171,7 @@ impl Tmux {
         status_line: bool,
     ) -> Result<Option<anyhow::Error>> {
         let text = config_text(detach_key, user_conf, status_line);
-        if fs::read_to_string(&self.conf).ok().as_deref() == Some(text.as_str()) {
+        if fs::read(&self.conf).ok().as_deref() == Some(&text[..]) {
             return Ok(None);
         }
         self.write_config(&text)?;
@@ -126,11 +188,7 @@ impl Tmux {
     /// again, which would add twice what it adds. Said once, as
     /// `apply_config`'s.
     pub fn check_config(&self) -> Option<anyhow::Error> {
-        let flushed = self.run([
-            OsStr::new("source-file"),
-            OsStr::new("-n"),
-            OsStr::new("/dev/null"),
-        ]);
+        let flushed = self.run(&["source-file".into(), "-n".into(), "/dev/null".into()]);
         match flushed {
             Ok(said) if said.trim().is_empty() => None,
             Ok(said) => Some(anyhow::anyhow!("tmux: {}", crate::util::one_line(&said))),
@@ -141,7 +199,7 @@ impl Tmux {
 
     /// Writes `text` as the generated config, whole, so a server starting
     /// meanwhile never reads half of it.
-    fn write_config(&self, text: &str) -> Result<()> {
+    fn write_config(&self, text: &[u8]) -> Result<()> {
         let part = self
             .conf
             .with_extension(format!("{}.part", std::process::id()));
@@ -152,8 +210,7 @@ impl Tmux {
 
     /// Makes a running server re-read the generated config.
     fn reload_config(&self) -> Result<()> {
-        let conf = glob_literal(self.conf.as_os_str());
-        match self.run([OsStr::new("source-file"), &conf]) {
+        match self.run(&["source-file".into(), Arg::Pattern(&self.conf)]) {
             Err(e) if is_missing(&e) => Ok(()),
             other => other.map(drop),
         }
@@ -175,25 +232,20 @@ impl Tmux {
         cmd
     }
 
-    /// Runs a tmux command whose arguments are all text, as given: an
-    /// agent's arguments and first prompt, a title, a lone `;` among them.
-    fn run<I, S>(&self, args: I) -> Result<String>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        self.run_args(args.into_iter().map(|a| literal_end(a.as_ref())))
+    /// Runs a tmux command, each argument given as its kind says (`Arg`).
+    fn run(&self, args: &[Arg<'_>]) -> Result<String> {
+        self.run_args(args.iter().map(|a| a.render()))
     }
 
     /// Runs tmux commands one after the other, in one call: only the `;`
     /// between them is tmux's own.
-    fn run_all(&self, commands: &[&[&str]]) -> Result<String> {
+    fn run_all(&self, commands: &[&[Arg<'_>]]) -> Result<String> {
         let mut args = Vec::new();
         for (i, command) in commands.iter().enumerate() {
             if i > 0 {
                 args.push(std::ffi::OsString::from(";"));
             }
-            args.extend(command.iter().map(|a| literal_end(OsStr::new(a))));
+            args.extend(command.iter().map(|a| a.render()));
         }
         self.run_args(args.into_iter())
     }
@@ -216,12 +268,14 @@ impl Tmux {
     /// Panes of roster's sessions by tmux session name; empty if the server isn't running.
     pub fn panes(&self) -> Result<HashMap<String, Pane>> {
         let Some(out) = self.query(&[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t\
-             #{pane_pid}\t#{window_width}\t#{window_height}\t#{session_attached}\t\
-             #{alternate_on}\t#{pane_title}",
+            "list-panes".into(),
+            "-a".into(),
+            "-F".into(),
+            Arg::Format(
+                "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t\
+                 #{pane_pid}\t#{window_width}\t#{window_height}\t#{session_attached}\t\
+                 #{alternate_on}\t#{pane_title}",
+            ),
         ])?
         else {
             return Ok(HashMap::new());
@@ -267,7 +321,7 @@ impl Tmux {
     }
 
     /// Runs a query; None if the server isn't running.
-    fn query(&self, args: &[&str]) -> Result<Option<String>> {
+    fn query(&self, args: &[Arg<'_>]) -> Result<Option<String>> {
         match self.run(args) {
             Err(e) if is_missing(&e) => Ok(None),
             other => other.map(Some),
@@ -276,9 +330,9 @@ impl Tmux {
 
     pub fn server(&self) -> Result<Option<Server>> {
         let Some(out) = self.query(&[
-            "list-sessions",
-            "-F",
-            "#{pid}\t#{version}\t#{start_time}\t#{socket_path}",
+            "list-sessions".into(),
+            "-F".into(),
+            Arg::Format("#{pid}\t#{version}\t#{start_time}\t#{socket_path}"),
         ])?
         else {
             return Ok(None);
@@ -299,7 +353,13 @@ impl Tmux {
 
     pub fn pane_details(&self) -> Result<Vec<PaneDetail>> {
         let format = "#{session_name}\t#{session_attached}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{history_size}";
-        let Some(out) = self.query(&["list-panes", "-a", "-F", format])? else {
+        let Some(out) = self.query(&[
+            "list-panes".into(),
+            "-a".into(),
+            "-F".into(),
+            Arg::Format(format),
+        ])?
+        else {
             return Ok(Vec::new());
         };
         Ok(out
@@ -338,7 +398,7 @@ impl Tmux {
 
     /// Whether `key` is bound to detach-client in the root table.
     pub fn detach_bound(&self, key: &str) -> Result<Option<bool>> {
-        let Some(out) = self.query(&["list-keys", "-T", "root"])? else {
+        let Some(out) = self.query(&["list-keys".into(), "-T".into(), "root".into()])? else {
             return Ok(None);
         };
         Ok(Some(out.lines().any(|line| {
@@ -349,7 +409,7 @@ impl Tmux {
 
     /// The server's global environment variables (names), e.g. to spot TMUX leaks.
     pub fn global_env(&self) -> Result<Option<Vec<String>>> {
-        let Some(out) = self.query(&["show-environment", "-g"])? else {
+        let Some(out) = self.query(&["show-environment".into(), "-g".into()])? else {
             return Ok(None);
         };
         // Removed variables show as "-NAME".
@@ -371,32 +431,18 @@ impl Tmux {
         env: &[(&str, String)],
         argv: &[String],
     ) -> Result<()> {
-        let mut args: Vec<&OsStr> = Vec::new();
-        let (w, h) = (size.0.to_string(), size.1.to_string());
-        args.extend(
-            [
-                "new-session",
-                "-d",
-                "-s",
-                name,
-                "-x",
-                w.as_str(),
-                "-y",
-                h.as_str(),
-                "-c",
-            ]
-            .map(OsStr::new),
-        );
-        let workdir = literal_path(workdir);
-        args.push(&workdir);
-        let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        for kv in &env {
-            args.push(OsStr::new("-e"));
-            args.push(OsStr::new(kv));
-        }
-        args.push(OsStr::new("--"));
-        args.extend(argv.iter().map(OsStr::new));
-        self.run(args).map(drop)
+        let mut args = vec![
+            "new-session".into(),
+            "-d".into(),
+            "-s".into(),
+            Arg::Name(name),
+            "-x".into(),
+            Arg::Number(size.0.into()),
+            "-y".into(),
+            Arg::Number(size.1.into()),
+        ];
+        args.extend(started(workdir, env, argv));
+        self.run(&args).map(drop)
     }
 
     /// Replaces the (dead) pane's process with `argv`.
@@ -407,20 +453,14 @@ impl Tmux {
         env: &[(&str, String)],
         argv: &[String],
     ) -> Result<()> {
-        let target = pane_target(name);
-        let mut args: Vec<&OsStr> = ["respawn-pane", "-k", "-t", target.as_str(), "-c"]
-            .map(OsStr::new)
-            .to_vec();
-        let workdir = literal_path(workdir);
-        args.push(&workdir);
-        let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        for kv in &env {
-            args.push(OsStr::new("-e"));
-            args.push(OsStr::new(kv));
-        }
-        args.push(OsStr::new("--"));
-        args.extend(argv.iter().map(OsStr::new));
-        self.run(args).map(drop)
+        let mut args = vec![
+            "respawn-pane".into(),
+            "-k".into(),
+            "-t".into(),
+            Arg::Pane(name),
+        ];
+        args.extend(started(workdir, env, argv));
+        self.run(&args).map(drop)
     }
 
     /// Puts a line into the pane as a bracketed paste, then presses Enter. A plain
@@ -430,7 +470,6 @@ impl Tmux {
     /// plain text.
     /// Failing, it says whether the text got into the pane (`Untyped::pasted`).
     pub fn type_line(&self, name: &str, text: &str) -> Result<(), Untyped> {
-        let target = pane_target(name);
         let buffer = format!("roster-{name}");
         let unpasted = |error| Untyped {
             pasted: false,
@@ -451,46 +490,49 @@ impl Tmux {
             .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
             .with_context(|| format!("can't write {}", file.display()));
         let loaded = written.and_then(|()| {
-            self.run([
-                OsStr::new("load-buffer"),
-                OsStr::new("-b"),
-                OsStr::new(&buffer),
-                &literal_path(&file),
+            self.run(&[
+                "load-buffer".into(),
+                "-b".into(),
+                Arg::Name(&buffer),
+                Arg::Path(&file),
             ])
         });
         let _ = std::fs::remove_file(&file);
         loaded.map_err(unpasted)?;
-        self.run([
-            "paste-buffer",
-            "-p",
-            "-d",
-            "-b",
-            buffer.as_str(),
-            "-t",
-            target.as_str(),
+        self.run(&[
+            "paste-buffer".into(),
+            "-p".into(),
+            "-d".into(),
+            "-b".into(),
+            Arg::Name(&buffer),
+            "-t".into(),
+            Arg::Pane(name),
         ])
         .map_err(unpasted)?;
         std::thread::sleep(std::time::Duration::from_millis(300));
-        self.run(["send-keys", "-t", target.as_str(), "Enter"])
-            .map(drop)
-            .map_err(|error| Untyped {
-                pasted: true,
-                error,
-            })
+        self.run(&[
+            "send-keys".into(),
+            "-t".into(),
+            Arg::Pane(name),
+            "Enter".into(),
+        ])
+        .map(drop)
+        .map_err(|error| Untyped {
+            pasted: true,
+            error,
+        })
     }
 
     /// Shows `text` to whoever is attached to session `name`, for a while,
     /// where tmux shows its own messages. Shown if it can be, else not.
     pub fn say(&self, name: &str, text: &str) {
-        let target = pane_target(name);
-        let text = message_text(text);
-        let _ = self.run([
-            "display-message",
-            "-d",
-            "10000",
-            "-t",
-            target.as_str(),
-            text.as_str(),
+        let _ = self.run(&[
+            "display-message".into(),
+            "-d".into(),
+            Arg::Number(10_000),
+            "-t".into(),
+            Arg::Pane(name),
+            Arg::Message(text),
         ]);
     }
 
@@ -499,25 +541,23 @@ impl Tmux {
     /// as it is until a client attaches, which then sizes the window to itself
     /// as usual (verified on tmux 3.5a).
     pub fn resize(&self, name: &str, size: (u16, u16)) -> Result<()> {
-        let target = pane_target(name);
-        let (w, h) = (size.0.to_string(), size.1.to_string());
         self.run_all(&[
             &[
-                "resize-window",
-                "-t",
-                target.as_str(),
-                "-x",
-                w.as_str(),
-                "-y",
-                h.as_str(),
+                "resize-window".into(),
+                "-t".into(),
+                Arg::Pane(name),
+                "-x".into(),
+                Arg::Number(size.0.into()),
+                "-y".into(),
+                Arg::Number(size.1.into()),
             ],
             &[
-                "set-option",
-                "-w",
-                "-u",
-                "-t",
-                target.as_str(),
-                "window-size",
+                "set-option".into(),
+                "-w".into(),
+                "-u".into(),
+                "-t".into(),
+                Arg::Pane(name),
+                "window-size".into(),
             ],
         ])
         .map(drop)
@@ -526,17 +566,21 @@ impl Tmux {
     /// What the status line shows while attached to the session
     /// (`config_text`): tmux markup for its left and right.
     pub fn label(&self, name: &str, left: &str, right: &str) -> Result<()> {
-        let target = pane_target(name);
-        let t = target.as_str();
-        self.run_all(&[
-            &["set-option", "-t", t, "@roster_left", left],
-            &["set-option", "-t", t, "@roster_right", right],
-        ])
-        .map(drop)
+        let set = |option, markup| {
+            [
+                "set-option".into(),
+                "-t".into(),
+                Arg::Pane(name),
+                Arg::Word(option),
+                Arg::Format(markup),
+            ]
+        };
+        self.run_all(&[&set("@roster_left", left), &set("@roster_right", right)])
+            .map(drop)
     }
 
     pub fn kill_session(&self, name: &str) -> Result<()> {
-        match self.run(["kill-session", "-t", &format!("={name}")]) {
+        match self.run(&["kill-session".into(), "-t".into(), Arg::Session(name)]) {
             Err(e) if is_missing(&e) => Ok(()),
             other => other.map(drop),
         }
@@ -545,16 +589,19 @@ impl Tmux {
     /// The visible screen plus `history` lines above it, with colours as escape
     /// sequences if `ansi`.
     pub fn capture(&self, name: &str, ansi: bool, history: u32) -> Result<String> {
-        let target = pane_target(name);
-        let start = format!("-{history}");
-        let mut args = vec!["capture-pane", "-p", "-t", target.as_str()];
+        let mut args = vec![
+            "capture-pane".into(),
+            "-p".into(),
+            "-t".into(),
+            Arg::Pane(name),
+        ];
         if history > 0 {
-            args.extend(["-S", start.as_str()]);
+            args.extend(["-S".into(), Arg::Number(-i64::from(history))]);
         }
         if ansi {
-            args.push("-e");
+            args.push("-e".into());
         }
-        self.run(args)
+        self.run(&args)
     }
 
     /// Attaches the current terminal until the user detaches (or the session ends).
@@ -563,7 +610,7 @@ impl Tmux {
     /// which would pile up behind the TUI, one per attach. Errors still show.
     pub fn attach(&self, name: &str) -> Result<ExitStatus> {
         self.command()
-            .args(["attach-session", "-t", &format!("={name}")])
+            .args(["attach-session".into(), "-t".into(), Arg::Session(name)].map(Arg::render))
             .stdout(std::process::Stdio::null())
             .status()
             .context("can't run tmux (is it installed?)")
@@ -633,8 +680,20 @@ fn literal_end(arg: &OsStr) -> std::ffi::OsString {
     }
 }
 
-fn pane_target(name: &str) -> String {
-    format!("={name}:")
+/// The rest of a command that starts a pane: where (`-c`), its variables
+/// (`-e`), then its command, after `--`.
+fn started<'a>(
+    workdir: &'a Path,
+    env: &'a [(&'a str, String)],
+    argv: &'a [String],
+) -> Vec<Arg<'a>> {
+    let mut args = vec!["-c".into(), Arg::Path(workdir)];
+    for (name, value) in env {
+        args.extend(["-e".into(), Arg::Env(name, value)]);
+    }
+    args.push("--".into());
+    args.extend(argv.iter().map(|a| Arg::Text(OsStr::new(a))));
+    args
 }
 
 /// Whether tmux said there's no such server or session: at the start of what
@@ -654,7 +713,9 @@ fn is_missing(e: &anyhow::Error) -> bool {
     .any(|m| said.starts_with(m))
 }
 
-fn config_text(detach_key: &str, user_conf: &Path, status_line: bool) -> String {
+/// The generated config, as bytes: the user's tmux.conf's path written in a
+/// double-quoted string, a byte that isn't printable ASCII as its number.
+fn config_text(detach_key: &str, user_conf: &Path, status_line: bool) -> Vec<u8> {
     // Noted in the text so that editing the user's file changes it.
     let modified = fs::metadata(user_conf)
         .and_then(|m| m.modified())
@@ -680,13 +741,11 @@ set -g window-status-separator ''"
     } else {
         "set -g status off".to_string()
     };
-    let shown = user_conf.display();
-    let user_conf = glob_literal(user_conf.as_os_str())
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$");
-    format!(
+    // Shown in a comment, which a newline would end.
+    let shown: String = (user_conf.display().to_string().chars())
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    let text = format!(
         "# Generated by roster on every run; don't edit. Your own additions go in
 # {shown} (see examples/tmux.conf; last modified: {modified}).
 
@@ -709,9 +768,24 @@ set -s set-clipboard on
 set -g history-limit 50000
 set -g remain-on-exit on
 
-source-file -q \"{user_conf}\"
-"
-    )
+source-file -q \""
+    );
+    // The path a pattern to source-file, in a string where `\`, `"` and `$`
+    // are a config file's own. A control character, or a byte that isn't
+    // ASCII, as its number (`\377`): one that isn't UTF-8 tmux reads
+    // written as it is only as it starts, not on a reload (it splits the
+    // line at a `;` after it, or finds no file), and a newline would end
+    // the line.
+    let mut text = text.into_bytes();
+    for &b in glob_literal(user_conf.as_os_str()).as_encoded_bytes() {
+        match b {
+            b'\\' | b'"' | b'$' => text.extend([b'\\', b]),
+            0..=0x1f | 0x7f..=0xff => text.extend(format!("\\{b:03o}").bytes()),
+            _ => text.push(b),
+        }
+    }
+    text.extend_from_slice(b"\"\n");
+    text
 }
 
 #[cfg(test)]
@@ -740,6 +814,7 @@ mod tests {
             Path::new("/home/u/.config/agent-roster/tmux.conf"),
             false,
         );
+        let text = String::from_utf8(text).unwrap();
         assert!(text.contains("bind -n C-q detach-client"));
         assert!(text.contains("set -g status off"));
         assert!(text.contains("unbind -aq -T root"));
@@ -750,9 +825,192 @@ mod tests {
     #[test]
     fn config_escapes_the_user_path() {
         let text = config_text("C-q", Path::new("/we\"ird/$HOME/tmux.conf"), true);
+        let text = String::from_utf8(text).unwrap();
         assert!(text.contains("set -g status on") && text.contains("#{@roster_left}"));
         assert!(text.contains("C-q back"));
         assert!(text.contains(r#"source-file -q "/we\"ird/\$HOME/tmux.conf""#));
+    }
+
+    #[test]
+    fn each_kind_of_argument_is_given_as_tmux_reads_it() {
+        let given = |a: Arg| a.render().into_string().unwrap();
+        assert_eq!(given("list-panes".into()), "list-panes");
+        assert_eq!(given(Arg::Number(-200)), "-200");
+        assert_eq!(given(Arg::Name("r-1a2b")), "r-1a2b");
+        assert_eq!(given(Arg::Session("r-1")), "=r-1");
+        assert_eq!(given(Arg::Pane("r-1")), "=r-1:");
+        // As it is, but for a `;` at its end, which would end the command.
+        assert_eq!(
+            given(Arg::Text(OsStr::new("fix #S; now;"))),
+            "fix #S; now\\;"
+        );
+        assert_eq!(given(Arg::Env("K", "a#{b};")), "K=a#{b}\\;");
+        // Read as a format, a pattern, or shown text.
+        assert_eq!(
+            given(Arg::Path(Path::new("/w/C#S a#[b;"))),
+            "/w/C##S a#[b\\;"
+        );
+        assert_eq!(
+            given(Arg::Pattern(Path::new(r"/w/b[1]*?\"))),
+            r"/w/b\[1\]\*\?\\"
+        );
+        assert_eq!(given(Arg::Message("50% ## #[x]")), "50%% ######## ##[x]");
+        // A format roster means, as it is.
+        assert_eq!(given(Arg::Format("#{pane_pid}")), "#{pane_pid}");
+    }
+
+    /// A tmux server of a test's own, its config in `dir`, ended with it.
+    struct Scratch {
+        tmux: Tmux,
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Where its socket is, before it's gone: tmux leaves the file.
+            let socket = (self.tmux.command())
+                .args(["display-message", "-p", "#{socket_path}"])
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|path| path.contains("roster-scratch-"));
+            let _ = self.tmux.command().arg("kill-server").output();
+            if let Some(socket) = socket {
+                let _ = fs::remove_file(socket);
+            }
+        }
+    }
+
+    /// The bytes of a file a pane writes, once it has.
+    fn written(file: &Path) -> Vec<u8> {
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match fs::read(file) {
+                Ok(bytes) if !bytes.is_empty() => return bytes,
+                _ if std::time::Instant::now() > by => panic!("{} never written", file.display()),
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    }
+
+    #[test]
+    fn what_roster_gives_tmux_arrives_as_written() {
+        use std::os::unix::ffi::OsStrExt;
+        if Command::new("tmux").arg("-V").output().is_err() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Everything tmux could read as a format, a style, a command, a
+        // pattern, a time or a command's end; and with a byte that isn't
+        // UTF-8, where tmux takes one (not in a file it sources once
+        // running, where it splits the line there, or finds no file).
+        let named = b"d #S #(echo no) #[b] #{pid} (a),b \\ * ? %H ;";
+        let conf_dir = dir.path().join(OsStr::from_bytes(named));
+        let odd = dir
+            .path()
+            .join(OsStr::from_bytes(&[&named[..], b"\xff;"].concat()));
+        fs::create_dir(&conf_dir).unwrap();
+        fs::create_dir(&odd).unwrap();
+        let s = Scratch {
+            tmux: Tmux::new(
+                format!("roster-scratch-tm-{}", std::process::id()),
+                conf_dir.join("tmux.conf"),
+            ),
+        };
+        let t = &s.tmux;
+        // The user's tmux.conf, sourced from a path that's a pattern to tmux
+        // (and a byte that isn't UTF-8, and a newline), as the server starts,
+        // then as it reloads the generated config.
+        let user_dir = dir.path().join(OsStr::from_bytes(
+            &[&named[..], b" \xff;x\nn\xc3\xa9 \xff1"].concat(),
+        ));
+        fs::create_dir(&user_dir).unwrap();
+        let user = user_dir.join("user.conf");
+        fs::write(&user, "set -g @user loaded\n").unwrap();
+        let applied = |t: &Tmux, key| {
+            t.apply_config(key, &user, true)
+                .unwrap()
+                .map(|e| e.to_string())
+        };
+        assert_eq!(applied(t, "C-q"), None);
+        let shown = |t: &Tmux, option: &'static str| {
+            t.run(&["show-options".into(), "-gv".into(), option.into()])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        // Started in that directory, with a variable and a command tmux
+        // doesn't expand.
+        let out = dir.path().join("out");
+        let script = r#"pwd > "$1.cwd"; printf %s "$ROSTER_T" > "$1.env"; printf %s "$2" > "$1.arg"; exec cat > "$1.typed""#;
+        let given = "#S #(echo no) %H #{pid};";
+        let argv = |n: &str| {
+            ["sh", "-c", script, "sh"]
+                .iter()
+                .map(|a| a.to_string())
+                .chain([format!("{}{n}", out.display()), given.to_string()])
+                .collect::<Vec<String>>()
+        };
+        let env = [("ROSTER_T", "v #S #(echo no);".to_string())];
+        t.new_session("r-t1", &odd, (80, 24), &env, &argv("1"))
+            .unwrap();
+        let cwd = [odd.as_os_str().as_bytes(), b"\n"].concat();
+        assert_eq!(written(&dir.path().join("out1.cwd")), cwd);
+        assert_eq!(written(&dir.path().join("out1.env")), b"v #S #(echo no);");
+        assert_eq!(written(&dir.path().join("out1.arg")), given.as_bytes());
+        assert_eq!(shown(t, "@user"), "loaded");
+        // A line typed in, through a file beside the config (load-buffer);
+        // and a buffer loaded from the odd directory itself.
+        t.type_line("r-t1", "typed #S ; %H #(echo no);").unwrap();
+        assert_eq!(
+            written(&dir.path().join("out1.typed")),
+            b"typed #S ; %H #(echo no);\n"
+        );
+        let file = odd.join("buffer");
+        fs::write(&file, "loaded #S;").unwrap();
+        let buffer = |t: &Tmux, verb: &'static str| {
+            let mut args = vec![verb.into(), "-b".into(), Arg::Name("t")];
+            if verb == "load-buffer" {
+                args.push(Arg::Path(&file));
+            }
+            t.run(&args).unwrap()
+        };
+        buffer(t, "load-buffer");
+        assert_eq!(buffer(t, "show-buffer"), "loaded #S;");
+        // Started again, by respawning its pane.
+        t.respawn("r-t1", &odd, &env, &argv("2")).unwrap();
+        assert_eq!(written(&dir.path().join("out2.cwd")), cwd);
+        // Reloaded, the user's file is read again.
+        fs::write(&user, "set -g @user reloaded\n").unwrap();
+        assert_eq!(applied(t, "C-w"), None);
+        assert_eq!(shown(t, "@user"), "reloaded");
+        // A message: the format step halves each run of #s but one before a
+        // `[`, which it keeps, and reads %% as %; what it leaves is twice
+        // each run, which the drawing halves to what was written.
+        let message = "50% #S ## #(echo no) #[bold]x #{pane_pid} ; end;";
+        let formatted = t
+            .run(&[
+                "display-message".into(),
+                "-p".into(),
+                "-t".into(),
+                Arg::Pane("r-t1"),
+                Arg::Message(message),
+            ])
+            .unwrap();
+        let drawn = hash_runs(message.as_bytes(), 2, 2);
+        assert_eq!(formatted.trim_end_matches('\n').as_bytes(), drawn);
+        // The status line's markup, kept as it's set, and not read again.
+        let markup = "##S #[fg=red]x ##(echo no) ;";
+        t.label("r-t1", markup, "right").unwrap();
+        let left = t
+            .run(&[
+                "display-message".into(),
+                "-p".into(),
+                "-t".into(),
+                Arg::Pane("r-t1"),
+                Arg::Format("#{@roster_left}"),
+            ])
+            .unwrap();
+        assert_eq!(left.trim_end_matches('\n'), markup);
     }
 
     #[test]
@@ -771,11 +1029,26 @@ mod tests {
     }
 
     #[test]
+    fn a_config_path_of_any_bytes_is_written_as_numbers() {
+        use std::os::unix::ffi::OsStrExt;
+        let user = Path::new(OsStr::from_bytes(b"/w/\xff;x\nn\xc3\xa9/tmux.conf"));
+        let text = config_text("C-q", user, false);
+        let text = String::from_utf8(text).unwrap();
+        assert!(
+            text.contains(r#"source-file -q "/w/\377;x\012n\303\251/tmux.conf""#),
+            "{text}"
+        );
+        // Shown in its comment, a newline doesn't end it.
+        assert!(text.contains("# /w/\u{fffd};x?né/tmux.conf "), "{text}");
+    }
+
+    #[test]
     fn a_config_path_is_never_a_pattern() {
         let glob = |p: &str| glob_literal(OsStr::new(p)).into_string().unwrap();
         assert_eq!(glob("/w/br[1]x/*?.conf"), r"/w/br\[1\]x/\*\?.conf");
         assert_eq!(glob(r"/w/a\b"), r"/w/a\\b");
-        let text = config_text("C-q", Path::new("/w/br[1]x/tmux.conf"), false);
+        let text =
+            String::from_utf8(config_text("C-q", Path::new("/w/br[1]x/tmux.conf"), false)).unwrap();
         assert!(
             text.contains(r#"source-file -q "/w/br\\[1\\]x/tmux.conf""#),
             "{text}"

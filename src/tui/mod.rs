@@ -657,10 +657,12 @@ fn perform(
             roster.new_session(request).map(|s| {
                 app.select(EntryKey::Session(s.id.clone()));
                 let key = app.keymap.label(Action::Confirm).unwrap_or("?");
-                let prompt = if prompted {
-                    "; the prompt is typed in once it's ready"
-                } else {
-                    ""
+                let prompt = match prompted {
+                    false => "",
+                    true if agent::adapter(&s.agent).takes_prompt() => {
+                        ", the prompt on its command line"
+                    }
+                    true => "; the prompt is typed in once it's ready",
                 };
                 format!("Started {}{prompt}; {key} attaches", s.label())
             })

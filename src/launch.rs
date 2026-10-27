@@ -9,16 +9,25 @@ use anyhow::{Context, Result, bail};
 
 use crate::config::Config;
 
-/// Run as `$SHELL -c SCRIPT roster-launch <global env> <project env> <agent argv…>`.
+/// Run as `$SHELL -c SCRIPT roster-launch <global env> <project env> <prompt
+/// file, or ""> <agent argv…>`. The prompt file's text goes last in the
+/// agent's argv, and the file is removed; it's read first, so neither an env
+/// file nor `set -a` makes it a variable the agent gets.
 /// Each `.` must stay the last command of its `&&` list: on the left of `&&`/`||`
 /// the shell ignores `set -e`, also inside the sourced file.
 const SCRIPT: &str = r#"trap 'echo "roster: preparing the environment failed (exit $?)" >&2' EXIT
+if [ -n "$3" ]; then
+  roster_prompt=$(cat -- "$3") || exit
+  rm -f -- "$3"
+  set -- "$@" "$roster_prompt"
+  unset roster_prompt
+fi
 set -ae
 [ -f "$1" ] && . "$1"
 [ -f "$2" ] && . "$2"
 set +ae
 trap - EXIT
-shift 2
+shift 3
 exec "$@""#;
 
 /// Shells that can source the env files with the script above.
@@ -43,11 +52,13 @@ pub fn shell(config: &Config, env_shell: Option<&str>) -> String {
     }
 }
 
-/// The full pane argv: the env-sourcing wrapper around `agent_argv`.
+/// The full pane argv: the env-sourcing wrapper around `agent_argv`, with
+/// what's in `prompt` (a file, removed once read) as its last argument.
 pub fn wrap(
     shell: &str,
     global_env: &Path,
     project_env: &Path,
+    prompt: Option<&Path>,
     agent_argv: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
@@ -57,6 +68,7 @@ pub fn wrap(
         "roster-launch".to_string(),
         global_env.to_string_lossy().into_owned(),
         project_env.to_string_lossy().into_owned(),
+        prompt.map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
     ];
     argv.extend(agent_argv.iter().cloned());
     argv
@@ -231,7 +243,7 @@ mod tests {
         std::fs::write(&global, "A=1\nB=\"$(echo two)\"\n").unwrap();
         std::fs::write(&project, "A=override\n").unwrap();
         let agent = ["sh", "-c", r#"echo "$A $B $1""#, "x", "arg with spaces"].map(String::from);
-        let argv = wrap("/bin/sh", &global, &project, &agent);
+        let argv = wrap("/bin/sh", &global, &project, None, &agent);
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
@@ -240,12 +252,61 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_file_is_the_agents_last_argument_and_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prompt");
+        // Longer than tmux takes on a command line, with what a shell or tmux
+        // would read otherwise.
+        let prompt = format!(
+            "fix it; $(echo no) `echo no` \"quoted\" {}",
+            "x".repeat(40_000)
+        );
+        std::fs::write(&file, &prompt).unwrap();
+        // An env file of the same name changes nothing.
+        let global = dir.path().join("env");
+        std::fs::write(&global, "roster_prompt=from-env\n").unwrap();
+        let agent = ["sh", "-c", r#"printf '%s|%s' "$1" "$2""#, "x", "--"].map(String::from);
+        let argv = wrap(
+            "/bin/sh",
+            &global,
+            &dir.path().join("none"),
+            Some(&file),
+            &agent,
+        );
+        let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("--|{prompt}"));
+        assert!(!file.exists());
+        // One that can't be read stops the start, and says so.
+        let argv = wrap(
+            "/bin/sh",
+            &global,
+            &dir.path().join("none"),
+            Some(&file),
+            &agent,
+        );
+        let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+        assert!(!out.status.success() && out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("preparing the environment failed"));
+    }
+
+    #[test]
     fn a_failing_env_file_stops_the_start() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("env");
         std::fs::write(&global, "TOKEN=\"$(false)\"\n").unwrap();
         let agent = ["echo", "agent started"].map(String::from);
-        let argv = wrap("/bin/sh", &global, &dir.path().join("missing"), &agent);
+        let argv = wrap(
+            "/bin/sh",
+            &global,
+            &dir.path().join("missing"),
+            None,
+            &agent,
+        );
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         assert!(!out.status.success());
         assert!(out.stdout.is_empty());

@@ -32,7 +32,7 @@ pub struct Diagnosis {
     pub problems: usize,
 }
 
-/// Variables that mean the server was started from inside tmux or Claude Code:
+/// Variables that mean the server was started from inside tmux or an agent:
 /// the telling few of `tmux::LEAKY_ENV`, which roster keeps out of it.
 const LEAKY: &[&str] = &["TMUX", "TMUX_PANE", "CLAUDECODE", "CODEX_SESSION_ID"];
 
@@ -148,7 +148,7 @@ impl Roster {
                     format!("has {}", leaked.join(", ")),
                 );
                 r.problem(format!(
-                    "the server's environment has {}; it was started from inside tmux or Claude Code. Stop all sessions and run `tmux -L {} kill-server`",
+                    "the server's environment has {}; it was started from inside tmux, Claude Code or codex. Stop all sessions and run `tmux -L {} kill-server`",
                     leaked.join(", "),
                     self.tmux.socket()
                 ));

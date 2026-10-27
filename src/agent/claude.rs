@@ -145,6 +145,7 @@ impl Adapter for Claude {
         Ok(Launch {
             argv,
             conversation_id: Some(conversation_id),
+            prompt: None,
         })
     }
 

@@ -97,7 +97,7 @@ enum Cmd {
         /// Adopt a copy and leave the original alone
         #[arg(long)]
         fork: bool,
-        /// Move it without asking even if it's open in its agent (Claude tells; pi doesn't)
+        /// Move it without asking even if it's open in its agent (Claude tells; pi and codex don't)
         #[arg(short, long)]
         yes: bool,
         /// Attach to it right away
@@ -374,10 +374,10 @@ struct DefaultsArgs {
     /// Default agent for new sessions
     #[arg(long)]
     agent: Option<String>,
-    /// Default model: for Claude opus, sonnet, haiku, fable or a full name; for pi any it knows
+    /// Default model: for Claude opus, sonnet, haiku, fable or a full name; for pi or codex any it knows
     #[arg(long)]
     model: Option<String>,
-    /// Default effort: for Claude low … max; for pi a thinking level, off … max
+    /// Default effort: for Claude low … max; for codex none … ultra; for pi a thinking level, off … max
     #[arg(long)]
     effort: Option<String>,
 }
@@ -885,7 +885,10 @@ fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()
     let s = r.new_session(request)?;
     println!("Started {} ({})", s.label(), s.id);
     say_notices(r);
-    if waits {
+    // Given on its command line (codex): nothing to wait for.
+    if prompted && agent::adapter(&s.agent).takes_prompt() {
+        println!("It starts with the first prompt, given on its command line");
+    } else if waits {
         if r.wait_for_prompt(&s.id, Duration::from_secs(60))? {
             println!("Sent the first prompt");
         } else if r.db.session(&s.id)?.state == State::Stopped {

@@ -64,7 +64,7 @@ fn codex_reports_through_the_hooks_it_is_given() {
     );
 
     // The first prompt goes on its command line, never typed in.
-    t.ok(&[
+    let out = t.ok(&[
         "new",
         "demo",
         "--name",
@@ -76,6 +76,7 @@ fn codex_reports_through_the_hooks_it_is_given() {
         "--prompt",
         "fix the tests",
     ]);
+    assert!(out.contains("given on its command line"), "{out}");
     t.wait_for("the first prompt's turn", |t| {
         let s = t.session("c", false).unwrap();
         s["state"] == "idle" && s["unread"] == true
@@ -183,6 +184,63 @@ fn codex_reports_through_the_hooks_it_is_given() {
     );
     // Known, it resumes without asking (idle: a working one would ask).
     t.ok(&["restart", "quiet"]);
+}
+
+#[test]
+fn a_first_prompt_longer_than_a_tmux_command_line_reaches_codex() {
+    let Some(t) = TestEnv::new("codex-long") else {
+        return;
+    };
+    with_fake_codex(&t);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // About 40 KB (tmux takes a command line of about 16 KB), a `;` last.
+    let prompt = format!("{}fix it;", "the tests ".repeat(4_000));
+    t.ok(&["new", "demo", "--name", "l", "--prompt", &prompt]);
+    t.wait_for("its turn, from that prompt", |t| {
+        let s = t.session("l", false).unwrap();
+        s["transcript_path"]
+            .as_str()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .is_some_and(|rollout| rollout.contains(&format!("\"text\":\"{prompt}\"")))
+    });
+    // Its file, read, is gone.
+    let left: Vec<_> = fs::read_dir(t.path("state/agent-roster"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("first-prompt-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_first_prompts_file_no_launch_read_goes_at_the_next_start() {
+    let Some(t) = TestEnv::new("codex-sweep") else {
+        return;
+    };
+    with_fake_codex(&t);
+    let files = |t: &TestEnv| {
+        fs::read_dir(t.path("state/agent-roster"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("first-prompt-"))
+            .count()
+    };
+    // A shell that isn't there: no launch script runs to read the prompt.
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    let (shell, none) = ("shell = \"/bin/sh\"", "shell = \"/nonexistent/sh\"");
+    assert!(text.contains(shell), "{text}");
+    fs::write(&config, text.replace(shell, none)).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "s", "--prompt", "fix it"]);
+    assert_eq!(files(&t), 1);
+    t.wait_for("its agent gone", |t| {
+        t.session("s", false).unwrap()["state"] == "stopped"
+    });
+    // With a shell again, starting it once more takes it away.
+    fs::write(&config, text).unwrap();
+    t.ok(&["start", "--yes", "s"]);
+    assert_eq!(files(&t), 0);
 }
 
 #[test]

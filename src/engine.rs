@@ -91,6 +91,55 @@ pub struct Undelivered {
 /// after that it stays, for another roster or the agent's next start.
 const PROMPT_TRIES: u32 = 3;
 
+/// How the files a first prompt waits in for the launch script are named,
+/// before the session's id (`Roster::prompt_file`).
+const PROMPT_FILE: &str = "first-prompt-";
+
+/// The longest argument Linux gives a program: under 128 KB
+/// (`MAX_ARG_STRLEN`, its terminating NUL in it). A first prompt on the
+/// agent's command line can't be longer.
+const LONGEST_ARGUMENT: usize = 128 * 1024 - 1;
+
+/// Removes the first prompts' files in `dir` a launch script never got to
+/// (its shell gone, its env file failing): session `id`'s, which is starting
+/// again, left by this roster or by one that's gone (another starting it now
+/// has its own, about to be read), and any an hour old.
+fn sweep_prompts(dir: &Path, id: &str) {
+    let this_sessions = format!("{PROMPT_FILE}{id}.");
+    let gone = |pid: &str| match pid.parse::<i32>() {
+        Ok(pid) if pid as u32 == std::process::id() => true,
+        Ok(pid) if pid > 0 => {
+            // SAFETY: signal 0 only asks whether the process is there.
+            let asked = unsafe { libc::kill(pid, 0) };
+            asked != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        _ => true,
+    };
+    let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|n| n.starts_with(PROMPT_FILE)) else {
+            continue;
+        };
+        let old = (entry.metadata().and_then(|m| m.modified())).is_ok_and(|t| t < an_hour_ago);
+        let left = name.strip_prefix(&this_sessions).is_some_and(gone);
+        if left || old {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// A first prompt that fits `agent`'s command line, or why not.
+fn check_prompt_fits(agent: &str, prompt: &str) -> Result<()> {
+    if prompt.len() > LONGEST_ARGUMENT {
+        bail!(
+            "the first prompt is too long for {agent}'s command line: {} bytes, where it takes {LONGEST_ARGUMENT} at most",
+            prompt.len()
+        );
+    }
+    Ok(())
+}
+
 impl Roster {
     pub fn open() -> Result<Roster> {
         Roster::open_with(true)
@@ -620,6 +669,10 @@ impl Roster {
             .prompt
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty());
+        // One its command line can't take: no session that can't start.
+        if let Some(p) = prompt.as_ref().filter(|_| adapter.takes_prompt()) {
+            check_prompt_fits(&agent, p)?;
+        }
         let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let mut s = Session::new(&id, &project, &name, &agent, now_ms());
         s.model = model;
@@ -647,7 +700,12 @@ impl Roster {
             state_dir: &self.paths.state_dir,
         };
         let launch = agent::launch(&s, &self.config, &cx)?;
-        let argv = self.wrapped(&s, &launch.argv)?;
+        // Too long, it stays, and isn't lost to a failing start.
+        if let Some(text) = &launch.prompt {
+            check_prompt_fits(&s.agent, text)?;
+        }
+        let prompt = launch.prompt.as_ref().map(|_| self.prompt_file(&s.id));
+        let argv = self.wrapped(&s, prompt.as_deref(), &launch.argv)?;
         // What an agent's hooks need to report (`roster report`).
         let env = [
             ("ROSTER_SESSION", s.id.clone()),
@@ -661,18 +719,32 @@ impl Roster {
             let panes = self.panes()?;
             (panes.contains_key(&name), panes.is_empty())
         };
-        if has_pane {
-            self.tmux.respawn(&name, &s.workdir, &env, &argv)?;
+        self.sweep_prompts(&s.id);
+        // Written once nothing but starting it is left to fail.
+        if let (Some(file), Some(text)) = (&prompt, &launch.prompt) {
+            self.write_prompt(file, text)?;
+        }
+        let started = if has_pane {
+            self.tmux.respawn(&name, &s.workdir, &env, &argv)
         } else {
             let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
             // A row less for the status line, so attaching doesn't resize it.
             let size = (w, h - u16::from(self.config.status_line() && h > 1));
-            self.tmux
-                .new_session(&name, &s.workdir, size, &env, &argv)?;
-            // The session runs either way, so what this finds is only said.
-            if no_server && let Some(e) = self.tmux.check_config() {
-                self.notices.push(config_notice(&e));
+            self.tmux.new_session(&name, &s.workdir, size, &env, &argv)
+        };
+        // Not started: no script to read the prompt's file and remove it.
+        if let Err(e) = started {
+            if let Some(file) = &prompt {
+                let _ = fs::remove_file(file);
             }
+            return Err(e);
+        }
+        // The session runs either way, so what this finds is only said.
+        if !has_pane
+            && no_server
+            && let Some(e) = self.tmux.check_config()
+        {
+            self.notices.push(config_notice(&e));
         }
         let now = now_ms();
         if launch.conversation_id.is_some() {
@@ -763,7 +835,7 @@ impl Roster {
         let global_env = self.paths.global_env();
         let dir = self.paths.state_dir.clone();
         move |name: &str, question: agent::Question<'_>| {
-            let argv = launch::wrap(&shell, &global_env, Path::new(""), &question.argv);
+            let argv = launch::wrap(&shell, &global_env, Path::new(""), None, &question.argv);
             let mut cmd = std::process::Command::new(&argv[0]);
             cmd.args(&argv[1..])
                 .current_dir(&dir)
@@ -787,7 +859,12 @@ impl Roster {
 
     /// `argv` run by roster's shell for `s`, after it sources the env files:
     /// the global one, then that of `s`'s project.
-    pub(crate) fn wrapped(&self, s: &Session, argv: &[String]) -> Result<Vec<String>> {
+    pub(crate) fn wrapped(
+        &self,
+        s: &Session,
+        prompt: Option<&Path>,
+        argv: &[String],
+    ) -> Result<Vec<String>> {
         let project = self
             .db
             .projects()?
@@ -799,8 +876,40 @@ impl Roster {
             &shell,
             &self.paths.global_env(),
             &project_env,
+            prompt,
             argv,
         ))
+    }
+
+    /// Where session `id`'s first prompt waits for the launch script to give
+    /// it to the agent (and remove it).
+    fn prompt_file(&self, id: &str) -> PathBuf {
+        let name = format!("{PROMPT_FILE}{id}.{}", std::process::id());
+        self.paths.state_dir.join(name)
+    }
+
+    /// Removes the first prompts' files a launch script never got to
+    /// (`sweep_prompts`).
+    fn sweep_prompts(&self, id: &str) {
+        sweep_prompts(&self.paths.state_dir, id);
+    }
+
+    /// Writes `text` into `file`, only the user's to read; nothing is left
+    /// of one that fails.
+    fn write_prompt(&self, file: &Path, text: &str) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(file)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+        if let Err(e) = written {
+            let _ = fs::remove_file(file);
+            return Err(e).with_context(|| format!("can't write {}", file.display()));
+        }
+        Ok(())
     }
 
     /// Session `id`, unless it's archived.
@@ -1325,6 +1434,39 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompts_file_is_swept_once_whoever_wrote_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut done = std::process::Command::new("true").spawn().unwrap();
+        done.wait().unwrap();
+        let file = |id: &str, pid: u32| dir.path().join(format!("{PROMPT_FILE}{id}.{pid}"));
+        let (mine, dead, live) = (
+            file("s1", std::process::id()),
+            file("s1", done.id()),
+            file("s1", 1),
+        );
+        let other = file("s2", done.id());
+        for f in [&mine, &dead, &live, &other] {
+            fs::write(f, "fix it").unwrap();
+        }
+        sweep_prompts(dir.path(), "s1");
+        // This roster's and a gone one's go; a roster starting it now keeps
+        // its own, and another session's, not an hour old, stays.
+        let left: Vec<bool> = [&mine, &dead, &live, &other].map(|f| f.exists()).into();
+        assert_eq!(left, [false, false, true, true]);
+    }
+
+    #[test]
+    fn a_first_prompt_fits_a_command_line_up_to_linuxs_longest_argument() {
+        assert!(check_prompt_fits("codex", &"x".repeat(LONGEST_ARGUMENT)).is_ok());
+        let e = check_prompt_fits("codex", &"x".repeat(200_000)).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "the first prompt is too long for codex's command line: 200000 bytes, where it takes 131071 at most"
+        );
+        assert!(check_prompt_fits("codex", &"x".repeat(LONGEST_ARGUMENT + 1)).is_err());
+    }
 
     #[test]
     fn names_are_simple() {

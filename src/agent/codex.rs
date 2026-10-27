@@ -185,13 +185,16 @@ impl Adapter for Codex {
         }
         argv.extend(hooks(&cx.roster.to_string_lossy()));
         // A first prompt as codex's own (after `--`, so one starting with a
-        // dash isn't taken for an option): its first turn starts with it.
-        if let Some(prompt) = &s.pending_prompt {
-            argv.extend(["--".into(), prompt.clone()]);
+        // dash isn't taken for an option): its first turn starts with it. It
+        // goes after the `--` from a file, so it can be longer than tmux
+        // takes a command line.
+        if s.pending_prompt.is_some() {
+            argv.push("--".into());
         }
         Ok(Launch {
             argv,
             conversation_id: None,
+            prompt: s.pending_prompt.clone(),
         })
     }
 
@@ -450,10 +453,19 @@ mod tests {
     fn a_first_prompt_goes_on_its_command_line() {
         let mut s = codex_session();
         s.pending_prompt = Some("-v is broken".into());
-        let argv = argv(&s);
-        // Last, after `--`, so a dash doesn't make it an option.
-        assert_eq!(argv[argv.len() - 2..], ["--", "-v is broken"]);
+        let cx = crate::agent::Context {
+            roster: Path::new("/roster"),
+            state_dir: Path::new("/state"),
+        };
+        let launch = Codex.launch(&s, vec!["codex".into()], &cx).unwrap();
+        // Last, after `--`, so a dash doesn't make it an option; from a file
+        // the launch script reads, past what tmux takes a command line.
+        assert_eq!(launch.argv.last().map(String::as_str), Some("--"));
+        assert_eq!(launch.prompt.as_deref(), Some("-v is broken"));
         assert!(Codex.takes_prompt());
+        // None, no `--`.
+        s.pending_prompt = None;
+        assert!(!argv(&s).contains(&"--".to_string()));
     }
 
     #[test]

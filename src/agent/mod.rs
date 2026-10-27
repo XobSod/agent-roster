@@ -139,6 +139,7 @@ pub trait Adapter: Sync {
         Ok(Launch {
             argv,
             conversation_id: None,
+            prompt: None,
         })
     }
 
@@ -432,6 +433,10 @@ pub struct Launch {
     /// for one that names its own (`Adapter::names_its_conversation`), or
     /// keeps none.
     pub conversation_id: Option<String>,
+    /// A first prompt to go last on its command line, which the launch
+    /// script reads from a file (`launch::wrap`): tmux takes a command line
+    /// of about 16 KB at most.
+    pub prompt: Option<String>,
 }
 
 /// `name`'s adapter, if it's an agent that can be started (see `available`).

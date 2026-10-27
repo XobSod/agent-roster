@@ -113,7 +113,7 @@ impl Roster {
         };
         Ok(TitleJob {
             transcript,
-            argv: self.wrapped(&s, &oneoff)?,
+            argv: self.wrapped(&s, None, &oneoff)?,
             workdir: s.workdir.clone(),
             current: s.display_title().to_string(),
             label: s.label(),

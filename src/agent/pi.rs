@@ -114,6 +114,7 @@ impl Adapter for Pi {
         Ok(Launch {
             argv,
             conversation_id: Some(id),
+            prompt: None,
         })
     }
 

@@ -567,10 +567,16 @@ fn read_subagents(app: &mut App) {
     let agents: HashMap<&str, &str> = (app.sessions.iter())
         .flat_map(|s| s.subagents.keys().map(|id| (id.as_str(), s.agent.as_str())))
         .collect();
+    // One found doing nothing now (a large result read past its call)
+    // keeps what it was doing.
     let doing: HashMap<String, String> = (app.subagent_info.iter())
         .filter_map(|(id, info)| {
             let adapter = agent::adapter(agents.get(id.as_str())?);
-            Some((id.clone(), adapter.subagent_doing(info.file.as_deref()?)?))
+            let now = info.file.as_deref().and_then(|f| adapter.subagent_doing(f));
+            Some((
+                id.clone(),
+                now.or_else(|| app.subagent_doing.get(id).cloned())?,
+            ))
         })
         .collect();
     app.subagent_doing = doing;
@@ -1106,6 +1112,16 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/w/db.rs"}}]}}"#
         );
         std::fs::write(runs.join("agent-a1.jsonl"), working).unwrap();
+        read_subagents(&mut app);
+        assert_eq!(app.subagent_doing["a1"], "Reading db.rs");
+        // A result too large to read past to it: still that.
+        let long = format!(
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}}}}\n",
+            "x".repeat(300 << 10)
+        );
+        let mut grown = std::fs::read_to_string(runs.join("agent-a1.jsonl")).unwrap();
+        grown += &long;
+        std::fs::write(runs.join("agent-a1.jsonl"), grown).unwrap();
         read_subagents(&mut app);
         assert_eq!(app.subagent_doing["a1"], "Reading db.rs");
         std::fs::remove_file(runs.join("agent-a1.meta.json")).unwrap();

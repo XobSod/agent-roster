@@ -96,8 +96,8 @@ Roster can tell when one is open in Claude, but not in pi or Codex.
 A Claude session whose own turn ended with subagents still at work (in the background)
 stays working until the last one is done, and its card says how many, on its second
 line: `↳2 ›`. `l` on the card unfolds a line for each, the model it runs, what it's
-doing (its latest step, as Claude's own footer has it; what it was given to do till its
-first) and how long it's been at it; `h` folds it again (`card_subagents` keeps
+doing (its latest step, in the manner of Claude's own footer; what it was given to do
+till its first) and how long it's been at it; `h` folds it again (`card_subagents` keeps
 them unfolded, the lines then saying how many, or shows the count only). One unheard of
 for fifteen minutes is taken for gone. Sessions started before roster knew this (before
 it was updated) don't say when their subagents start: restart them.

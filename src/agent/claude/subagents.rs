@@ -68,8 +68,10 @@ pub(super) fn finished(transcript: &Path, id: &str, heard: i64) -> bool {
 const TAIL: u64 = 256 << 10;
 
 /// What a subagent is doing now, from (the end of) its transcript at
-/// `file`: its latest tool call, in a few words, as Claude's own footer
-/// says it (which it writes nowhere); none before its first.
+/// `file`: its latest tool call, in a few words, in the manner of Claude's
+/// own footer (which it writes nowhere); none before its first, or where
+/// a result larger than what's read follows it (`TAIL`), which the caller
+/// keeps the step it had over.
 pub(super) fn doing(file: &Path) -> Option<String> {
     let mut f = fs::File::open(file).ok()?;
     let len = f.metadata().ok()?.len();
@@ -77,8 +79,6 @@ pub(super) fn doing(file: &Path) -> Option<String> {
     f.seek(SeekFrom::Start(from)).ok()?;
     let mut tail = Vec::new();
     f.read_to_end(&mut tail).ok()?;
-    // A line cut where the tail starts isn't one.
-    let lines = tail.split(|b| *b == b'\n').skip(usize::from(from > 0));
     #[derive(Deserialize)]
     struct Row {
         #[serde(rename = "type")]
@@ -89,27 +89,47 @@ pub(super) fn doing(file: &Path) -> Option<String> {
     struct Message {
         content: Option<serde_json::Value>,
     }
-    let calls: Vec<serde_json::Value> = lines
+    // From the end, the first call found; a line cut where the tail starts
+    // isn't one. Claude writes a row per block, a call's once it's whole.
+    let mut lines: Vec<&[u8]> = tail.split(|b| *b == b'\n').collect();
+    if from > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    lines
+        .into_iter()
+        .rev()
         .filter(|line| memchr::memmem::find(line, br#""tool_use""#).is_some())
         .filter_map(|line| serde_json::from_slice::<Row>(line).ok())
         .filter(|row| row.kind.as_deref() == Some("assistant"))
         .filter_map(|row| row.message?.content)
-        .flat_map(|content| match content {
-            serde_json::Value::Array(blocks) => blocks,
-            _ => Vec::new(),
+        .find_map(|content| match content {
+            serde_json::Value::Array(blocks) => blocks
+                .into_iter()
+                .rev()
+                .find(|block| block["type"] == "tool_use"),
+            _ => None,
         })
-        .filter(|block| block["type"] == "tool_use")
-        .collect();
-    step(calls.last()?)
+        .as_ref()
+        .and_then(step)
 }
 
+/// How long a step is let be: a line on a card, and a bit to cut.
+const STEP_CHARS: usize = 200;
+
 /// A tool call, in a few words: what it's for where the call says (a
-/// command's description, a todo at work), else what it's on.
+/// command's description, a todo at work), else what it's on. Claude's
+/// footer has a command as "Running <description>", a file by its path, a
+/// fetch by its URL; here they're shorter, the card narrow.
 fn step(call: &serde_json::Value) -> Option<String> {
     let input = &call["input"];
     let text = |key: &str| input[key].as_str().map(str::trim).filter(|s| !s.is_empty());
-    let file =
-        |key: &str| text(key).map(|path| path.rsplit('/').next().unwrap_or(path).to_string());
+    // By its name; a path ending in a slash, as it is.
+    let file = |key: &str| {
+        text(key).map(|path| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if name.is_empty() { path } else { name }.to_string()
+        })
+    };
     let name = call["name"].as_str()?;
     let said = match name {
         "Bash" => text("description").map(String::from).or_else(|| {
@@ -121,21 +141,55 @@ fn step(call: &serde_json::Value) -> Option<String> {
         "NotebookEdit" => file("notebook_path").map(|f| format!("Editing {f}")),
         "Grep" => text("pattern").map(|p| format!("Searching for {p}")),
         "Glob" => text("pattern").map(|p| format!("Finding {p}")),
-        "WebFetch" => text("url").map(|u| {
-            let host = u.split("://").nth(1).unwrap_or(u);
-            format!("Fetching {}", host.split('/').next().unwrap_or(host))
-        }),
+        "WebFetch" => text("url").map(|u| format!("Fetching {}", host(u))),
         "WebSearch" => text("query").map(|q| format!("Searching the web for {q}")),
         "Agent" | "Task" => text("description").map(String::from),
+        "Monitor" => text("description").map(|d| format!("Monitoring: {d}")),
+        "SendMessage" => text("summary").map(String::from),
+        "Skill" => text("skill").map(|s| format!("Using {s}")),
+        "ToolSearch" => text("query").map(|q| format!("Finding tools: {q}")),
+        "ScheduleWakeup" => text("reason").map(String::from),
+        "TaskCreate" => text("activeForm").or(text("subject")).map(String::from),
+        "TaskUpdate" => text("activeForm")
+            .filter(|_| input["status"] == "in_progress")
+            .map(String::from),
         "TodoWrite" => (input["todos"].as_array())
             .and_then(|todos| todos.iter().find(|t| t["status"] == "in_progress"))
             .and_then(|t| (t["activeForm"].as_str()).or(t["content"].as_str()))
             .map(String::from),
-        _ => None,
+        _ => mcp(name),
     };
-    Some(crate::util::one_line(
-        &said.unwrap_or_else(|| name.to_string()),
-    ))
+    let said = clean(&said.unwrap_or_else(|| name.to_string()));
+    (!said.is_empty()).then_some(said)
+}
+
+/// A fetched URL's host, nothing else of it: not a login before an `@`, nor
+/// a query (a token, say).
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority.rsplit('@').next().unwrap_or(authority)
+}
+
+/// An MCP server's tool (`mcp__<server>__<tool>`) as `<tool> (<server>)`.
+fn mcp(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    Some(format!("{tool} ({server})"))
+}
+
+/// `said` on one line, without what a terminal would take for more than
+/// text (control characters, which a card would show the rest of, and
+/// direction overrides), at most `STEP_CHARS` long.
+fn clean(said: &str) -> String {
+    let bidi = |c: char| matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    let kept: String = (said.chars())
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !bidi(*c))
+        .collect();
+    crate::util::one_line(&kept)
+        .chars()
+        .take(STEP_CHARS)
+        .collect()
 }
 
 #[derive(Default, Deserialize)]
@@ -323,12 +377,116 @@ mod tests {
                     {"content": "b", "status": "in_progress", "activeForm": "Doing b"}]}),
                 "Doing b",
             ),
-            ("mcp__thing__go", serde_json::json!({}), "mcp__thing__go"),
+            (
+                "Write",
+                serde_json::json!({"file_path": "/w/new.md"}),
+                "Writing new.md",
+            ),
+            (
+                "MultiEdit",
+                serde_json::json!({"file_path": "/w/m.rs"}),
+                "Editing m.rs",
+            ),
+            (
+                "NotebookEdit",
+                serde_json::json!({"notebook_path": "/w/n.ipynb"}),
+                "Editing n.ipynb",
+            ),
+            (
+                "Read",
+                serde_json::json!({"file_path": "/w/dir/"}),
+                "Reading /w/dir/",
+            ),
+            (
+                "Glob",
+                serde_json::json!({"pattern": "**/*.rs"}),
+                "Finding **/*.rs",
+            ),
+            (
+                "WebSearch",
+                serde_json::json!({"query": "tmux 3.5"}),
+                "Searching the web for tmux 3.5",
+            ),
+            (
+                "Agent",
+                serde_json::json!({"description": "Review it"}),
+                "Review it",
+            ),
+            (
+                "Monitor",
+                serde_json::json!({"description": "the build"}),
+                "Monitoring: the build",
+            ),
+            (
+                "SendMessage",
+                serde_json::json!({"summary": "Ask the fork"}),
+                "Ask the fork",
+            ),
+            ("Skill", serde_json::json!({"skill": "kb"}), "Using kb"),
+            (
+                "ToolSearch",
+                serde_json::json!({"query": "select:Monitor"}),
+                "Finding tools: select:Monitor",
+            ),
+            (
+                "TaskUpdate",
+                serde_json::json!({"status": "in_progress", "activeForm": "Fixing it"}),
+                "Fixing it",
+            ),
+            (
+                "TaskUpdate",
+                serde_json::json!({"status": "completed", "activeForm": "Fixing it"}),
+                "TaskUpdate",
+            ),
+            (
+                "mcp__t3-code__html_render",
+                serde_json::json!({}),
+                "html_render (t3-code)",
+            ),
+            ("mcp__thing", serde_json::json!({}), "mcp__thing"),
+            // What a terminal would take for more than text, and a login
+            // or a token in a URL, don't show.
+            (
+                "Bash",
+                serde_json::json!({"description": "\u{1b}[31mRun\u{1b}[0m the\ttests\u{202e}"}),
+                "[31mRun[0m the tests",
+            ),
+            (
+                "WebFetch",
+                serde_json::json!({"url": "https://u:p4ss@example.com:8443?tok=SECRET#x"}),
+                "Fetching example.com:8443",
+            ),
         ];
         for (name, input, said) in cases {
             let lines = [task.clone(), bash.clone(), call(name, input)];
             assert_eq!(doing(&lines).as_deref(), Some(said), "{name}");
         }
+        // Its last call, though a reply, a half-written row or a second
+        // call in the same reply come after.
+        let reply = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#;
+        let half =
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","inp"#;
+        let pair = serde_json::json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/w/a.rs"}},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/w/b.rs"}}]}})
+        .to_string();
+        assert_eq!(
+            doing(&[task.clone(), bash.clone(), reply.into()]).as_deref(),
+            Some("Run the tests")
+        );
+        assert_eq!(
+            doing(&[task.clone(), bash.clone(), half.into()]).as_deref(),
+            Some("Run the tests")
+        );
+        assert_eq!(
+            doing(&[task.clone(), pair]).as_deref(),
+            Some("Reading b.rs")
+        );
+        let long_said = call("Bash", serde_json::json!({"description": "y".repeat(500)}));
+        assert_eq!(
+            doing(&[task.clone(), long_said]).unwrap().chars().count(),
+            STEP_CHARS
+        );
         // Past a long result, read from the end: a line cut there isn't one.
         let long = format!(
             r#"{{"type":"user","message":{{"content":"{}"}}}}"#,

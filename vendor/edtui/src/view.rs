@@ -450,3 +450,25 @@ fn generate_spans<'a>(
         selection_style,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Lines;
+
+    #[test]
+    fn lines_with_tabs_draw_in_views_narrower_than_a_tab() {
+        // Each draws and ends: a tab wider than the view once took lines
+        // without end. Added by roster.
+        for width in 0..=5 {
+            for wrap in [true, false] {
+                let mut state = EditorState::new(Lines::from("\tab\n\t\tc\nd"));
+                let area = Rect::new(0, 0, width, 6);
+                let mut buf = Buffer::empty(area);
+                EditorView::new(&mut state)
+                    .wrap(wrap)
+                    .render(area, &mut buf);
+            }
+        }
+    }
+}

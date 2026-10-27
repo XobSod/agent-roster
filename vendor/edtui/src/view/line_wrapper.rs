@@ -12,6 +12,8 @@ impl LineWrapper {
         if line_width == 0 {
             return vec![0];
         }
+        // A column at least, or this wouldn't end. Added by roster.
+        let max_width = max_width.max(1);
 
         let mut remaining_width = line_width;
         let mut split_widths = Vec::new();
@@ -66,8 +68,17 @@ impl LineWrapper {
                 let mut split_at = max_width - current_line_width;
 
                 while span_width(&remaining_span, tab_width) > split_at {
-                    let (fitting_part, rest) =
+                    let (mut fitting_part, mut rest) =
                         Self::split_span_at(remaining_span, split_at, tab_width);
+                    if fitting_part.content.is_empty() && current_line.is_empty() {
+                        // A character wider than a whole line (a tab in a
+                        // view narrower than it) has a line of its own, or
+                        // this wouldn't end. Added by roster.
+                        let one: String = rest.content.chars().take(1).collect();
+                        let more: String = rest.content.chars().skip(1).collect();
+                        fitting_part = Span::styled(one, rest.style);
+                        rest = Span::styled(more, rest.style);
+                    }
                     current_line.push(fitting_part.clone());
                     wrapped_lines.push(current_line.clone());
 
@@ -79,7 +90,9 @@ impl LineWrapper {
 
                 // Add remaining part to the current line
                 current_line_width = span_width(&remaining_span, tab_width);
-                current_line.push(remaining_span);
+                if !remaining_span.content.is_empty() {
+                    current_line.push(remaining_span);
+                }
             } else {
                 // No wrapping needed, just add the span
                 current_line_width += span_width(&span, tab_width);
@@ -136,6 +149,27 @@ mod tests {
 
         assert_eq!(wrapped_spans[0], vec![Span::raw("Hell")]);
         assert_eq!(wrapped_spans[1], vec![Span::raw("🙂!")]);
+    }
+
+    #[test]
+    fn test_wrap_spans_a_character_wider_than_the_line() {
+        // A tab four wide, three columns: a line of its own.
+        let wrapped_spans = LineWrapper::wrap_spans(vec![Span::raw("\tab")], 3, 4);
+        assert_eq!(
+            wrapped_spans,
+            vec![vec![Span::raw("\t")], vec![Span::raw("ab")]]
+        );
+        let wrapped_spans = LineWrapper::wrap_spans(vec![Span::raw("a\t")], 2, 4);
+        assert_eq!(
+            wrapped_spans,
+            vec![vec![Span::raw("a")], vec![Span::raw("\t")]]
+        );
+        // No columns at all: a character a line.
+        assert_eq!(
+            LineWrapper::wrap_spans(vec![Span::raw("ab")], 0, 4).len(),
+            2
+        );
+        assert_eq!(LineWrapper::determine_split(2, 0), vec![1, 1]);
     }
 
     #[test]

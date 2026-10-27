@@ -11,3 +11,7 @@ listed here, so they can be told apart from edtui's own and offered
 upstream.
 
 ## Changes
+- A line is wrapped in a view narrower than one of its characters (a
+  tab, four wide, in two or three columns, or any in none): that
+  character has a line of its own, where the wrapping went on without
+  end, taking memory until there was none.

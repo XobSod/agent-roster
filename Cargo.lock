@@ -467,12 +467,11 @@ dependencies = [
 [[package]]
 name = "edtui"
 version = "0.11.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05bf278324f87113d64ea86a54e392470775c60db678806a911eccf2c484e860"
 dependencies = [
  "crossterm",
  "edtui-jagged",
  "enum_dispatch",
+ "ratatui",
  "ratatui-core",
  "ratatui-widgets",
  "unicode-width",

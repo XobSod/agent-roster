@@ -8,12 +8,17 @@ description = "Keyboard-first terminal manager for AI coding agent sessions"
 name = "roster"
 path = "src/main.rs"
 
+# The note editor's, vendored and patched (vendor/edtui/ROSTER.md): a member
+# so its own tests run (cargo test -p edtui); commands here build roster.
+[workspace]
+members = ["vendor/edtui"]
+
 [dependencies]
 ansi-to-tui = "8.0.1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
-edtui = { version = "0.11.7", default-features = false }
+edtui = { path = "vendor/edtui", default-features = false }
 libc = "0.2.191"
 memchr = "2.8.3"
 nucleo-matcher = "0.3.1"
@@ -34,4 +39,8 @@ tempfile = "3.27.0"
 # transcript (tens of MB) took several times longer. Roster's own code stays
 # quick to rebuild.
 [profile.dev.package."*"]
+opt-level = 3
+
+# edtui too: vendored, it's a workspace member, which "*" leaves out.
+[profile.dev.package.edtui]
 opt-level = 3

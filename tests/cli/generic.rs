@@ -129,3 +129,40 @@ fn an_agents_arguments_reach_it_as_given_semicolons_too() {
         t.ok(&["show", "a"]).matches("got: [;] [a;] [b]").count() == 1 && shows(t)
     });
 }
+
+#[test]
+fn an_agent_starts_in_its_projects_directory_whatever_it_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("hashdir") else {
+        return;
+    };
+    // Writes where it started, then waits.
+    let started = t.path("started-in");
+    let agent = t.path("pwd-agent");
+    fs::write(
+        &agent,
+        format!("#!/bin/sh\npwd > '{}'\nexec cat\n", started.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[agents.pwd]\ncommand = \"{}\"\n",
+        agent.display()
+    ));
+    fs::write(&config, text).unwrap();
+    // To tmux, `#S` is the session's name, `#(…)` a command's output and
+    // `#[…]` a style.
+    let dir = t.path("C#Sharp #(echo x) a#[b");
+    fs::create_dir_all(&dir).unwrap();
+    t.ok(&["project", "add", "demo", dir.to_str().unwrap()]);
+    t.ok(&["new", "demo", "--agent", "pwd", "--name", "p"]);
+    let line = format!("{}\n", dir.display());
+    let in_it = |_: &TestEnv| fs::read_to_string(&started).is_ok_and(|s| s == line);
+    t.wait_for("its directory", in_it);
+    // Started again, by respawning its pane, likewise.
+    fs::remove_file(&started).unwrap();
+    t.ok(&["restart", "--yes", "p"]);
+    t.wait_for("its directory again", in_it);
+}

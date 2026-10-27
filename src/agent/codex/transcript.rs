@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use super::tokens::uuid_ms;
 use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text};
+use crate::util::iso_ms;
 
 /// Reads a codex rollout as it grows.
 pub type CodexTranscript = Jsonl<Totals>;
@@ -33,6 +35,19 @@ pub struct Totals {
     /// Lines its edits added and removed.
     added: u64,
     removed: u64,
+    /// The rollout's own conversation, from its first `session_meta`.
+    own: Option<String>,
+    met: bool,
+    /// A fork's: when it was made (ms).
+    forked: Option<i64>,
+    /// A fork's copy of the conversation it came from is being read, from
+    /// that one's `session_meta` to the fork's first turn of its own: in
+    /// context, but neither prompted nor spent here. Once only.
+    copying: bool,
+    copied: bool,
+    /// The conversation's output total as the copy ended (without the
+    /// per-call records, its own is what came after).
+    before: u64,
 }
 
 impl Lines for Totals {
@@ -51,8 +66,52 @@ impl Lines for Totals {
             return;
         };
         match entry.kind.as_deref() {
+            Some("session_meta") if !self.met => {
+                self.met = true;
+                self.own = payload.id.clone();
+                if payload.forked_from_id.is_some() {
+                    let made = payload.timestamp.as_deref().and_then(iso_ms);
+                    let written = entry.timestamp.as_deref().and_then(iso_ms);
+                    self.forked = Some(made.or(written).unwrap_or(0));
+                }
+                return;
+            }
+            // Another's, in a fork: the copy begins.
+            Some("session_meta") => {
+                if self.forked.is_some() && !self.copied {
+                    (self.copying, self.copied) = (true, true);
+                }
+                return;
+            }
+            _ => {}
+        }
+        // A turn: the fork's own first ends the copy (its id is a UUIDv7,
+        // the copied ones older than the fork).
+        let turn = entry.kind.as_deref() == Some("turn_context")
+            || (entry.kind.as_deref() == Some("event_msg")
+                && payload.kind.as_deref() == Some("task_started"));
+        if turn {
+            if self.copying
+                && let (Some(made), Some(id)) = (self.forked, payload.turn_id.as_deref())
+                && uuid_ms(id).is_some_and(|t| t >= made)
+            {
+                self.copying = false;
+            }
+            return;
+        }
+        // A record names its conversation: in a fork, the fork's own counts.
+        let copied = match payload.thread_id.as_deref() {
+            Some(thread) if self.forked.is_some() => Some(thread) != self.own.as_deref(),
+            _ => self.copying,
+        };
+        match entry.kind.as_deref() {
             // What the conversation holds: the prompts, and nothing else of
             // it that roster counts.
+            Some("response_item") if copied => {
+                if payload.kind.as_deref() == Some("compaction") {
+                    self.compaction();
+                }
+            }
             Some("response_item") => match payload.kind.as_deref() {
                 Some("message") if payload.role.as_deref() == Some("user") => {
                     if self.typed.message(payload.kinds())
@@ -66,7 +125,7 @@ impl Lines for Totals {
             },
             // The tokens of one model call, summed as they come.
             Some("token_usage_record") => {
-                if let Some(usage) = payload.usage.as_ref() {
+                if let Some(usage) = payload.usage.as_ref().filter(|_| !copied) {
                     self.output += usage.output_tokens.unwrap_or(0);
                     self.counted = true;
                 }
@@ -84,19 +143,20 @@ impl Lines for Totals {
                     if let Some(window) = info.window {
                         self.window = Some(window);
                     }
-                    // Without the per-call records, its own total is all there is.
-                    if !self.counted {
-                        self.output = info
-                            .total
-                            .as_ref()
-                            .and_then(|u| u.output_tokens)
-                            .unwrap_or(self.output);
+                    // Without the per-call records, its own total is all there
+                    // is: a fork's, beyond what it was as the copy ended.
+                    if let Some(total) = info.total.as_ref().and_then(|u| u.output_tokens) {
+                        if self.copying {
+                            self.before = total;
+                        } else if !self.counted {
+                            self.output = total.checked_sub(self.before).unwrap_or(total);
+                        }
                     }
                 }
                 Some("context_compacted") => self.compaction(),
                 // An edit, as codex records it: since 0.163 an item it
                 // completed, before a patch it applied.
-                Some("item_completed") => {
+                Some("item_completed") if !copied => {
                     if let Some(item) = payload.item.as_deref()
                         && item.kind.as_deref() == Some("FileChange")
                         && item.status.as_deref() == Some("completed")
@@ -104,8 +164,10 @@ impl Lines for Totals {
                         self.edited(item);
                     }
                 }
-                Some("patch_apply_end") if payload.success == Some(true) => self.edited(&payload),
-                Some("user_message") => {
+                Some("patch_apply_end") if payload.success == Some(true) && !copied => {
+                    self.edited(&payload)
+                }
+                Some("user_message") if !copied => {
                     if self.typed.event()
                         && let Some(text) = payload.message.filter(|t| !t.trim().is_empty())
                     {
@@ -182,6 +244,7 @@ impl Totals {
 /// What roster reads of an entry; the rest of it is skipped unread.
 #[derive(Deserialize)]
 struct Entry {
+    timestamp: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
     payload: Option<Payload>,
@@ -207,6 +270,14 @@ struct Payload {
     item: Option<Box<Payload>>,
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
     metadata: Option<Metadata>,
+    /// A `session_meta`'s: its conversation, the one it was forked from,
+    /// and when.
+    id: Option<String>,
+    forked_from_id: Option<String>,
+    timestamp: Option<String>,
+    /// A turn's id; a record's conversation.
+    turn_id: Option<String>,
+    thread_id: Option<String>,
 }
 
 /// What an edit did to a file: added or deleted it, with its content, or
@@ -348,6 +419,9 @@ impl Typed {
 /// timestamp, so `stats::leading_type` can't tell them apart.)
 fn wanted(line: &[u8]) -> bool {
     const MARKS: &[&[u8]] = &[
+        br#""session_meta""#,
+        br#""turn_context""#,
+        br#""task_started""#,
         br#""response_item""#,
         br#""user_message""#,
         br#""token_usage_record""#,
@@ -417,6 +491,154 @@ mod tests {
         let mut transcript = CodexTranscript::new(&path);
         transcript.update().unwrap();
         (transcript.stats(None), transcript.recent_prompts())
+    }
+
+    #[test]
+    fn a_fork_counts_what_it_spent_itself() {
+        // A UUIDv7 made at `ms`, as codex names turns.
+        let turn_id = |ms: i64| {
+            let hex = format!("{ms:012x}");
+            format!("{}-{}-7000-8000-000000000000", &hex[..8], &hex[8..])
+        };
+        let made = iso_ms("2026-06-05T17:08:53.197Z").unwrap();
+        let task = |ms: i64| {
+            json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn_id(ms)}})
+                .to_string()
+        };
+        let mut lines = vec![
+            json!({"timestamp": "2026-06-05T17:08:53.240Z", "type": "session_meta", "payload": {"id": "fork",
+                "forked_from_id": "parent", "timestamp": "2026-06-05T17:08:53.197Z"}})
+            .to_string(),
+            // The copy: the parent's meta, a turn of its, and what it spent.
+            json!({"type": "session_meta", "payload": {"id": "parent"}}).to_string(),
+            task(made - 60_000),
+        ];
+        lines.extend(turn("in the parent", 100, 1000, 400_000));
+        // More of the copy: a prompt as codex wrote it before 0.157, an
+        // edit, and a record naming the parent.
+        lines.push(user("unmarked, in the parent", None));
+        lines.push(user_event("unmarked, in the parent"));
+        lines.push(
+            json!({"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "FileChange",
+                "status": "completed", "changes": {"a.rs": {"type": "add", "content": "x\ny\n"}}}}})
+            .to_string(),
+        );
+        lines.push(
+            json!({"type": "token_usage_record", "payload": {"thread_id": "parent",
+                "usage": {"input_tokens": 1, "output_tokens": 30, "total_tokens": 31}}})
+            .to_string(),
+        );
+        // Its own.
+        lines.push(task(made + 50));
+        lines.extend(turn("in the fork", 7, 1200, 400_000));
+        let (stats, prompts) = totals(&lines);
+        assert_eq!(
+            (stats.prompts, stats.output_tokens, stats.context_used),
+            (Some(1), Some(7), Some(1200))
+        );
+        assert_eq!((stats.lines_added, stats.lines_removed), (Some(0), Some(0)));
+        assert_eq!(prompts, ["in the fork"]);
+        // Without the per-call records (before 0.163): its own is what its
+        // total grew by after the copy.
+        let unrecorded: Vec<String> = lines
+            .iter()
+            .filter(|l| !l.contains("token_usage_record"))
+            .map(|l| l.replace("\"output_tokens\":7,", "\"output_tokens\":107,"))
+            .collect();
+        assert!(
+            unrecorded
+                .iter()
+                .any(|l| l.contains("\"output_tokens\":107,"))
+        );
+        let (stats, _) = totals(&unrecorded);
+        assert_eq!(stats.output_tokens, Some(7));
+    }
+
+    /// A UUIDv7 made at `ms`, as codex names turns.
+    fn uuid7(ms: i64) -> String {
+        let hex = format!("{ms:012x}");
+        format!("{}-{}-7000-8000-000000000000", &hex[..8], &hex[8..])
+    }
+
+    /// A turn starting at `ms`, as codex writes it.
+    fn task_started(ms: i64) -> String {
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": uuid7(ms)}})
+            .to_string()
+    }
+
+    /// A fork's first line, written at `written`, its own time `made` if
+    /// it says it.
+    fn fork_meta(written: &str, made: Option<&str>) -> String {
+        let mut payload = json!({"id": "fork", "forked_from_id": "parent", "cwd": "/w"});
+        if let Some(made) = made {
+            payload["timestamp"] = json!(made);
+        }
+        json!({"timestamp": written, "type": "session_meta", "payload": payload}).to_string()
+    }
+
+    /// A patch applied adding `file`, as codex wrote it before 0.157.
+    fn patch_added(file: &str, content: &str) -> String {
+        json!({"type": "event_msg", "payload": {"type": "patch_apply_end", "success": true,
+            "changes": {file: {"type": "add", "content": content}}}})
+        .to_string()
+    }
+
+    #[test]
+    fn in_a_fork_the_parents_patches_and_records_count_nothing() {
+        let made = iso_ms("2026-06-05T17:08:53.197Z").unwrap();
+        let mut lines = vec![
+            fork_meta("2026-06-05T17:08:53.240Z", Some("2026-06-05T17:08:53.197Z")),
+            json!({"type": "session_meta", "payload": {"id": "parent"}}).to_string(),
+            task_started(made - 60_000),
+        ];
+        lines.extend(turn("in the parent", 100, 1000, 400_000));
+        // An edit in the copy.
+        lines.push(patch_added("/w/a.rs", "x\ny\n"));
+        // Its own turn, and edit.
+        lines.push(task_started(made + 50));
+        lines.extend(turn("in the fork", 7, 1200, 400_000));
+        lines.push(patch_added("/w/b.rs", "z\n"));
+        // Codex counting the parent's call it shows the fork, after the
+        // fork's own turn began: the record names the parent.
+        lines.push(
+            json!({"type": "token_usage_record", "payload": {"thread_id": "parent",
+                "response_id": "resp_p", "usage": {"input_tokens": 1, "output_tokens": 30, "total_tokens": 31}}})
+            .to_string(),
+        );
+        let (stats, prompts) = totals(&lines);
+        assert_eq!(
+            (stats.output_tokens, stats.lines_added, stats.lines_removed),
+            (Some(7), Some(1), Some(0))
+        );
+        assert_eq!(prompts, ["in the fork"]);
+    }
+
+    #[test]
+    fn a_fork_was_made_when_its_meta_says_else_when_written() {
+        let made = iso_ms("2026-06-05T17:08:53.197Z").unwrap();
+        // Its own first turn began after it was made, before its first line
+        // was written.
+        let fork = |meta: String| {
+            let mut lines = vec![
+                meta,
+                json!({"type": "session_meta", "payload": {"id": "parent"}}).to_string(),
+                task_started(made - 60_000),
+            ];
+            lines.extend(turn("in the parent", 100, 1000, 400_000));
+            lines.push(task_started(made + 20));
+            lines.extend(turn("in the fork", 7, 1200, 400_000));
+            totals(&lines)
+        };
+        let (stats, prompts) = fork(fork_meta(
+            "2026-06-05T17:08:53.240Z",
+            Some("2026-06-05T17:08:53.197Z"),
+        ));
+        assert_eq!((stats.prompts, stats.output_tokens), (Some(1), Some(7)));
+        assert_eq!(prompts, ["in the fork"]);
+        // A meta that doesn't say: when its line was written.
+        let (stats, prompts) = fork(fork_meta("2026-06-05T17:08:53.210Z", None));
+        assert_eq!((stats.prompts, stats.output_tokens), (Some(1), Some(7)));
+        assert_eq!(prompts, ["in the fork"]);
     }
 
     #[test]

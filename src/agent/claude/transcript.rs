@@ -22,6 +22,9 @@ pub struct ClaudeTranscript {
     main: Jsonl<Totals>,
     subagents: HashMap<PathBuf, Jsonl<Replies>>,
     counted: std::cell::Cell<bool>,
+    /// A copy's: the conversation it was copied from, and when, until that
+    /// conversation is read (at the first update).
+    fork: Option<(String, i64)>,
 }
 
 impl ClaudeTranscript {
@@ -30,6 +33,22 @@ impl ClaudeTranscript {
             main: Jsonl::new(path),
             subagents: HashMap::new(),
             counted: std::cell::Cell::new(false),
+            fork: None,
+        }
+    }
+
+    /// What a copy roster made was copied from: the conversation `from`, in
+    /// its file beside this one, read as it was then; or, where it can't be
+    /// read, when it was copied (at `at`).
+    fn copy_of(&self, from: &str, at: i64) -> Origin {
+        let parent = (!from.is_empty() && !from.contains('/')).then(|| {
+            let mut parent =
+                Jsonl::<Parent>::new(&self.main.path().with_file_name(format!("{from}.jsonl")));
+            parent.read().map(|()| std::mem::take(parent.tally_mut()))
+        });
+        match parent {
+            Some(Ok(parent)) => Origin::Of(std::sync::Arc::new(parent)),
+            _ => Origin::Before(at),
         }
     }
 
@@ -52,6 +71,13 @@ impl Transcript for ClaudeTranscript {
     }
 
     fn update(&mut self) -> std::io::Result<()> {
+        // Once Claude has written the copy, which it does with its first
+        // message: what it copied is in the conversation's file by then,
+        // whatever that conversation gained meanwhile.
+        if self.fork.is_some() && self.main.path().exists() {
+            let (from, at) = self.fork.take().unwrap();
+            self.main.tally_mut().copy = Some(self.copy_of(&from, at));
+        }
         self.main.update()?;
         if self.counted.get() {
             self.read_subagents();
@@ -79,6 +105,92 @@ impl Transcript for ClaudeTranscript {
     fn recent_prompts(&self) -> Vec<String> {
         self.main.recent_prompts()
     }
+
+    /// A copy roster made (`--resume … --fork-session`) is written with the
+    /// conversation it came from, each line unmarked (as dated then, with its
+    /// uuid), and Claude carries that conversation's cost over.
+    fn forked(&mut self, from: &str, at: i64) {
+        self.fork = Some((from.to_string(), at));
+    }
+}
+
+/// What a copy roster made was copied from.
+#[derive(Debug)]
+enum Origin {
+    /// The conversation, as its file has it.
+    Of(std::sync::Arc<Parent>),
+    /// Only when it was copied (ms), the conversation's file gone: lines
+    /// dated before are the copy, and the cost carried over is unknown.
+    Before(i64),
+}
+
+/// What a copy's lines are told apart by, and its cost measured from: the
+/// conversation it was copied from.
+#[derive(Debug, Default)]
+struct Parent {
+    /// Each of its messages' place among them, by its uuid, which a copy's
+    /// keeps.
+    at: HashMap<String, usize>,
+    messages: usize,
+    /// Its cost-states, each after how many of its messages.
+    costs: Vec<(usize, Cost)>,
+}
+
+impl Lines for Parent {
+    fn line(&mut self, line: &[u8]) {
+        if !wanted(line) {
+            return;
+        }
+        let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
+            return;
+        };
+        match entry.kind.as_deref() {
+            Some("user" | "assistant") => {
+                if let Some(uuid) = entry.uuid {
+                    self.at.entry(uuid.into_owned()).or_insert(self.messages);
+                    self.messages += 1;
+                }
+            }
+            Some("cost-state") => {
+                if let Some(cost) = entry.cost() {
+                    self.costs.push((self.messages, cost));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Parent {
+    /// Its cost when Claude took it to copy, its message at `last` the last
+    /// copied: the last cost-state written before its next. Claude writes one
+    /// as it exits, after the messages it counts.
+    fn cost_until(&self, last: Option<usize>) -> Cost {
+        let next = last.map_or(0, |i| i + 1);
+        (self.costs.iter().rev())
+            .find(|(after, _)| *after <= next)
+            .map_or_else(Cost::default, |(_, cost)| *cost)
+    }
+}
+
+/// A cost-state's: what the conversation cost, and its lines added and
+/// removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Cost {
+    usd: f64,
+    added: u64,
+    removed: u64,
+}
+
+impl Cost {
+    /// What it adds to `before`.
+    fn since(self, before: Cost) -> Cost {
+        Cost {
+            usd: (self.usd - before.usd).max(0.0),
+            added: self.added.saturating_sub(before.added),
+            removed: self.removed.saturating_sub(before.removed),
+        }
+    }
 }
 
 /// A Claude transcript's running totals.
@@ -88,9 +200,13 @@ pub struct Totals {
     outputs: HashMap<String, u64>,
     context: Option<u64>,
     prompts: Prompts,
-    /// The last cost-state: cost, lines added, lines removed.
-    cost: Option<(f64, u64, u64)>,
+    /// The last cost-state.
+    cost: Option<Cost>,
     replies_since_cost: bool,
+    /// A copy's: what it was copied from.
+    copy: Option<Origin>,
+    /// The place in that conversation of the last of its messages copied.
+    last_copied: Option<usize>,
 }
 
 impl Lines for Totals {
@@ -98,17 +214,35 @@ impl Lines for Totals {
         if !wanted(line) {
             return;
         }
-        let Ok(entry) = serde_json::from_slice::<Entry>(line) else {
+        let Ok(mut entry) = serde_json::from_slice::<Entry>(line) else {
             return;
         };
-        let message = entry.message.unwrap_or_default();
+        let message = entry.message.take().unwrap_or_default();
         // A subagent's, written into the transcript by an older Claude: its
         // output counts, but its context and prompts are its own.
         let sidechain = entry.is_sidechain == Some(true);
+        // A fork's copy of the conversation it came from: in context, but
+        // neither prompted nor spent here. /branch marks each line forkedFrom;
+        // --fork-session (roster's copies) leaves them with their uuids, as
+        // dated then.
+        let copied = entry.forked_from.is_some()
+            || match &self.copy {
+                Some(Origin::Of(parent)) => {
+                    let at = entry.uuid.as_deref().and_then(|u| parent.at.get(u));
+                    if let Some(&at) = at {
+                        self.last_copied = self.last_copied.max(Some(at));
+                    }
+                    at.is_some()
+                }
+                Some(Origin::Before(made)) => (entry.timestamp.as_deref())
+                    .and_then(crate::util::iso_ms)
+                    .is_some_and(|at| at < *made),
+                None => false,
+            };
         match entry.kind.as_deref() {
             Some("assistant") => {
                 let usage = message.usage.unwrap_or_default();
-                if let (Some(id), Some(output)) = (message.id, usage.output_tokens) {
+                if let (Some(id), Some(output), false) = (message.id, usage.output_tokens, copied) {
                     self.outputs.insert(id, output);
                 }
                 if sidechain {
@@ -129,7 +263,7 @@ impl Lines for Totals {
                     self.replies_since_cost = true;
                 }
             }
-            Some("user") if entry.is_meta != Some(true) && !sidechain => {
+            Some("user") if entry.is_meta != Some(true) && !sidechain && !copied => {
                 let given = entry.prompt_source.is_some();
                 if let Some(text) = message.content.and_then(|c| prompt(c, given))
                     && is_prompt(&text, given)
@@ -138,14 +272,24 @@ impl Lines for Totals {
                 }
             }
             Some("cost-state") => {
-                if let Some(cost) = entry.total_cost {
-                    let added = entry.lines_added.unwrap_or(0);
-                    let removed = entry.lines_removed.unwrap_or(0);
-                    self.cost = Some((cost, added, removed));
+                if let Some(cost) = entry.cost() {
+                    self.cost = Some(cost);
                     self.replies_since_cost = false;
                 }
             }
             _ => {}
+        }
+    }
+
+    fn fresh(&self) -> Totals {
+        let copy = match &self.copy {
+            Some(Origin::Of(parent)) => Some(Origin::Of(std::sync::Arc::clone(parent))),
+            Some(Origin::Before(at)) => Some(Origin::Before(*at)),
+            None => None,
+        };
+        Totals {
+            copy,
+            ..Totals::default()
         }
     }
 }
@@ -157,14 +301,23 @@ impl Tally for Totals {
         let window = self
             .context
             .and_then(|used| model.and_then(context_window).filter(|w| *w >= used));
+        // A copy's own: Claude carries over what the conversation it came
+        // from had cost.
+        let cost = match &self.copy {
+            None => self.cost,
+            Some(Origin::Of(parent)) => {
+                (self.cost).map(|c| c.since(parent.cost_until(self.last_copied)))
+            }
+            Some(Origin::Before(_)) => None,
+        };
         AgentStats {
             prompts: Some(self.prompts.count),
             context_used: self.context,
             context_limit: window,
             output_tokens: (!self.outputs.is_empty()).then(|| self.outputs.values().sum()),
-            cost_usd: self.cost.map(|c| c.0),
-            lines_added: self.cost.map(|c| c.1),
-            lines_removed: self.cost.map(|c| c.2),
+            cost_usd: cost.map(|c| c.usd),
+            lines_added: cost.map(|c| c.added),
+            lines_removed: cost.map(|c| c.removed),
             partial: self.replies_since_cost,
         }
     }
@@ -183,6 +336,12 @@ struct Entry<'a> {
     is_meta: Option<bool>,
     #[serde(rename = "isSidechain")]
     is_sidechain: Option<bool>,
+    #[serde(rename = "forkedFrom")]
+    forked_from: Option<IgnoredAny>,
+    #[serde(borrow)]
+    timestamp: Option<std::borrow::Cow<'a, str>>,
+    #[serde(borrow)]
+    uuid: Option<std::borrow::Cow<'a, str>>,
     /// Where a prompt came from, on prompts alone.
     #[serde(rename = "promptSource")]
     prompt_source: Option<IgnoredAny>,
@@ -194,6 +353,17 @@ struct Entry<'a> {
     lines_added: Option<u64>,
     #[serde(rename = "totalLinesRemoved")]
     lines_removed: Option<u64>,
+}
+
+impl Entry<'_> {
+    /// A cost-state's.
+    fn cost(&self) -> Option<Cost> {
+        Some(Cost {
+            usd: self.total_cost?,
+            added: self.lines_added.unwrap_or(0),
+            removed: self.lines_removed.unwrap_or(0),
+        })
+    }
 }
 
 /// A message, its content left unread (often large: replies, tool results)
@@ -389,6 +559,166 @@ mod tests {
         let mut t = ClaudeTranscript::new(&path);
         t.update().unwrap();
         assert!(t.subagents.is_empty());
+    }
+
+    #[test]
+    fn a_fork_counts_what_it_spent_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.jsonl");
+        let forked = |line: String| {
+            line.replacen(
+                '{',
+                r#"{"forkedFrom":{"sessionId":"p","messageUuid":"u"},"#,
+                1,
+            )
+        };
+        // The copy, each line marked, then its own.
+        let mut text = forked(prompt("in the parent"));
+        text += &forked(reply("m1", 500, 1000));
+        text += &prompt("in the fork");
+        text += &reply("m2", 40, 3000);
+        std::fs::write(&path, &text).unwrap();
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        let s = t.stats(None);
+        assert_eq!(
+            (s.prompts, s.output_tokens, s.context_used),
+            (Some(1), Some(40), Some(3012))
+        );
+        assert_eq!(t.recent_prompts(), ["in the fork"]);
+    }
+
+    #[test]
+    fn a_copy_roster_made_counts_what_it_spent_itself() {
+        // --fork-session writes the copy unmarked, each line with its uuid,
+        // as dated then; and carries the conversation's cost over (Claude
+        // 2.1.311, as seen in a copy's cost-state: the parent's output and
+        // cost in it, its start time).
+        let dir = tempfile::tempdir().unwrap();
+        let with = |line: String, uuid: &str, ts: &str| {
+            line.replacen('{', &format!(r#"{{"uuid":"{uuid}","timestamp":"{ts}","#), 1)
+        };
+        let cost = |usd: f64, added: u64| {
+            line(
+                serde_json::json!({"type": "cost-state", "totalCostUSD": usd,
+                "totalLinesAdded": added, "totalLinesRemoved": 1}),
+            )
+        };
+        let parent = [
+            with(prompt("in the parent"), "u1", "2026-10-25T10:00:00.000Z"),
+            with(reply("m1", 500, 1000), "u2", "2026-10-25T10:00:05.000Z"),
+            cost(1.5, 10),
+        ]
+        .concat();
+        // Gone on after the copy was made.
+        let later = [
+            with(prompt("later"), "u9", "2026-10-25T13:00:00.000Z"),
+            cost(4.0, 30),
+        ]
+        .concat();
+        std::fs::write(dir.path().join("p.jsonl"), parent.clone() + &later).unwrap();
+        // Its own first prompt, dated before the session (a start that
+        // failed, a clock stepped back) is its own still.
+        let copy = [
+            with(prompt("in the parent"), "u1", "2026-10-25T10:00:00.000Z"),
+            with(reply("m1", 500, 1000), "u2", "2026-10-25T10:00:05.000Z"),
+            with(prompt("in the copy"), "u3", "2026-10-25T10:30:00.000Z"),
+            with(reply("m2", 40, 3000), "u4", "2026-10-25T12:00:05.000Z"),
+            cost(2.25, 15),
+        ]
+        .concat();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(&path, &copy).unwrap();
+        let made = crate::util::iso_ms("2026-10-25T11:00:00.000Z").unwrap();
+        let read = |from: &str| {
+            let mut t = ClaudeTranscript::new(&path);
+            t.forked(from, made);
+            t.update().unwrap();
+            t
+        };
+        let t = read("p");
+        let s = t.stats(None);
+        assert_eq!(
+            (s.prompts, s.output_tokens, s.context_used),
+            (Some(1), Some(40), Some(3012))
+        );
+        assert_eq!(
+            (s.cost_usd, s.lines_added, s.lines_removed),
+            (Some(0.75), Some(5), Some(0))
+        );
+        // Read before Claude wrote the copy (it does with its first
+        // message), the conversation gaining meanwhile what it then copied.
+        std::fs::write(&path, "").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(
+            dir.path().join("p.jsonl"),
+            &parent[..parent.find(r#""uuid":"u2""#).unwrap() - 1],
+        )
+        .unwrap();
+        let mut early = ClaudeTranscript::new(&path);
+        early.forked("p", made);
+        assert!(early.update().is_err());
+        std::fs::write(dir.path().join("p.jsonl"), parent.clone() + &later).unwrap();
+        std::fs::write(&path, &copy).unwrap();
+        early.update().unwrap();
+        let s = early.stats(None);
+        assert_eq!((s.prompts, s.output_tokens), (Some(1), Some(40)));
+        // Rewritten by Claude (compacted): still told apart.
+        let mut t = t;
+        std::fs::write(&path, &copy[..copy.find(r#""uuid":"u4""#).unwrap() - 1]).unwrap();
+        t.update().unwrap();
+        let s = t.stats(None);
+        assert_eq!((s.prompts, s.output_tokens), (Some(1), None));
+        std::fs::write(&path, &copy).unwrap();
+        // The conversation it came from gone: told by the time it was made,
+        // and what it cost itself unknown.
+        let s = read("gone").stats(None);
+        assert_eq!(
+            (s.prompts, s.output_tokens, s.cost_usd, s.lines_added),
+            (Some(0), Some(40), None, None)
+        );
+        // Only a file beside it: a name with a path in it isn't followed.
+        let below = dir.path().join("sub");
+        std::fs::create_dir(&below).unwrap();
+        std::fs::write(below.join("c.jsonl"), &copy).unwrap();
+        let mut t = ClaudeTranscript::new(&below.join("c.jsonl"));
+        t.forked("p", made);
+        t.update().unwrap();
+        assert_eq!(t.stats(None).cost_usd, None);
+        let mut t = ClaudeTranscript::new(&below.join("c.jsonl"));
+        t.forked("../p", made);
+        t.update().unwrap();
+        assert_eq!(t.stats(None).cost_usd, None);
+        // Not a copy: all of it its own.
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        let s = t.stats(None);
+        assert_eq!((s.prompts, s.cost_usd), (Some(2), Some(2.25)));
+    }
+
+    #[test]
+    fn a_parents_cost_is_the_one_before_its_next_message() {
+        let cost = |usd| Cost {
+            usd,
+            added: 0,
+            removed: 0,
+        };
+        let parent = Parent {
+            at: HashMap::new(),
+            messages: 4,
+            costs: vec![
+                (0, cost(0.1)),
+                (2, cost(1.0)),
+                (2, cost(1.5)),
+                (4, cost(3.0)),
+            ],
+        };
+        // Its second message (1) the last copied: the last written before
+        // its third.
+        assert_eq!(parent.cost_until(Some(1)), cost(1.5));
+        assert_eq!(parent.cost_until(Some(3)), cost(3.0));
+        assert_eq!(parent.cost_until(None), cost(0.1));
+        assert_eq!(cost(1.0).since(cost(2.0)), cost(0.0));
     }
 
     #[test]

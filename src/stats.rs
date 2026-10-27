@@ -36,6 +36,10 @@ pub trait Transcript: Send {
     fn stats(&self, model: Option<&str>) -> AgentStats;
     /// The last few prompts the user typed, oldest first.
     fn recent_prompts(&self) -> Vec<String>;
+    /// Tells it the session is a copy roster made of conversation `from` at
+    /// `at` (ms): its file begins with that conversation, where it may not
+    /// say so itself. Before its first update.
+    fn forked(&mut self, _from: &str, _at: i64) {}
 }
 
 /// What a JSONL file adds up to, line by line: what its reader knows of its
@@ -43,6 +47,11 @@ pub trait Transcript: Send {
 pub trait Lines: Default + Send {
     /// One complete line of the file.
     fn line(&mut self, line: &[u8]);
+    /// What it starts from again when the file is read again from its start
+    /// (rewritten, replaced): none of its lines, what it was told kept.
+    fn fresh(&self) -> Self {
+        Self::default()
+    }
 }
 
 /// What an agent's JSONL transcript adds up to: its statistics and prompts.
@@ -83,6 +92,10 @@ impl<T: Lines> Jsonl<T> {
         &self.tally
     }
 
+    pub fn tally_mut(&mut self) -> &mut T {
+        &mut self.tally
+    }
+
     /// Reads what was added since the last read (all of it the first time).
     pub fn read(&mut self) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt;
@@ -90,7 +103,10 @@ impl<T: Lines> Jsonl<T> {
         let meta = file.metadata()?;
         let (len, identity) = (meta.len(), Some((meta.dev(), meta.ino())));
         if len < self.offset || (self.file.is_some() && self.file != identity) {
-            *self = Jsonl::new(&self.path.clone());
+            *self = Jsonl {
+                tally: self.tally.fresh(),
+                ..Jsonl::new(&self.path.clone())
+            };
         }
         self.file = identity;
         if len == self.offset {

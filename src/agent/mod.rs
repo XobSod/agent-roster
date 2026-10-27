@@ -482,6 +482,17 @@ pub(crate) fn offered(name: &str, config: &Config) -> bool {
         || (BUILT_IN.contains(&name) && crate::util::on_path(name))
 }
 
+/// Session `s`'s transcript at `path`, its agent's reader of it, told what
+/// an adopted copy was copied from (`Transcript::forked`): its file begins
+/// with that conversation.
+pub fn transcript_of(s: &Session, path: &Path) -> Option<Box<dyn Transcript>> {
+    let mut transcript = adapter(&s.agent).transcript(path)?;
+    if let Some(from) = &s.fork_from {
+        transcript.forked(from, s.created_at);
+    }
+    Some(transcript)
+}
+
 /// Whether starting `s` goes on with its conversation: its agent resumes, and
 /// roster knows the conversation, or the one an adopted copy forks. An agent
 /// that names its conversation only from its first turn on (codex) may not
@@ -569,6 +580,31 @@ mod tests {
         let mut config = Config::default();
         config.agents.insert(name.into(), agent);
         config
+    }
+
+    #[test]
+    fn an_adopted_copys_transcript_is_told_what_it_was_copied_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = |uuid: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "user", "uuid": uuid,
+                    "timestamp": "2026-10-25T10:00:00.000Z", "message": {"content": text}})
+            )
+        };
+        std::fs::write(dir.path().join("p.jsonl"), prompt("u1", "parent's")).unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(&path, prompt("u1", "parent's") + &prompt("u2", "own")).unwrap();
+        let mut s = session("a");
+        s.agent = CLAUDE.into();
+        let prompts = |s: &Session| {
+            let mut t = transcript_of(s, &path).unwrap();
+            t.update().unwrap();
+            t.stats(None).prompts
+        };
+        assert_eq!(prompts(&s), Some(2));
+        s.fork_from = Some("p".into());
+        assert_eq!(prompts(&s), Some(1));
     }
 
     /// A launch context with roster at `roster` and nowhere to keep files.

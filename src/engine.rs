@@ -1212,7 +1212,7 @@ impl Roster {
     /// if it can't.
     pub fn agent_stats(&self, s: &Session) -> Option<AgentStats> {
         let path = Path::new(s.transcript_path.as_deref()?);
-        let mut transcript = agent::adapter(&s.agent).transcript(path)?;
+        let mut transcript = agent::transcript_of(s, path)?;
         transcript.update().ok()?;
         Some(self.with_window(transcript.stats(s.running_model.as_deref()), s))
     }

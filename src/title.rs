@@ -105,9 +105,8 @@ impl Roster {
         let path = s.transcript_path.clone().filter(|p| Path::new(p).exists());
         let path =
             path.with_context(|| format!("{} has no conversation to title yet", s.label()))?;
-        let transcript = adapter
-            .transcript(Path::new(&path))
-            .context("no transcript")?;
+        let transcript =
+            crate::agent::transcript_of(&s, Path::new(&path)).context("no transcript")?;
         let Some(oneoff) = adapter.oneoff(&self.config) else {
             bail!("{} can't make a title; set one with edit", s.agent);
         };

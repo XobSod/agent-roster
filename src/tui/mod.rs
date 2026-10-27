@@ -490,7 +490,7 @@ fn group_prompts(app: &mut App, group: Group, rows: u16) -> HashMap<String, Stri
             // with its conversation).
             _ if app.preview.reading.ids.contains(&s.id) || !path.exists() => {}
             _ => {
-                if let Some(reader) = agent::adapter(&s.agent).transcript(path) {
+                if let Some(reader) = agent::transcript_of(&s, path) {
                     unread.push((s.id.clone(), reader));
                 }
             }
@@ -549,7 +549,7 @@ fn transcript_info(
         .get(&s.id)
         .is_none_or(|t| t.path() != path)
     {
-        let reader = agent::adapter(&s.agent).transcript(path)?;
+        let reader = agent::transcript_of(s, path)?;
         app.preview.transcripts.insert(s.id.clone(), reader);
     }
     let reader = app.preview.transcripts.get_mut(&s.id)?;

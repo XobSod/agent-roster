@@ -177,7 +177,7 @@ impl Calls for ModelCalls {
 }
 
 /// When a UUIDv7 was made, in ms (its first 48 bits); None for another kind.
-fn uuid_ms(id: &str) -> Option<i64> {
+pub(super) fn uuid_ms(id: &str) -> Option<i64> {
     let hex: String = id.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 || hex.as_bytes()[12] != b'7' {
         return None;

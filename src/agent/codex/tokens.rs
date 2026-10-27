@@ -7,10 +7,13 @@
 //! apart. The model is the one the turn was given (`turn_context`).
 //!
 //! A fork (and a subagent, forked from its parent) starts with a copy of
-//! the conversation it was forked from, written as it's made, every line
-//! dated then: its counts and records too. That isn't spent again, so it's
-//! skipped, up to the first turn of the fork's own: a turn's id is a UUIDv7,
-//! made when the turn was, so the copied ones are older than the fork.
+//! the conversation it was forked from (since 0.137), written as it's made,
+//! every line dated then: its counts and records too. That isn't spent
+//! again, so it's skipped, from the copy's own `session_meta` up to the
+//! first turn of the fork's own: a turn's id is a UUIDv7, made when the
+//! turn was, so the copied ones are older than the fork, and one that
+//! can't be dated (an older codex's, or none) is the copy's. An older
+//! fork, with no copy, has nothing skipped.
 
 use std::path::{Path, PathBuf};
 
@@ -33,9 +36,12 @@ pub struct ModelCalls {
     /// copy of another's comes with that one's.
     own: Option<String>,
     met: bool,
-    forked: bool,
-    /// In a fork, when it was made (ms), while what's read is the copy.
+    /// In a fork, when it was made (ms).
+    forked: Option<i64>,
+    /// While what's read is the copy, when the fork was made (ms).
     copying: Option<i64>,
+    /// The copy began (once only).
+    copied: bool,
 }
 
 impl Lines for ModelCalls {
@@ -66,15 +72,28 @@ impl Lines for ModelCalls {
                 self.met = true;
                 self.own = payload.id;
                 if payload.forked_from_id.is_some() {
-                    self.forked = true;
-                    self.copying = payload.timestamp.as_deref().and_then(iso_ms).or(at);
+                    self.forked = Some(
+                        payload
+                            .timestamp
+                            .as_deref()
+                            .and_then(iso_ms)
+                            .or(at)
+                            .unwrap_or(0),
+                    );
+                }
+            }
+            // Another's, in a fork: the copy of the conversation it was
+            // forked from begins.
+            (Some("session_meta"), _) => {
+                if self.forked.is_some() && !self.copied {
+                    self.copying = self.forked;
+                    self.copied = true;
                 }
             }
             (Some("turn_context"), _) | (Some("event_msg"), Some("task_started")) => {
-                // The fork's own first turn: the copy is over. A turn that
-                // can't be dated is taken for the fork's own.
+                // The fork's own first turn: the copy is over.
                 if let (Some(made), Some(turn)) = (self.copying, payload.turn_id.as_deref())
-                    && uuid_ms(turn).is_none_or(|t| t >= made)
+                    && uuid_ms(turn).is_some_and(|t| t >= made)
                 {
                     self.copying = None;
                 }
@@ -84,10 +103,12 @@ impl Lines for ModelCalls {
             }
             (Some("token_usage_record"), _) => {
                 self.recorded = true;
-                let copied = self.copying.is_some()
-                    || (self.forked
-                        && payload.thread_id.is_some()
-                        && payload.thread_id != self.own);
+                // A record names its conversation: in a fork, the fork's own
+                // counts, whether or not its turn could be dated.
+                let copied = match payload.thread_id.as_deref() {
+                    Some(thread) if self.forked.is_some() => Some(thread) != self.own.as_deref(),
+                    _ => self.copying.is_some(),
+                };
                 if let (Some(usage), Some(at), false) = (payload.usage, at, copied) {
                     let id = match payload.response_id {
                         Some(response) => format!("codex:{response}"),
@@ -144,7 +165,7 @@ impl ModelCalls {
                 cache_write_hour: 0,
                 output: usage.output_tokens,
             },
-            cost: None,
+            ..Call::default()
         }
     }
 }
@@ -382,5 +403,56 @@ mod tests {
         assert_eq!(read, [("codex:resp_f", "gpt-6.1-sol", 40)]);
         assert_eq!(uuid_ms(&turn(made)), Some(made));
         assert_eq!(uuid_ms("not-a-uuid"), None);
+    }
+
+    #[test]
+    fn a_copy_whose_turns_cant_be_dated_is_skipped_and_an_older_fork_isnt() {
+        let made = iso_ms("2026-06-05T17:08:53.197Z").unwrap();
+        let task = |turn: Option<String>| {
+            json!({"timestamp": "2026-06-05T17:08:53.240Z",
+            "type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}})
+        };
+        let fork = json!({"timestamp": "2026-06-05T17:08:53.240Z", "type": "session_meta",
+            "payload": {"id": "fork", "forked_from_id": "parent", "timestamp": "2026-06-05T17:08:53.197Z"}});
+        // A parent from a codex whose turn ids weren't v7, copied.
+        let calls = read(&[
+            fork.clone(),
+            json!({"timestamp": "2026-06-05T17:08:53.240Z", "type": "session_meta", "payload": {"id": "parent"}}),
+            task(Some("6f9619ff-8b86-4011-b42d-00c04fc964ff".into())),
+            count("2026-06-05T17:08:53.240Z", 500, usage(500, 0, 0, 500)),
+            task(None),
+            count("2026-06-05T17:08:53.241Z", 900, usage(400, 0, 0, 400)),
+            task(Some(turn(made + 50))),
+            count("2026-06-05T17:08:57.000Z", 940, usage(40, 0, 0, 40)),
+        ]);
+        let inputs: Vec<u64> = calls.iter().map(|c| c.counts.input).collect();
+        assert_eq!(inputs, [40]);
+        // The fork's own record, though its turn can't be dated, counts; a
+        // session_meta after the copy doesn't begin another.
+        let calls = read(&[
+            fork.clone(),
+            json!({"timestamp": "2026-06-05T17:08:53.240Z", "type": "session_meta", "payload": {"id": "parent"}}),
+            task(None),
+            record(
+                "2026-06-05T17:08:57.000Z",
+                "fork",
+                "resp_f",
+                usage(40, 0, 0, 40),
+            ),
+            count("2026-06-05T17:08:57.001Z", 8000, usage(40, 0, 0, 40)),
+            task(Some(turn(made + 50))),
+            json!({"timestamp": "2026-06-05T17:09:00.000Z", "type": "session_meta", "payload": {"id": "other"}}),
+            count("2026-06-05T17:09:01.000Z", 9000, usage(30, 0, 0, 30)),
+        ]);
+        let inputs: Vec<u64> = calls.iter().map(|c| c.counts.input).collect();
+        assert_eq!(inputs, [40, 30]);
+        // A fork with no copy (before 0.137), its turns undated: all its own.
+        let calls = read(&[
+            fork,
+            task(None),
+            count("2026-06-05T17:09:00.000Z", 70, usage(70, 0, 0, 70)),
+        ]);
+        let inputs: Vec<u64> = calls.iter().map(|c| c.counts.input).collect();
+        assert_eq!(inputs, [70]);
     }
 }

@@ -168,3 +168,29 @@ fn tokens_are_summed_from_every_agents_conversations() {
     assert_eq!(json["total"]["unpriced"], 3030);
     assert_eq!(json["sessions"], 3);
 }
+
+#[test]
+fn a_file_gone_keeps_what_it_spent_though_another_has_its_name() {
+    let Some(t) = TestEnv::new("tokens-names") else {
+        return;
+    };
+    let reply = |id: &str, input: u64| {
+        json!({"type": "assistant", "timestamp": iso("1 hour"), "message": {"id": id,
+            "model": "claude-opus-5-5", "usage": {"input_tokens": input, "output_tokens": 0}}})
+    };
+    // Two conversations' subagents, under one name.
+    let project = t.claude_dir().join("projects/-repo");
+    for (conversation, id, input) in [("c1", "m1", 1000), ("c2", "m2", 2000)] {
+        write(project.join(format!("{conversation}.jsonl")), &[]);
+        write(
+            project.join(format!("{conversation}/subagents/agent-a.jsonl")),
+            &[reply(id, input)],
+        );
+    }
+    let json: Value = serde_json::from_str(&t.ok(&["tokens", "--json"])).unwrap();
+    assert_eq!(json["total"]["tokens"]["input"], 3000);
+    // One's gone: it didn't move to the other's.
+    fs::remove_file(project.join("c1/subagents/agent-a.jsonl")).unwrap();
+    let json: Value = serde_json::from_str(&t.ok(&["tokens", "--json"])).unwrap();
+    assert_eq!(json["total"]["tokens"]["input"], 3000);
+}

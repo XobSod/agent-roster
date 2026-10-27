@@ -323,8 +323,9 @@ after the first turn (with `title_model`), or the name you give its session (`/n
 `/new` starts a new conversation in the same session; starting it again resumes the
 last one (`--session-id`). The statistics come from pi's session file, cost included,
 with the context window pi reports for the model. Its conversations started elsewhere
-can be adopted, from `~/.pi/agent/sessions` (or where `PI_CODING_AGENT_DIR` or
-`PI_CODING_AGENT_SESSION_DIR` say); a copy is forked with `--fork`.
+can be adopted, from `~/.pi/agent/sessions` (or where `PI_CODING_AGENT_DIR`,
+`PI_CODING_AGENT_SESSION_DIR` or an absolute `sessionDir` in pi's settings say); a copy
+is forked with `--fork`.
 
 ## Codex
 

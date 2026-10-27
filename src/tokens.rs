@@ -17,7 +17,7 @@ use crate::db::Db;
 use crate::stats::{Jsonl, Lines};
 
 /// One model call: when, to which model, and what it took.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Call {
     /// The call, as its agent names it (Claude's message id, codex's
     /// response id), prefixed with the agent's name: one copied into another
@@ -30,6 +30,19 @@ pub struct Call {
     pub counts: Counts,
     /// What the agent says it cost (pi); None if it doesn't say.
     pub cost: Option<f64>,
+    /// How it was served, where that changes its price (Claude's).
+    pub served: Served,
+}
+
+/// What a call's price takes from how it was served, beyond its tokens.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Served {
+    /// Web searches it ran, at a price each.
+    pub searches: u64,
+    /// Run in the US only, at a tenth more.
+    pub us_only: bool,
+    /// In fast mode, at an Opus model's fast rates.
+    pub fast: bool,
 }
 
 /// Tokens by kind, each apart from the others: `input` is what was sent
@@ -187,27 +200,53 @@ const PRICES: &[Price] = &[
     ),
 ];
 
+/// What a web search costs, in dollars.
+const SEARCH: f64 = 0.01;
+
+/// What a call run in the US only costs, times what it would otherwise.
+const US_ONLY: f64 = 1.1;
+
+/// What a call in fast mode costs, times what it would otherwise, for the
+/// models that have it (others cost the same).
+const FAST: &[(&str, f64)] = &[
+    ("claude-opus-4-6", 6.0),
+    ("claude-opus-4-7", 6.0),
+    ("claude-opus-4-8", 2.0),
+    ("claude-opus-5", 2.0),
+    ("claude-opus-5-5", 2.0),
+];
+
 /// A model's prices, by its name without a provider (`anthropic/…`, as pi
 /// names it) or a date (`…-20251001`).
 fn price(model: &str) -> Option<&'static Price> {
+    let name = base_name(model);
+    PRICES.iter().find(|p| p.0 == name)
+}
+
+/// A model's name without a provider or a date.
+fn base_name(model: &str) -> &str {
     let name = model.rsplit('/').next().unwrap_or(model);
-    let name = match name.rsplit_once('-') {
+    match name.rsplit_once('-') {
         Some((base, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => base,
         _ => name,
-    };
-    PRICES.iter().find(|p| p.0 == name)
+    }
 }
 
 impl Call {
     /// What it cost, or would have at the API's prices, and what reading
-    /// from the cache saved; None if no price for its model is known.
+    /// from the cache saved; None if no price for its model is known. As
+    /// Claude prices its own: fast mode at its own rates (a long call's
+    /// too), a call in the US only a tenth more, then each search.
     pub fn cost(&self) -> Option<(f64, f64)> {
         let c = &self.counts;
-        let priced = price(&self.model).map(|(_, normal, long)| {
+        let s = &self.served;
+        let priced = price(&self.model).map(|(name, normal, long)| {
+            let fast = FAST.iter().find(|f| s.fast && f.0 == *name).map(|f| f.1);
             let r = match long {
-                Some((above, long)) if c.sent() > *above => long,
+                Some((above, long)) if fast.is_none() && c.sent() > *above => long,
                 _ => normal,
             };
+            let times = fast.unwrap_or(1.0) * if s.us_only { US_ONLY } else { 1.0 };
             let five_minutes = c.cache_write.saturating_sub(c.cache_write_hour);
             let cost = c.input as f64 * r.input
                 + c.cache_read as f64 * r.cache_read
@@ -215,7 +254,10 @@ impl Call {
                 + c.cache_write_hour as f64 * r.input * 2.0
                 + c.output as f64 * r.output;
             let saved = c.cache_read as f64 * (r.input - r.cache_read);
-            (cost / 1e6, saved / 1e6)
+            (
+                cost / 1e6 * times + s.searches as f64 * SEARCH,
+                saved / 1e6 * times,
+            )
         });
         // What the agent says it cost counts; 0 is what pi says of a model
         // it knows no price for.
@@ -330,7 +372,7 @@ const HOUR: i64 = 3_600_000;
 /// What changes how the files are read or what their calls cost (a reader
 /// mended, a price added): saved with what was spent, and when it isn't
 /// what was saved with, every file is read again.
-pub const VERSION: &str = "1";
+pub const VERSION: &str = "4";
 
 /// What a conversation's calls to one model spent in one hour, as summed
 /// from what roster keeps (`Db::spent_hours`).
@@ -454,18 +496,23 @@ impl Scan {
             }
         }
         // A file gone from where it was saved, found by its name where an
-        // agent keeps its files, was moved: what was saved of it goes, and
-        // it's saved where it is.
-        let here: HashMap<(&str, &std::ffi::OsStr), &str> = found
+        // agent keeps its files, of the same conversation, was moved: what
+        // was saved of it goes, and it's saved where it is. (A name alone
+        // can be another's: a subagent's, of another conversation.)
+        let here: HashMap<(&str, &str, &std::ffi::OsStr), &str> = found
             .iter()
-            .filter_map(|f| Some(((f.agent, f.path.file_name()?), f.key.as_str())))
+            .filter_map(|f| {
+                let name = f.path.file_name()?;
+                Some(((f.agent, f.session.as_str(), name), f.key.as_str()))
+            })
             .collect();
         let listed: HashSet<&str> = found.iter().map(|f| f.key.as_str()).collect();
         let mut moved = Vec::new();
         for (key, file) in &saved {
             let name = std::path::Path::new(key).file_name();
             if !listed.contains(key.as_str())
-                && let Some(to) = name.and_then(|n| here.get(&(file.agent.as_str(), n)))
+                && let Some(to) =
+                    name.and_then(|n| here.get(&(file.agent.as_str(), file.session.as_str(), n)))
             {
                 moved.push((key.clone(), to.to_string()));
             }
@@ -565,7 +612,7 @@ pub(crate) mod tests {
                 output,
                 ..Counts::default()
             },
-            cost: None,
+            ..Call::default()
         }
     }
 
@@ -606,6 +653,60 @@ pub(crate) mod tests {
         assert_eq!(c.cost(), None);
         c.cost = Some(0.5);
         assert_eq!(c.cost(), Some((0.5, 0.0)));
+    }
+
+    #[test]
+    fn a_call_costs_more_for_how_it_was_served_as_claude_prices_it() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let served = |model: &str, served: Served| Call {
+            served,
+            ..call(0, model, 1_000_000, 0, 0)
+        };
+        // Fast mode: Opus 5.5 at twice its rates, Opus 4.7 six times;
+        // a model without it, the same.
+        let fast = Served {
+            fast: true,
+            ..Served::default()
+        };
+        assert!(close(
+            served("claude-opus-5-5", fast).cost().unwrap().0,
+            8.0
+        ));
+        assert!(close(
+            served("claude-opus-4-8", fast).cost().unwrap().0,
+            10.0
+        ));
+        assert!(close(
+            served("claude-opus-4-7", fast).cost().unwrap().0,
+            30.0
+        ));
+        assert!(close(
+            served("claude-sonnet-5-5", fast).cost().unwrap().0,
+            2.0
+        ));
+        // An hour's cache write at twice the fast input's rate, and in the
+        // US a tenth more: Opus 5.5's 1M in at $8, 1M kept an hour at $16.
+        let mut c = served(
+            "claude-opus-5-5",
+            Served {
+                fast: true,
+                us_only: true,
+                ..Served::default()
+            },
+        );
+        c.counts.cache_write = 1_000_000;
+        c.counts.cache_write_hour = 1_000_000;
+        assert!(close(c.cost().unwrap().0, (8.0 + 16.0) * 1.1));
+        // In the US only, a tenth more; each search a cent, on top.
+        let us = Served {
+            us_only: true,
+            searches: 3,
+            ..Served::default()
+        };
+        assert!(close(
+            served("claude-opus-5-5", us).cost().unwrap().0,
+            4.4 + 0.03
+        ));
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //! pi keeps each as `<sessions>/--<cwd>--/<timestamp>_<id>.jsonl`, where
 //! `<sessions>` is `sessions` in pi's directory (`$PI_CODING_AGENT_DIR`, else
 //! `~/.pi/agent`); or as `<dir>/<timestamp>_<id>.jsonl` for a directory of
-//! its own, `$PI_CODING_AGENT_SESSION_DIR`. pi's internal files, so anything
-//! unreadable is skipped. (A `sessionDir` in pi's settings isn't followed;
-//! the variables are.) pi doesn't say which of them a running pi has open.
+//! its own, `$PI_CODING_AGENT_SESSION_DIR`, else the `sessionDir` of pi's
+//! settings (not a relative one, which is in each directory pi runs in, nor
+//! a project's). pi's internal files, so anything unreadable is skipped. pi
+//! doesn't say which of them a running pi has open.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -17,14 +18,27 @@ use crate::agent::Conversation;
 
 /// Where pi keeps its sessions.
 pub fn sessions_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
+    // An empty one is none, to pi too.
+    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+    if let Some(dir) = var("PI_CODING_AGENT_SESSION_DIR") {
         return Some(home(PathBuf::from(dir)));
     }
-    let agent = match std::env::var_os("PI_CODING_AGENT_DIR") {
+    let agent = match var("PI_CODING_AGENT_DIR") {
         Some(dir) => home(PathBuf::from(dir)),
         None => dirs::home_dir()?.join(".pi").join("agent"),
     };
-    Some(agent.join("sessions"))
+    Some(
+        session_dir_setting(&agent.join("settings.json")).unwrap_or_else(|| agent.join("sessions")),
+    )
+}
+
+/// The `sessionDir` of pi's settings in `settings`, if it's a directory
+/// wherever pi runs.
+fn session_dir_setting(settings: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(settings).ok()?;
+    let settings: Value = serde_json::from_str(&text).ok()?;
+    let dir = home(PathBuf::from(settings.get("sessionDir")?.as_str()?));
+    dir.is_absolute().then_some(dir)
 }
 
 /// `path` with a leading `~` as the home directory, as pi reads it.
@@ -179,6 +193,27 @@ fn first_prompt(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_dir_in_pis_settings_is_followed_unless_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        assert_eq!(session_dir_setting(&settings), None);
+        std::fs::write(
+            &settings,
+            r#"{"sessionDir": "/data/pi-sessions", "theme": "dark"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            session_dir_setting(&settings),
+            Some(PathBuf::from("/data/pi-sessions"))
+        );
+        // Relative, it's in whatever directory pi runs in.
+        std::fs::write(&settings, r#"{"sessionDir": ".pi/sessions"}"#).unwrap();
+        assert_eq!(session_dir_setting(&settings), None);
+        std::fs::write(&settings, "not json").unwrap();
+        assert_eq!(session_dir_setting(&settings), None);
+    }
 
     #[test]
     fn reads_what_a_session_says_about_itself() {

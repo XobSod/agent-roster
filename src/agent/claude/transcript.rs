@@ -3,15 +3,83 @@
 //! left out.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::value::RawValue;
 
-use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text, leading_type};
+use super::tokens::{Replies, subagent_files};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text, Transcript, leading_type};
+use crate::tokens::Calls;
 
-/// Reads a Claude transcript as it grows.
-pub type ClaudeTranscript = Jsonl<Totals>;
+/// Reads a Claude conversation as it grows: its transcript, and its
+/// subagents' beside it (`<id>/subagents/`), whose replies aren't in it,
+/// for their output (Claude's own cost, in the transcript, has them). Those
+/// only once its statistics are asked for: for its prompts alone (a
+/// heading's preview, a title), they'd be read for nothing.
+pub struct ClaudeTranscript {
+    main: Jsonl<Totals>,
+    subagents: HashMap<PathBuf, Jsonl<Replies>>,
+    counted: std::cell::Cell<bool>,
+}
+
+impl ClaudeTranscript {
+    pub fn new(path: &Path) -> ClaudeTranscript {
+        ClaudeTranscript {
+            main: Jsonl::new(path),
+            subagents: HashMap::new(),
+            counted: std::cell::Cell::new(false),
+        }
+    }
+
+    fn read_subagents(&mut self) {
+        let dir = self.main.path().with_extension("").join("subagents");
+        for file in subagent_files(&dir) {
+            let reader = self
+                .subagents
+                .entry(file)
+                .or_insert_with_key(|path| Jsonl::new(path));
+            // One that can't be read now is read next time.
+            let _ = reader.read();
+        }
+    }
+}
+
+impl Transcript for ClaudeTranscript {
+    fn path(&self) -> &Path {
+        self.main.path()
+    }
+
+    fn update(&mut self) -> std::io::Result<()> {
+        self.main.update()?;
+        if self.counted.get() {
+            self.read_subagents();
+        }
+        Ok(())
+    }
+
+    fn stats(&self, model: Option<&str>) -> AgentStats {
+        // From the next update on, its subagents' are read too.
+        self.counted.set(true);
+        let mut stats = self.main.stats(model);
+        // Each reply once, whichever of their files it's in.
+        let mut replies: HashMap<&str, u64> = HashMap::new();
+        for call in self.subagents.values().flat_map(|r| r.tally().calls()) {
+            let output = replies.entry(call.id.as_str()).or_default();
+            *output = (*output).max(call.counts.output);
+        }
+        let theirs: u64 = replies.values().sum();
+        if theirs > 0 {
+            stats.output_tokens = Some(stats.output_tokens.unwrap_or(0) + theirs);
+        }
+        stats
+    }
+
+    fn recent_prompts(&self) -> Vec<String> {
+        self.main.recent_prompts()
+    }
+}
 
 /// A Claude transcript's running totals.
 #[derive(Debug, Default)]
@@ -34,11 +102,17 @@ impl Lines for Totals {
             return;
         };
         let message = entry.message.unwrap_or_default();
+        // A subagent's, written into the transcript by an older Claude: its
+        // output counts, but its context and prompts are its own.
+        let sidechain = entry.is_sidechain == Some(true);
         match entry.kind.as_deref() {
             Some("assistant") => {
                 let usage = message.usage.unwrap_or_default();
                 if let (Some(id), Some(output)) = (message.id, usage.output_tokens) {
                     self.outputs.insert(id, output);
+                }
+                if sidechain {
+                    return;
                 }
                 let context: u64 = [
                     usage.input_tokens,
@@ -55,7 +129,7 @@ impl Lines for Totals {
                     self.replies_since_cost = true;
                 }
             }
-            Some("user") if entry.is_meta != Some(true) => {
+            Some("user") if entry.is_meta != Some(true) && !sidechain => {
                 let given = entry.prompt_source.is_some();
                 if let Some(text) = message.content.and_then(|c| prompt(c, given))
                     && is_prompt(&text, given)
@@ -107,6 +181,8 @@ struct Entry<'a> {
     kind: Option<std::borrow::Cow<'a, str>>,
     #[serde(rename = "isMeta")]
     is_meta: Option<bool>,
+    #[serde(rename = "isSidechain")]
+    is_sidechain: Option<bool>,
     /// Where a prompt came from, on prompts alone.
     #[serde(rename = "promptSource")]
     prompt_source: Option<IgnoredAny>,
@@ -276,6 +352,43 @@ mod tests {
                 "<task>Fix the bug</task>"
             ]
         );
+    }
+
+    #[test]
+    fn a_subagents_replies_count_for_output_but_not_its_context_or_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c1.jsonl");
+        // An older Claude's: the subagent's lines in the transcript.
+        let mut text = prompt("fix the tests");
+        text += &reply("m1", 500, 1000);
+        text += &line(serde_json::json!({"type": "user", "isSidechain": true,
+            "message": {"role": "user", "content": "look for the failing test"}}));
+        text += &line(serde_json::json!({"type": "assistant", "isSidechain": true,
+            "message": {"id": "s1", "usage": {"input_tokens": 3, "output_tokens": 40}}}));
+        std::fs::write(&path, &text).unwrap();
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        let s = t.stats(None);
+        assert_eq!(
+            (s.prompts, s.output_tokens, s.context_used),
+            (Some(1), Some(540), Some(1012))
+        );
+        // A newer Claude's: the subagent's own file, beside it.
+        std::fs::create_dir_all(dir.path().join("c1/subagents")).unwrap();
+        std::fs::write(
+            dir.path().join("c1/subagents/agent-a1.jsonl"),
+            line(serde_json::json!({"type": "assistant", "timestamp": "2026-10-25T18:00:00.000Z",
+                "message": {"id": "s2", "model": "claude-haiku-5-5", "usage": {"input_tokens": 9, "output_tokens": 60}}})),
+        )
+        .unwrap();
+        // Read once its statistics were asked for (above), from then on.
+        t.update().unwrap();
+        let s = t.stats(None);
+        assert_eq!((s.output_tokens, s.context_used), (Some(600), Some(1012)));
+        // For its prompts alone, they're not read.
+        let mut t = ClaudeTranscript::new(&path);
+        t.update().unwrap();
+        assert!(t.subagents.is_empty());
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub struct Db {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpentFile {
     pub agent: String,
+    /// The conversation it's of.
+    pub session: String,
     /// In ms.
     pub modified: i64,
     pub size: u64,
@@ -833,14 +835,15 @@ impl Db {
     pub fn spent_files(&self) -> Result<HashMap<String, SpentFile>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, agent, modified, size FROM spent_files")?;
+            .prepare("SELECT path, agent, session, modified, size FROM spent_files")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get(0)?,
                 SpentFile {
                     agent: r.get(1)?,
-                    modified: r.get(2)?,
-                    size: r.get::<_, i64>(3)? as u64,
+                    session: r.get(2)?,
+                    modified: r.get(3)?,
+                    size: r.get::<_, i64>(4)? as u64,
                 },
             ))
         })?;

@@ -2,7 +2,9 @@
 //! with its provider, model (the one that answered, if the provider said)
 //! and what pi says it cost, and the model calls outside the conversation:
 //! cache warming (`usage` entries, with their own model), and the summaries
-//! of a compaction or of a branch left, of the model last replying.
+//! of a compaction or of a branch left, of the model last replying; and a
+//! subagent's replies, which pi's subagent extension (its example) runs
+//! with no session of their own, keeping them in its tool's result.
 //! Every branch of the tree counts: it was spent either way. A fork copies
 //! the entries it was forked from as they were, their ids and times too,
 //! which name the calls, so a copy is one call.
@@ -10,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::stats::{Lines, leading_type};
 use crate::tokens::{Call, Calls, Counts};
@@ -35,14 +38,24 @@ impl Lines for Replies {
             return;
         };
         let at = entry.timestamp.as_deref().and_then(iso_ms);
+        let id = format!(
+            "pi:{}@{}",
+            entry.id.as_deref().unwrap_or(""),
+            entry.timestamp.as_deref().unwrap_or("")
+        );
         let (usage, at, model) = match entry.kind.as_deref() {
             Some("message") => {
-                let Some(message) = entry
-                    .message
-                    .filter(|m| m.role.as_deref() == Some("assistant"))
-                else {
+                let Some(message) = entry.message else {
                     return;
                 };
+                match message.role.as_deref() {
+                    Some("assistant") => {}
+                    Some("toolResult") => {
+                        self.tool_result(&id, at, message);
+                        return;
+                    }
+                    _ => return,
+                }
                 if let Some(model) =
                     named(message.provider, message.response_model.or(message.model))
                 {
@@ -54,15 +67,58 @@ impl Lines for Replies {
             Some("compaction" | "branch_summary") => (entry.usage, at, None),
             _ => return,
         };
-        let (Some(usage), Some(at)) = (usage, at) else {
+        if let (Some(usage), Some(at)) = (usage, at) {
+            self.push(id, at, model, usage);
+        }
+    }
+}
+
+impl Replies {
+    /// A tool's result (`id`'s): what the tool spent itself, as pi has
+    /// extensions say it (`usage`, of the model last replying, all of it,
+    /// as pi counts it); else a subagent's replies (pi's subagent extension
+    /// keeps its runs in `details`), each a call of its own, and its
+    /// subagents' in turn. Read leniently: any tool's details are its own.
+    fn tool_result(&mut self, id: &str, at: Option<i64>, message: Message) {
+        if let Some(usage) = message.usage {
+            if let Some(at) = message.timestamp.or(at) {
+                self.push(format!("{id}/u"), at, None, usage);
+            }
             return;
-        };
+        }
+        let runs = message.details.as_ref().and_then(|d| d.get("results"));
+        for (i, run) in runs
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let messages = run.get("messages").and_then(Value::as_array);
+            for (j, message) in messages.into_iter().flatten().enumerate() {
+                let Ok(message) = Message::deserialize(message) else {
+                    continue;
+                };
+                let id = format!("{id}/{i}/{j}");
+                let at = message.timestamp.or(at);
+                match message.role.as_deref() {
+                    Some("assistant") => {
+                        let model =
+                            named(message.provider, message.response_model.or(message.model));
+                        if let (Some(usage), Some(at)) = (message.usage, at) {
+                            self.push(id, at, model, usage);
+                        }
+                    }
+                    Some("toolResult") => self.tool_result(&id, at, message),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// A call: of `model`, else of the model last replying.
+    fn push(&mut self, id: String, at: i64, model: Option<String>, usage: Usage) {
         self.calls.push(Call {
-            id: format!(
-                "pi:{}@{}",
-                entry.id.as_deref().unwrap_or(""),
-                entry.timestamp.as_deref().unwrap_or("")
-            ),
+            id,
             at,
             model: model
                 .or_else(|| self.model.clone())
@@ -75,6 +131,7 @@ impl Lines for Replies {
                 output: usage.output,
             },
             cost: usage.cost.and_then(|c| c.total),
+            ..Call::default()
         });
     }
 }
@@ -118,6 +175,8 @@ struct Message {
     usage: Option<Usage>,
     /// In ms.
     timestamp: Option<i64>,
+    /// A tool's result's, the tool's own: the subagent extension's runs.
+    details: Option<Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -196,5 +255,64 @@ mod tests {
         // The reply's own time, else its entry's.
         assert_eq!(calls[0].at, 1_792_922_402_000);
         assert_eq!(calls[3].at, iso_ms("2026-10-25T10:06:00.000Z").unwrap());
+    }
+
+    #[test]
+    fn a_subagents_replies_kept_in_its_tools_result_are_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let reply = |model: &str, output: u64| {
+            serde_json::json!({"role": "assistant", "provider": "anthropic", "model": model,
+                "usage": {"input": 100, "output": output, "cost": {"total": 0.5}}, "timestamp": 1_792_922_500_000_i64})
+        };
+        // As pi's subagent extension keeps its runs: two, the second with
+        // a subagent of its own.
+        let nested = serde_json::json!({"role": "toolResult", "toolName": "subagent",
+            "details": {"results": [{"messages": [reply("claude-haiku-5-5", 3)]}]}});
+        let result = serde_json::json!({"type": "message", "id": "t", "timestamp": "2026-10-25T10:01:00.000Z",
+        "message": {"role": "toolResult", "toolName": "subagent", "content": [], "details": {"mode": "parallel",
+            "results": [
+                {"agent": "scout", "usage": {"input": 100, "output": 7}, "messages": [
+                    {"role": "user", "content": "find it"}, reply("claude-sonnet-5-5", 7)]},
+                {"agent": "worker", "messages": [reply("claude-opus-5-5", 9), nested,
+                    // One of a shape it isn't, among them: only it is left out.
+                    {"role": "assistant", "usage": {"input": -1}}, "not a message"]},
+            ]}}});
+        // Another tool's result, whatever its details, is no call; one that
+        // says what it spent itself is.
+        let other = serde_json::json!({"type": "message", "id": "b", "timestamp": "2026-10-25T10:02:00.000Z",
+            "message": {"role": "toolResult", "toolName": "bash", "details": {"results": "usage"},
+                "usage": {"input": 1000, "output": 500}}});
+        std::fs::write(&path, format!("{result}\n{other}\n")).unwrap();
+        let mut replies = Jsonl::<Replies>::new(&path);
+        replies.update().unwrap();
+        let read: Vec<(&str, &str, u64)> = replies
+            .calls()
+            .iter()
+            .map(|c| (c.id.as_str(), c.model.as_str(), c.counts.output))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (
+                    "pi:t@2026-10-25T10:01:00.000Z/0/1",
+                    "anthropic/claude-sonnet-5-5",
+                    7
+                ),
+                (
+                    "pi:t@2026-10-25T10:01:00.000Z/1/0",
+                    "anthropic/claude-opus-5-5",
+                    9
+                ),
+                (
+                    "pi:t@2026-10-25T10:01:00.000Z/1/1/0/0",
+                    "anthropic/claude-haiku-5-5",
+                    3
+                ),
+                // Of the model last replying (none here).
+                ("pi:b@2026-10-25T10:02:00.000Z/u", "unknown", 500),
+            ]
+        );
+        assert_eq!(replies.calls()[0].cost, Some(0.5));
     }
 }

@@ -175,6 +175,17 @@ pub struct Db {
     conn: Connection,
 }
 
+/// One of the agents' files, its calls to save as of its `modified` time
+/// (ms) and `size`.
+pub struct SpentSave {
+    pub path: String,
+    pub agent: String,
+    pub session: String,
+    pub modified: i64,
+    pub size: u64,
+    pub calls: Vec<crate::tokens::Call>,
+}
+
 /// One of the agents' files whose calls are saved, as it was then.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpentFile {
@@ -851,9 +862,8 @@ impl Db {
     }
 
     /// Saves the calls in the file at `path` in place of what was saved of
-    /// it, as of its `modified` time (ms) and `size`. A call saved already
-    /// from another file (copied there by a fork) stays that file's; one that
-    /// spent nothing (it failed) isn't saved.
+    /// it, as of its `modified` time (ms) and `size`.
+    #[cfg(test)]
     pub fn save_spent(
         &self,
         path: &str,
@@ -863,36 +873,60 @@ impl Db {
         size: u64,
         calls: &[crate::tokens::Call],
     ) -> Result<()> {
+        self.save_spent_files(&[SpentSave {
+            path: path.into(),
+            agent: agent.into(),
+            session: session.into(),
+            modified,
+            size,
+            calls: calls.to_vec(),
+        }])
+    }
+
+    /// Saves the calls in each of `files` in place of what was saved of it,
+    /// in one transaction. A call saved already from another file (copied
+    /// there by a fork) stays that file's; one that spent nothing (it
+    /// failed) isn't saved.
+    pub fn save_spent_files(&self, files: &[SpentSave]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM spent WHERE path = ?1", [path])?;
-        tx.execute(
+        let mut forget = tx.prepare("DELETE FROM spent WHERE path = ?1")?;
+        let mut file = tx.prepare(
             "INSERT INTO spent_files (path, agent, session, modified, size)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (path) DO UPDATE SET agent = excluded.agent,
                  session = excluded.session, modified = excluded.modified, size = excluded.size",
-            params![path, agent, session, modified, size as i64],
         )?;
         let mut insert = tx.prepare(
             "INSERT OR IGNORE INTO spent (id, path, model, at, input, cache_read, cache_write,
                  output, cost, saved)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )?;
-        for call in calls.iter().filter(|c| c.counts.total() > 0) {
-            let (t, cost) = (&call.counts, call.cost());
-            insert.execute(params![
-                call.id,
-                path,
-                call.model,
-                call.at,
-                t.input as i64,
-                t.cache_read as i64,
-                t.cache_write as i64,
-                t.output as i64,
-                cost.map(|c| c.0),
-                cost.map(|c| c.1),
+        for f in files {
+            forget.execute([&f.path])?;
+            file.execute(params![
+                f.path,
+                f.agent,
+                f.session,
+                f.modified,
+                f.size as i64
             ])?;
+            for call in f.calls.iter().filter(|c| c.counts.total() > 0) {
+                let (t, cost) = (&call.counts, call.cost());
+                insert.execute(params![
+                    call.id,
+                    f.path,
+                    call.model,
+                    call.at,
+                    t.input as i64,
+                    t.cache_read as i64,
+                    t.cache_write as i64,
+                    t.output as i64,
+                    cost.map(|c| c.0),
+                    cost.map(|c| c.1),
+                ])?;
+            }
         }
-        drop(insert);
+        drop((forget, file, insert));
         tx.commit()?;
         Ok(())
     }

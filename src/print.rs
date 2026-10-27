@@ -307,9 +307,10 @@ pub fn print_tokens(r: &Roster, days: i64, json: bool) -> Result<()> {
         }
     };
     println!(
-        "In {span}: {} tokens in {} sessions, {} at API prices (the cache saved {})",
+        "In {span}: {} tokens in {} session{}, {} at API prices (the cache saved {})",
         amount(total.tokens.total()),
         report.sessions,
+        if report.sessions == 1 { "" } else { "s" },
         dollars(total.cost),
         dollars(total.saved)
     );

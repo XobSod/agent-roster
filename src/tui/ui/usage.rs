@@ -145,7 +145,7 @@ pub(super) fn draw_usage(f: &mut Frame, app: &App, area: Rect) {
                     Style::new().fg(MUTED),
                 )],
             };
-            if let Some(error) = &app.tokens.error {
+            if let Some(error) = app.tokens.error() {
                 lines.insert(0, Line::default());
                 lines.insert(
                     0,

@@ -1,7 +1,7 @@
 //! What the agents have spent: tokens of each kind, and what they cost or
 //! would at the API's prices. Read call by call from every conversation each
 //! agent keeps on this machine, started in roster or not
-//! (`Adapter::token_files`), and kept by the hour in roster's database, so
+//! (`Adapter::token_files`), and kept call by call in roster's database, so
 //! it outlasts the conversations (Claude deletes its own after 30 days
 //! unless told otherwise).
 
@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::db::Db;
+use crate::db::{Db, SpentSave};
 use crate::stats::{Jsonl, Lines};
 
 /// One model call: when, to which model, and what it took.
@@ -366,7 +366,7 @@ pub struct ModelSpent {
     pub spent: Spent,
 }
 
-/// How long an hour is, in ms: what was spent is kept by the hour.
+/// How long an hour is, in ms: what was spent is summed by the hour.
 const HOUR: i64 = 3_600_000;
 
 /// What changes how the files are read or what their calls cost (a reader
@@ -449,6 +449,10 @@ impl Report {
 /// than all again when it next changes.
 const KEEP_READING: Duration = Duration::from_secs(3600);
 
+/// How many files, or calls, are saved in one transaction at most.
+const BATCH_FILES: usize = 200;
+const BATCH_CALLS: usize = 50_000;
+
 /// The agents' files that changed lately, each read as far as it has grown.
 #[derive(Default)]
 pub struct Scan {
@@ -470,8 +474,8 @@ impl Scan {
     /// them was saved (all of them, saved with another `VERSION`), and saves
     /// each one's calls in place of what was. What was saved of a file gone
     /// stays, unless it was moved (codex archiving a rollout): then it's the
-    /// file where it is now.
-    pub fn update(&mut self, db: &Db) -> Result<()> {
+    /// file where it is now. Whether anything was saved or forgotten.
+    pub fn update(&mut self, db: &Db) -> Result<bool> {
         const KEY: &str = "spent:version";
         let current = db.meta(KEY)?.as_deref() == Some(VERSION);
         let mut saved = if current {
@@ -517,6 +521,7 @@ impl Scan {
                 moved.push((key.clone(), to.to_string()));
             }
         }
+        let mut changed = !moved.is_empty();
         for (from, to) in moved {
             db.forget_spent(&from)?;
             saved.remove(&from);
@@ -524,11 +529,16 @@ impl Scan {
         }
         let now = SystemTime::now();
         let mut recent = HashSet::new();
+        // Saved many files at a time, each read before (no write held
+        // meanwhile): a transaction each made the first reading of a
+        // machine's thousands of files take a disk's flush each.
+        let mut batch: Vec<SpentSave> = Vec::new();
+        let mut batched = 0;
         for f in found {
-            if now
+            let lately = now
                 .duration_since(f.modified)
-                .is_ok_and(|d| d < KEEP_READING)
-            {
+                .is_ok_and(|d| d < KEEP_READING);
+            if lately {
                 recent.insert(f.path.clone());
             }
             let at = ms(f.modified);
@@ -538,10 +548,14 @@ impl Scan {
             {
                 continue;
             }
+            // Kept to read on as it grows if it changed lately; else read,
+            // saved, and let go.
+            let mut once = None;
             let reader = match self.files.entry(f.path) {
                 Entry::Occupied(e) => e.into_mut(),
                 Entry::Vacant(e) => match crate::agent::adapter(f.agent).tokens(e.key()) {
-                    Some(reader) => e.insert(reader),
+                    Some(reader) if lately => e.insert(reader),
+                    Some(reader) => once.insert(reader),
                     None => continue,
                 },
             };
@@ -549,13 +563,31 @@ impl Scan {
             if reader.update().is_err() {
                 continue;
             }
-            db.save_spent(&f.key, f.agent, &f.session, at, f.size, reader.calls())?;
+            let calls = reader.calls().to_vec();
+            batched += calls.len();
+            batch.push(SpentSave {
+                path: f.key,
+                agent: f.agent.to_string(),
+                session: f.session,
+                modified: at,
+                size: f.size,
+                calls,
+            });
+            if batch.len() >= BATCH_FILES || batched >= BATCH_CALLS {
+                db.save_spent_files(&std::mem::take(&mut batch))?;
+                batched = 0;
+                changed = true;
+            }
+        }
+        if !batch.is_empty() {
+            db.save_spent_files(&batch)?;
+            changed = true;
         }
         if !current {
             db.set_meta(KEY, VERSION)?;
         }
         self.files.retain(|path, _| recent.contains(path));
-        Ok(())
+        Ok(changed)
     }
 }
 

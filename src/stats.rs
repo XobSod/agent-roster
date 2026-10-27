@@ -97,14 +97,27 @@ impl<T: Lines> Jsonl<T> {
             return Ok(());
         }
         file.seek(SeekFrom::Start(self.offset))?;
+        // In pieces: a file read whole the first time (100 MB of a long
+        // transcript) takes a piece's room at once, not its own.
+        const PIECE: u64 = 4 << 20;
         let mut text = std::mem::take(&mut self.rest);
-        self.offset += file.read_to_end(&mut text)? as u64;
-        let mut start = 0;
-        for end in memchr::memchr_iter(b'\n', &text) {
-            self.tally.line(&text[start..end]);
-            start = end + 1;
+        loop {
+            // What's before has no line's end.
+            let from = text.len();
+            let read = (&mut file).take(PIECE).read_to_end(&mut text)?;
+            if read == 0 {
+                break;
+            }
+            self.offset += read as u64;
+            let mut start = 0;
+            for end in memchr::memchr_iter(b'\n', &text[from..]) {
+                self.tally.line(&text[start..from + end]);
+                start = from + end + 1;
+            }
+            text.drain(..start);
         }
-        text.drain(..start);
+        // What's kept is a line not yet ended, in room of its own.
+        text.shrink_to_fit();
         self.rest = text;
         Ok(())
     }
@@ -273,6 +286,39 @@ mod tests {
         fn line(&mut self, line: &[u8]) {
             self.0.push(String::from_utf8_lossy(line).into_owned());
         }
+    }
+
+    #[test]
+    fn a_file_longer_than_a_piece_is_read_line_by_line_across_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // Lines of every length up to a few thousand, some longer than a
+        // piece, past two pieces in all, the last not yet ended.
+        let mut text = String::new();
+        let mut lines = Vec::new();
+        for i in 0..4000 {
+            let line = format!(
+                "{i}:{}",
+                "x".repeat(i % 3001 + if i == 7 { 5 << 20 } else { 0 })
+            );
+            text.push_str(&line);
+            text.push('\n');
+            lines.push(line);
+        }
+        text.push_str("half");
+        std::fs::write(&path, &text).unwrap();
+        let mut read = Jsonl::<Seen>::new(&path);
+        read.read().unwrap();
+        assert_eq!(read.tally().0.len(), lines.len());
+        assert!(read.tally().0 == lines);
+        // The line's end comes later.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b" done\n"))
+            .unwrap();
+        read.read().unwrap();
+        assert_eq!(read.tally().0.last().map(String::as_str), Some("half done"));
     }
 
     #[test]

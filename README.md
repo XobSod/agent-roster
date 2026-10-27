@@ -142,7 +142,7 @@ started in roster or not: tokens of each kind (input, read from the cache, writt
 it, output) and what they'd cost at the API's prices, by agent, with a chart of when,
 and by model. Prices are roster's own table, from pi's model catalog; a model it has no
 price for shows as unpriced, and pi's own costs count as pi says them. Roster keeps it in
-its database, by the hour, so it stays once a conversation is gone: Claude deletes its
+its database, call by call, so it stays once a conversation is gone: Claude deletes its
 after 30 days (`cleanupPeriodDays`), and you may delete them yourself.
 It goes back as far as the agents' files did when roster first read them.
 

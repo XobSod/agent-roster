@@ -188,7 +188,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         }
         app.tokens.arrived();
         if let Some(period) = period {
-            app.tokens.sum(period, &roster.db);
+            app.tokens.sum(period, tokens::sum(roster.paths.db()));
         }
         // Escape keys held back in the note editor go in once it's too late
         // for the rest (`notes.escape_ms`).
@@ -218,6 +218,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             || !app.preview.reading.ids.is_empty()
             || app.limits.asking()
             || app.tokens.reading()
+            || app.tokens.summing()
         {
             wait = wait.min(Duration::from_millis(200));
         }

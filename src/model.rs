@@ -466,16 +466,12 @@ impl Session {
                     );
                 }
             }
-            "subagent-stop" => {
-                if let Some(id) = &report.subagent {
-                    self.subagents.remove(id);
-                    // Its question goes with it.
-                    if self.state == State::NeedsInput && self.asked_by.as_ref() == Some(id) {
-                        self.set_state(State::Working, e.at);
-                    }
+            "subagent-stop" => match &report.subagent {
+                Some(id) => self.subagent_stopped(id, e.at),
+                None => {
+                    self.end_awaited_turn(e.at);
                 }
-                self.end_awaited_turn(e.at);
-            }
+            },
             // A subagent at work, or given its task, is inside the session's
             // turn, or after it (one left running): either way not a turn of
             // its own. Its question is the session's to answer, though, and
@@ -559,6 +555,16 @@ impl Session {
         self.state == State::Working
             && !self.awaiting_subagents
             && self.last_event_at.is_none_or(|t| now - t >= QUIET_MS)
+    }
+
+    /// Its subagent `id` stopped (at `at`): its question goes with it, and
+    /// its own turn over with none left, it's idle.
+    pub fn subagent_stopped(&mut self, id: &str, at: i64) {
+        self.subagents.remove(id);
+        if self.state == State::NeedsInput && self.asked_by.as_deref() == Some(id) {
+            self.set_state(State::Working, at);
+        }
+        self.end_awaited_turn(at);
     }
 
     /// Its subagents running as of `now`: those heard of lately.

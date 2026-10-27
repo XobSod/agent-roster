@@ -862,7 +862,17 @@ impl Db {
     /// turn is over with none left is idle. Each read again under the write
     /// lock, so what another roster saved meanwhile isn't overwritten; the
     /// lock taken only when there's something to forget.
-    pub fn forget_quiet_subagents(&mut self, now: i64) -> Result<()> {
+    ///
+    /// Those its agent says are finished (`finished`, given a session, a
+    /// subagent's id and when it was last heard of) are stopped too, as if
+    /// it had said so: a stop's report may be lost, or never sent (an agent
+    /// started before roster took them). What's asked of the agent is asked
+    /// before the lock.
+    pub fn settle_subagents(
+        &mut self,
+        now: i64,
+        finished: &dyn Fn(&Session, &str, i64) -> bool,
+    ) -> Result<()> {
         let waiting = |conn: &Connection| -> Result<Vec<Session>> {
             let sql = format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
@@ -872,15 +882,29 @@ impl Db {
             let rows = stmt.query_map([], session_from_row)?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         };
-        let stale = |s: &Session| s.clone().forget_quiet_subagents(now);
-        if !waiting(&self.conn)?.iter().any(stale) {
+        let mut done: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stale = false;
+        for s in waiting(&self.conn)? {
+            for (id, subagent) in &s.subagents {
+                if finished(&s, id, subagent.heard) {
+                    done.entry(s.id.clone()).or_default().push(id.clone());
+                }
+            }
+            stale |= s.clone().forget_quiet_subagents(now);
+        }
+        if done.is_empty() && !stale {
             return Ok(());
         }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for mut s in waiting(&tx)? {
-            if s.forget_quiet_subagents(now) {
+            let before = s.clone();
+            for id in done.get(&s.id).into_iter().flatten() {
+                s.subagent_stopped(id, now);
+            }
+            s.forget_quiet_subagents(now);
+            if s != before {
                 save_session(&tx, &s)?;
             }
         }
@@ -1955,6 +1979,36 @@ mod tests {
         after.awaiting_subagents = true;
         db.save_changes(&before, &after).unwrap();
         assert_eq!(db.session(&s.id).unwrap(), after);
+    }
+
+    #[test]
+    fn subagents_their_agent_says_are_finished_are_stopped() {
+        let (mut db, mut s) = db_with_session();
+        let now = crate::util::now_ms();
+        let at = |heard| crate::model::Subagent {
+            kind: None,
+            started: heard,
+            heard,
+        };
+        s.state = crate::model::State::Working;
+        s.awaiting_subagents = true;
+        s.subagents = [("a".to_string(), at(now)), ("b".to_string(), at(now))].into();
+        db.save_session(&s).unwrap();
+        let only =
+            |done: &'static [&'static str]| move |_: &Session, id: &str, _: i64| done.contains(&id);
+        db.settle_subagents(now, &only(&[])).unwrap();
+        assert_eq!(db.session(&s.id).unwrap().subagents.len(), 2);
+        db.settle_subagents(now, &only(&["a"])).unwrap();
+        let after = db.session(&s.id).unwrap();
+        assert_eq!(after.subagents.keys().collect::<Vec<_>>(), ["b"]);
+        assert_eq!(after.state, crate::model::State::Working);
+        db.settle_subagents(now, &only(&["b"])).unwrap();
+        let after = db.session(&s.id).unwrap();
+        assert!(after.subagents.is_empty());
+        assert_eq!(
+            (after.state, after.unread),
+            (crate::model::State::Idle, true)
+        );
     }
 
     #[test]

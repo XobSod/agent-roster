@@ -166,11 +166,11 @@ impl Adapter for Claude {
             .and_then(Value::as_str)
             .map(String::from)
             .filter(|_| report.subagent.is_none());
-        Report {
-            effort,
-            subagents_start_said: report.subagent.is_some(),
-            ..report
-        }
+        Report { effort, ..report }
+    }
+
+    fn says_subagents_start(&self) -> bool {
+        true
     }
 
     fn names_its_task(&self) -> bool {
@@ -196,6 +196,10 @@ impl Adapter for Claude {
 
     fn subagent_info(&self, transcript: &Path, id: &str) -> super::SubagentInfo {
         subagents::info(transcript, id)
+    }
+
+    fn subagent_finished(&self, transcript: &Path, id: &str, heard: i64) -> bool {
+        subagents::finished(transcript, id, heard)
     }
 
     fn subagent_doing(&self, file: &Path) -> Option<String> {

@@ -197,8 +197,13 @@ impl Roster {
     pub fn refresh(&mut self) -> Result<()> {
         let now = now_ms();
         self.db.fold_events(now)?;
-        // A subagent unheard of for long is taken for gone.
-        self.db.forget_quiet_subagents(now)?;
+        // A subagent its agent says is finished is, and one unheard of for
+        // long is taken for gone.
+        self.db.settle_subagents(now, &|s, id, heard| {
+            (s.transcript_path.as_deref()).is_some_and(|path| {
+                agent::adapter(&s.agent).subagent_finished(Path::new(path), id, heard)
+            })
+        })?;
         let panes = self.tmux.panes()?;
         self.resized.retain(|_, until| *until > now);
         // Typed once every session is saved, each claimed just before it's

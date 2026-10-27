@@ -40,6 +40,29 @@ pub(super) fn info(transcript: &Path, id: &str) -> SubagentInfo {
     }
 }
 
+/// Whether subagent `id` is finished: its meta file says so (Claude marks
+/// it as a subagent ends, since 2.1.301), written since it was last heard
+/// of (`heard`, ms), not left from a run it was taken up again after.
+pub(super) fn finished(transcript: &Path, id: &str, heard: i64) -> bool {
+    let dir = transcript.with_extension("").join("subagents");
+    let Some(file) = find(&dir, &format!("agent-{id}.meta.json"), 3) else {
+        return false;
+    };
+    #[derive(Deserialize)]
+    struct Done {
+        #[serde(default)]
+        finished: bool,
+    }
+    let written = (fs::metadata(&file).and_then(|m| m.modified()).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |t| t.as_millis() as i64);
+    written >= heard
+        && fs::read(&file)
+            .ok()
+            .and_then(|text| serde_json::from_slice::<Done>(&text).ok())
+            .is_some_and(|d| d.finished)
+}
+
 /// How much of the end of a subagent's transcript is read for its latest
 /// step: a tool's call is short, its result (which comes after) may not be.
 const TAIL: u64 = 256 << 10;
@@ -313,5 +336,29 @@ mod tests {
         );
         let read = call("Read", serde_json::json!({"file_path": "/w/a.rs"}));
         assert_eq!(doing(&[task, long, read]).as_deref(), Some("Reading a.rs"));
+    }
+
+    #[test]
+    fn a_subagent_is_finished_once_claude_marks_it_since_last_heard_of() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("c1.jsonl");
+        let runs = dir.path().join("c1/subagents");
+        fs::create_dir_all(&runs).unwrap();
+        let meta = runs.join("agent-a1.meta.json");
+        let written = || {
+            let t = fs::metadata(&meta).unwrap().modified().unwrap();
+            t.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+        };
+        assert!(!super::finished(&transcript, "a1", 0));
+        fs::write(&meta, r#"{"agentType":"fork","description":"Fix it"}"#).unwrap();
+        assert!(!super::finished(&transcript, "a1", 0));
+        fs::write(
+            &meta,
+            r#"{"agentType":"fork","description":"Fix it","finished":true}"#,
+        )
+        .unwrap();
+        assert!(super::finished(&transcript, "a1", written() - 1));
+        // Taken up again since: the mark is its last run's.
+        assert!(!super::finished(&transcript, "a1", written() + 1000));
     }
 }

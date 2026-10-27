@@ -522,6 +522,10 @@ mod tests {
                 ..Report::default()
             }
         );
+        // Its subagents' starts aren't taken (yet): none is taken to have
+        // started from its other reports.
+        let payload = r#"{"session_id":"01a1","agent_id":"019a","agent_type":"worker"}"#;
+        assert!(!crate::agent::read_report("codex", Some(payload)).subagents_start_said);
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }

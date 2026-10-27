@@ -68,6 +68,13 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// Whether it reports each of its subagents starting and stopping
+    /// (`subagent-start`, `subagent-stop`): then one heard of that wasn't
+    /// heard starting started all the same, its start's report lost.
+    fn says_subagents_start(&self) -> bool {
+        false
+    }
+
     /// Whether starting it again resumes its conversation.
     fn resumes(&self) -> bool {
         false
@@ -183,6 +190,13 @@ pub trait Adapter: Sync {
     /// it runs, as far as it says yet.
     fn subagent_info(&self, _transcript: &Path, _id: &str) -> SubagentInfo {
         SubagentInfo::default()
+    }
+
+    /// Whether its subagent `id` (in the conversation whose transcript is at
+    /// `transcript`) is finished, as its agent keeps it: since it was last
+    /// heard of (`heard`), not a run it was taken up again after.
+    fn subagent_finished(&self, _transcript: &Path, _id: &str, _heard: i64) -> bool {
+        false
     }
 
     /// What one of its subagents is doing now, from its transcript at
@@ -382,8 +396,8 @@ pub struct Report {
     pub subagent: Option<String>,
     /// What kind that subagent is (Claude's `agent_type`: Explore, …).
     pub subagent_kind: Option<String>,
-    /// Its agent says when each of its subagents starts (Claude): one not
-    /// heard starting started all the same, its start's report lost.
+    /// From a subagent of an agent that reports each starting
+    /// (`Adapter::says_subagents_start`), set as the report's read.
     pub subagents_start_said: bool,
     /// The model and effort it's running.
     pub model: Option<String>,
@@ -449,10 +463,13 @@ pub struct SubagentInfo {
 
 /// What a report from agent `name` says; nothing if its payload isn't JSON.
 pub fn read_report(name: &str, payload: Option<&str>) -> Report {
-    payload
+    let adapter = adapter(name);
+    let mut report: Report = payload
         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-        .map(|v| adapter(name).report(&v))
-        .unwrap_or_default()
+        .map(|v| adapter.report(&v))
+        .unwrap_or_default();
+    report.subagents_start_said = report.subagent.is_some() && adapter.says_subagents_start();
+    report
 }
 
 /// What an adapter may use to start its agent.

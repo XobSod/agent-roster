@@ -89,9 +89,15 @@ impl Transcript for ClaudeTranscript {
         // From the next update on, its subagents' are read too.
         self.counted.set(true);
         let mut stats = self.main.stats(model);
-        // Each reply once, whichever of their files it's in.
+        // Each reply once, whichever of their files it's in; one the
+        // transcript has too is the session's own (a forked subagent's file
+        // begins with a copy of the reply it was forked from).
+        let own = &self.main.tally().outputs;
         let mut replies: HashMap<&str, u64> = HashMap::new();
         for call in self.subagents.values().flat_map(|r| r.tally().calls()) {
+            if (call.id.strip_prefix("claude:")).is_some_and(|id| own.contains_key(id)) {
+                continue;
+            }
             let output = replies.entry(call.id.as_str()).or_default();
             *output = (*output).max(call.counts.output);
         }
@@ -555,6 +561,14 @@ mod tests {
         t.update().unwrap();
         let s = t.stats(None);
         assert_eq!((s.output_tokens, s.context_used), (Some(600), Some(1012)));
+        // A forked one's: a copy of the session's reply first, counted once.
+        let copy = line(
+            serde_json::json!({"type": "assistant", "timestamp": "2026-10-25T18:00:00.000Z",
+            "message": {"id": "m1", "model": "claude-opus-5-5", "usage": {"input_tokens": 2, "output_tokens": 500}}}),
+        );
+        std::fs::write(dir.path().join("c1/subagents/agent-a2.jsonl"), copy).unwrap();
+        t.update().unwrap();
+        assert_eq!(t.stats(None).output_tokens, Some(600));
         // For its prompts alone, they're not read.
         let mut t = ClaudeTranscript::new(&path);
         t.update().unwrap();

@@ -93,6 +93,10 @@ else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--eff
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
 Roster can tell when one is open in Claude, but not in pi or Codex.
 
+Under the preview's header is what roster knows of the session: when it was made, its
+prompts, the time it worked, and from its agent's conversation, the context used,
+output tokens (its subagents' too), cost and lines changed.
+
 Each session can have a note, what's left to do in it, say. `s o` opens it under the
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
 insert and visual mode, motions, `C`, `r` (`rx` ticks a box, `.` the next), `ciw` and

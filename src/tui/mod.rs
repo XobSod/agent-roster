@@ -64,9 +64,25 @@ pub fn run(roster: &mut Roster) -> Result<()> {
         app.fail(notice);
     }
     let mut terminal = ratatui::init();
+    restore_only_on_the_main_threads_panic();
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
     result
+}
+
+/// ratatui's panic hook gives the terminal back whichever thread panicked: a
+/// thread's (asking the accounts, reading what was spent) left the TUI
+/// running in a terminal given back. Only the main thread's gives it back
+/// now; another thread's ends that thread, which whatever waits on it hears
+/// of (an account's asking says roster failed), and prints nothing over the
+/// screen.
+fn restore_only_on_the_main_threads_panic() {
+    let restoring = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            restoring(info);
+        }
+    }));
 }
 
 /// One TUI at a time: two would each act on what they last read, and size
@@ -966,6 +982,36 @@ fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_main_threads_panic_gives_the_terminal_back() {
+        // In a process of its own: the panic hook is the process's.
+        const CHILD: &str = "ROSTER_TEST_PANIC_HOOK";
+        if std::env::var_os(CHILD).is_none() {
+            let name = "tui::tests::only_the_main_threads_panic_gives_the_terminal_back";
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}");
+            return;
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RESTORED: AtomicUsize = AtomicUsize::new(0);
+        std::panic::set_hook(Box::new(|_| {
+            RESTORED.fetch_add(1, Ordering::SeqCst);
+        }));
+        restore_only_on_the_main_threads_panic();
+        // A thread's panic: the terminal stays the TUI's.
+        let _ = std::thread::spawn(|| panic!("asking failed")).join();
+        assert_eq!(RESTORED.load(Ordering::SeqCst), 0);
+        // The main thread's gives it back.
+        let main = std::thread::Builder::new().name("main".into());
+        let _ = main.spawn(|| panic!("the TUI failed")).unwrap().join();
+        assert_eq!(RESTORED.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn a_headings_transcripts_are_read_on_a_thread_as_many_as_show() {

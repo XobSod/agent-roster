@@ -21,10 +21,17 @@ fn stale(usage: &Usage, now: i64) -> bool {
     now - usage.at > STALE_MS
 }
 
+/// A window's pace, none for one known long ago (`stale`): its use then
+/// against its time now says nothing.
+fn paced(window: &Window, stale: bool, now: i64) -> Option<Pace> {
+    window.pace(now).filter(|_| !stale)
+}
+
 /// The sidebar's line: what's left of each agent's windows, shortest first,
 /// each with its pace (`claude 69%▲ 48%◆  codex 93%▼ 87%▼`) in its colour,
-/// by its mark instead of its name where names don't fit; dim if old. None
-/// until an agent has said.
+/// by its mark instead of its name where names don't fit, then only each
+/// one's shortest window, then fewer agents: never a number cut short. Dim if
+/// old. None until an agent has said, or if not even one window fits.
 pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'static>> {
     let said: Vec<(&str, &Usage)> = app
         .limits
@@ -32,12 +39,11 @@ pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'stat
         .iter()
         .filter_map(|s| Some((s.agent.as_str(), s.usage.as_ref()?)))
         .collect();
-    if said.is_empty() {
-        return None;
-    }
-    let line = |named: bool| {
+    // The first `agents` that said, each named or by its mark, with its
+    // first `windows`.
+    let line = |agents: usize, named: bool, windows: usize| {
         let mut spans = vec![Span::raw(" ")];
-        for (i, (agent, usage)) in said.iter().enumerate() {
+        for (i, (agent, usage)) in said.iter().take(agents).enumerate() {
             if i > 0 {
                 spans.push(Span::raw("  "));
             }
@@ -47,8 +53,8 @@ pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'stat
             } else {
                 glyph(agent)
             });
-            for w in &usage.windows {
-                let pace = w.pace(now);
+            for w in usage.windows.iter().take(windows) {
+                let pace = paced(w, dim, now);
                 let color = if dim { FAINT } else { pace_color(pace, MUTED) };
                 let left = if w.over(now) {
                     "–".into()
@@ -65,19 +71,25 @@ pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'stat
         spans
     };
     let width_of = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
-    let named = line(true);
-    let spans = if width_of(&named) <= width {
-        named
-    } else {
-        line(false)
-    };
-    Some(Line::from(fit(width, spans, Vec::new())))
+    let all = usize::MAX;
+    let shorter = (1..said.len()).rev().map(|agents| line(agents, false, 1));
+    [
+        line(all, true, all),
+        line(all, false, all),
+        line(all, false, 1),
+    ]
+    .into_iter()
+    .chain(shorter)
+    .filter(|_| !said.is_empty())
+    .find(|spans| width_of(spans) <= width)
+    .map(Line::from)
 }
 
 /// What's left of a window as a bar `width` long, full when none of it is
 /// used, in eighths, with a mark where as much of its time is left: a bar
-/// ending short of the mark is used faster than its time goes.
-fn bar(window: &Window, width: usize, now: i64) -> Vec<Span<'static>> {
+/// ending short of the mark is used faster than its time goes. Known long ago
+/// (`stale`), it's dim, without the mark.
+fn bar(window: &Window, width: usize, stale: bool, now: i64) -> Vec<Span<'static>> {
     const PARTS: [&str; 7] = ["▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let over = window.over(now);
     let left = if over { 0.0 } else { window.left() };
@@ -86,9 +98,13 @@ fn bar(window: &Window, width: usize, now: i64) -> Vec<Span<'static>> {
     // is the ninth, not 7.999… of them).
     let mark = window
         .elapsed(now)
-        .filter(|_| !over)
+        .filter(|_| !over && !stale)
         .map(|gone| (((1.0 - gone) * width as f64 + 1e-9) as usize).min(width.saturating_sub(1)));
-    let fill = Style::new().fg(pace_color(window.pace(now), ACCENT));
+    // Dim as what's said beside it, known long ago.
+    let fill = Style::new().fg(match stale {
+        true => FAINT,
+        false => pace_color(window.pace(now), ACCENT),
+    });
     let empty = Style::new().fg(FAINT);
     let marked = Style::new().fg(ratatui::style::Color::White).bold();
     (0..width)
@@ -265,13 +281,13 @@ fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
                     format!("  {}  ", pad(&w.label(), label_w)),
                     Style::new().fg(MUTED),
                 )];
-                spans.extend(bar(w, bar_w, now));
+                spans.extend(bar(w, bar_w, dim, now));
                 let left = if w.over(now) {
                     "–".into()
                 } else {
                     w.percent()
                 };
-                let pace = w.pace(now);
+                let pace = paced(w, dim, now);
                 let mut text = format!("{left:>5} left");
                 if let Some(pace) = pace {
                     text.push_str(&format!("  {} {}", pace.mark(), pace.word()));
@@ -587,20 +603,26 @@ mod tests {
             used: 45.0,
             resets_at: Some(4 * hour),
         };
-        assert_eq!(text(&bar(&w, 10, 0)), "█████▌··│·");
+        assert_eq!(text(&bar(&w, 10, false, 0)), "█████▌··│·");
+        // Known long ago: its use then, no mark of its time now, no pace.
+        let old = bar(&w, 10, true, 0);
+        assert_eq!(text(&old), "█████▌····");
+        assert!(old.iter().all(|s| s.style.fg == Some(FAINT)));
+        assert_eq!(paced(&w, false, 0), Some(Pace::Fast));
+        assert_eq!(paced(&w, true, 0), None);
         // Started over: empty, unmarked.
-        assert_eq!(text(&bar(&w, 10, 5 * hour)), "··········");
+        assert_eq!(text(&bar(&w, 10, false, 5 * hour)), "··········");
         // When it starts over unknown: no mark.
         let w = Window {
             resets_at: None,
             used: 25.0,
             ..w
         };
-        assert_eq!(text(&bar(&w, 4, 0)), "███·");
+        assert_eq!(text(&bar(&w, 4, false, 0)), "███·");
         // None used: full; all of it: empty.
         let w = Window { used: 0.0, ..w };
-        assert_eq!(text(&bar(&w, 4, 0)), "████");
+        assert_eq!(text(&bar(&w, 4, false, 0)), "████");
         let w = Window { used: 100.0, ..w };
-        assert_eq!(text(&bar(&w, 4, 0)), "····");
+        assert_eq!(text(&bar(&w, 4, false, 0)), "····");
     }
 }

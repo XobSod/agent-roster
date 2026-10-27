@@ -92,13 +92,16 @@ impl Limits {
         let Some(asking) = &self.asking else {
             return false;
         };
-        let answers = match asking.try_recv() {
-            Ok(answers) => answers,
+        let answer = match asking.try_recv() {
+            Ok(answers) => Some(answers),
             Err(TryRecvError::Empty) => return false,
-            Err(TryRecvError::Disconnected) => Vec::new(),
+            // The thread gone without an answer: what was known stays.
+            Err(TryRecvError::Disconnected) => None,
         };
         self.asking = None;
-        self.take(answers);
+        if let Some(answers) = answer {
+            self.take(answers);
+        }
         true
     }
 
@@ -281,6 +284,19 @@ mod tests {
         write(30.0);
         s.state = State::Stopped;
         assert!(!limits.read_transcripts(std::slice::from_ref(&s)));
+    }
+
+    #[test]
+    fn asking_that_ends_without_an_answer_keeps_what_was_known() {
+        let mut limits = Limits::default();
+        limits.take(vec![("claude".into(), Ok(usage(10.0, 1)))]);
+        limits.ask(|| panic!("no answer"));
+        let by = Instant::now() + Duration::from_secs(2);
+        while !limits.arrived() && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!limits.asking());
+        assert_eq!(limits.agents[0].usage, Some(usage(10.0, 1)));
     }
 
     #[test]

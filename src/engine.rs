@@ -810,7 +810,7 @@ impl Roster {
                     .collect();
                 asking
                     .into_iter()
-                    .filter_map(|(name, said)| Some((name.clone(), said.join().ok()??)))
+                    .filter_map(|(name, said)| asked(name, said.join()))
                     .collect()
             })
         }
@@ -1431,6 +1431,23 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// What asking agent `name` what its account has used came to: its answer;
+/// none without an account; or, where asking it failed on a mistake of
+/// roster's (its thread panicked), that, rather than seeming to have none.
+fn asked(
+    name: &str,
+    joined: std::thread::Result<Option<Result<crate::usage::Usage>>>,
+) -> Option<(String, Result<crate::usage::Usage>)> {
+    let said = match joined {
+        Ok(said) => said?,
+        Err(panic) => Err(anyhow::anyhow!(
+            "roster failed asking it: {}",
+            util::panic_message(&*panic)
+        )),
+    };
+    Some((name.to_string(), said))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1466,6 +1483,23 @@ mod tests {
             "the first prompt is too long for codex's command line: 200000 bytes, where it takes 131071 at most"
         );
         assert!(check_prompt_fits("codex", &"x".repeat(LONGEST_ARGUMENT + 1)).is_err());
+    }
+
+    #[test]
+    fn asking_that_fails_on_a_mistake_of_rosters_says_so() {
+        // A panic in an agent's asking: an answer that says so.
+        let panicked = std::thread::spawn(|| -> Option<Result<crate::usage::Usage>> {
+            panic!("attempt to multiply with overflow")
+        })
+        .join();
+        let (agent, said) = asked("claude", panicked).unwrap();
+        assert_eq!(agent, "claude");
+        assert_eq!(
+            said.unwrap_err().to_string(),
+            "roster failed asking it: attempt to multiply with overflow"
+        );
+        // No account: no answer.
+        assert!(asked("pi", Ok(None)).is_none());
     }
 
     #[test]

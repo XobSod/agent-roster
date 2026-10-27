@@ -113,6 +113,18 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// What a thread that panicked said, as `panic!` was given it.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(said), _) => said.to_string(),
+        (_, Some(said)) => said.clone(),
+        _ => "it panicked".into(),
+    }
+}
+
 /// `s` with its first letter in upper case: "claude" → "Claude".
 pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -188,7 +200,7 @@ pub fn local_when(ms: i64, now: i64) -> String {
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         (!unsafe { libc::localtime_r(&secs, &mut tm) }.is_null()).then_some(tm)
     };
-    let (Some(at), Some(today)) = (tm(ms + 30_000), tm(now)) else {
+    let (Some(at), Some(today)) = (tm(ms.saturating_add(30_000)), tm(now)) else {
         return "??:??".into();
     };
     let time = format!("{:02}:{:02}", at.tm_hour, at.tm_min);
@@ -227,19 +239,36 @@ pub fn iso_ms(text: &str) -> Option<i64> {
         number(hms.next()?)?,
         number(hms.next()?)?,
     );
+    // Digits only, so its first three are three bytes.
     let ms = match fraction {
         "" => 0,
-        f => number(&format!("{f:0<3}")[..3])?,
+        f if f.bytes().all(|b| b.is_ascii_digit()) => number(&format!("{f:0<3}")[..3])?,
+        _ => return None,
     };
     let offset = match zone {
         "Z" => 0,
         _ => {
             let sign = if zone.starts_with('-') { -1 } else { 1 };
             let (oh, om) = zone[1..].split_once(':')?;
-            sign * (number(oh)? * 60 + number(om)?)
+            let (oh, om) = (number(oh)?, number(om)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 60 + om)
         }
     };
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    // What a calendar and a clock hold (a leap second is a minute's 60th),
+    // in years of four figures, which nothing below can overflow.
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => return None,
+    };
+    if !(1..=9999).contains(&y) || !(1..=month_days).contains(&d) || h > 23 || min > 59 || sec > 60
+    {
         return None;
     }
     // Days since the epoch of a civil date (Howard Hinnant's algorithm).
@@ -348,6 +377,26 @@ mod tests {
         assert_eq!(iso_ms("2026-10-25"), None);
         assert_eq!(iso_ms("2026-13-01T00:00:00Z"), None);
         assert_eq!(iso_ms("soon"), None);
+        // Nothing a calendar or a clock doesn't hold, nor a year so far off
+        // its ms don't fit.
+        for absurd in [
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-10-25T24:00:00Z",
+            "2026-10-25T12:60:00Z",
+            "2026-10-25T12:00:00+99:99",
+            "0000-01-01T00:00:00Z",
+            "999999999999-01-01T00:00:00Z",
+            "99999999999999999999-01-01T00:00:00Z",
+            "2026-10-25T18:00:00.ééé+00:00",
+            "2026-10-25T18:00:00.12é4Z",
+        ] {
+            assert_eq!(iso_ms(absurd), None, "{absurd}");
+        }
+        assert!(iso_ms("9999-12-31T23:59:60.999-23:59").is_some());
+        // Whatever it's given, a time is said.
+        assert!(local_when(i64::MAX, 0).len() >= 5);
+        assert!(local_when(i64::MIN, 0).len() >= 5);
     }
 
     #[test]

@@ -89,9 +89,9 @@ fn reset_credits(credits: &Value, now: i64) -> Option<String> {
         .collect();
     let first = available
         .iter()
-        .filter_map(|c| c["expiresAt"].as_i64())
+        .filter_map(|c| c["expiresAt"].as_i64()?.checked_mul(1000))
         .min()
-        .map(|at| local_when(at * 1000, now));
+        .map(|at| local_when(at, now));
     Some(match (available.len(), first) {
         (0, _) => return None,
         (1, Some(at)) => format!("1 full reset left, it expires {at}"),
@@ -128,7 +128,7 @@ pub(super) fn limits(limits: &Value, at: i64) -> Option<Usage> {
                 used: field(w, ["used_percent", "usedPercent"]).as_f64()?,
                 resets_at: field(w, ["resets_at", "resetsAt"])
                     .as_i64()
-                    .map(|s| s * 1000),
+                    .and_then(|s| s.checked_mul(1000)),
             })
         })
         .collect();

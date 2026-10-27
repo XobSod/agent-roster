@@ -88,18 +88,19 @@ impl Window {
     /// How much of it has gone by at `now`, from 0 to 1; None if when it
     /// starts over isn't known.
     pub fn elapsed(&self, now: i64) -> Option<f64> {
-        let left = (self.resets_at? - now).max(0) as f64;
-        let length = (self.minutes.max(1) * 60_000) as f64;
+        let left = self.resets_at?.saturating_sub(now).max(0) as f64;
+        let length = self.minutes.max(1).saturating_mul(60_000) as f64;
         Some((1.0 - left / length).clamp(0.0, 1.0))
     }
 
     /// How it's used against its time; None once it has started over, or
-    /// not knowing when it does, unless it's used up.
+    /// not knowing when it does, unless it's used up: as soon as what's left
+    /// shows as 0% (`percent`).
     pub fn pace(&self, now: i64) -> Option<Pace> {
         if self.over(now) {
             return None;
         }
-        if self.used >= 100.0 {
+        if self.left() < 1.0 {
             return Some(Pace::Out);
         }
         let ahead = self.used - self.elapsed(now)? * 100.0;
@@ -129,7 +130,11 @@ impl Window {
         Some(if at <= now {
             format!("started over at {}", local_when(at, now))
         } else {
-            format!("resets {}, in {}", local_when(at, now), until(at - now))
+            format!(
+                "resets {}, in {}",
+                local_when(at, now),
+                until(at.saturating_sub(now))
+            )
         })
     }
 }
@@ -170,6 +175,10 @@ mod tests {
         assert_eq!(at(24.9), Some(Pace::Even));
         assert_eq!(at(25.1), Some(Pace::Fast));
         assert_eq!(at(100.0), Some(Pace::Out));
+        // 0% left as shown, rounded down: used up, not merely fast.
+        assert_eq!(at(99.6), Some(Pace::Out));
+        assert_eq!(window(300, 99.6, 4 * HOUR).percent(), "0%");
+        assert_eq!(at(99.0), Some(Pace::Fast));
         let half = window(300, 50.0, 150 * 60_000);
         assert_eq!(half.elapsed(0), Some(0.5));
         // Started over since: what it said no longer holds.

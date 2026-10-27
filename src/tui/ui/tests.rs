@@ -1031,10 +1031,41 @@ fn the_sidebar_ends_with_whats_left_of_the_accounts_limits() {
     let screen = render(&app, 100, 12);
     let last = screen.lines().nth(10).unwrap();
     assert!(last.starts_with(" ✱ 0%✕ 100%▼  ⌬ 100%▼ 100%▼"), "{screen}");
+    // Known long ago: what was left then, without a pace.
+    let mut old = said("claude", 90.0, 85.0);
+    old.usage.as_mut().unwrap().at -= 60 * 60_000;
+    app.limits.agents = vec![old];
+    let screen = render(&app, 100, 12);
+    let last = screen.lines().nth(10).unwrap();
+    assert!(last.starts_with(" claude 10% 15% "), "{screen}");
     // Turned off.
     app.sidebar_usage = false;
     let screen = render(&app, 100, 12);
     assert!(!screen.contains('%'), "{screen}");
+}
+
+#[test]
+fn the_sidebars_line_drops_whole_windows_rather_than_cut_one() {
+    let mut app = app();
+    app.limits.agents = vec![said("claude", 0.0, 0.0), said("codex", 0.0, 0.0)];
+    let now = now_ms();
+    let line = |width| usage_line(&app, width, now).map(|l| l.to_string());
+    let named = " claude 100%▼ 100%▼  codex 100%▼ 100%▼";
+    assert_eq!(line(named.width()).as_deref(), Some(named));
+    // Marks for names, then each one's shortest window, then fewer agents.
+    assert_eq!(
+        line(named.width() - 1).as_deref(),
+        Some(" ✱ 100%▼ 100%▼  ⌬ 100%▼ 100%▼")
+    );
+    assert_eq!(line(28).as_deref(), Some(" ✱ 100%▼  ⌬ 100%▼"));
+    assert_eq!(line(16).as_deref(), Some(" ✱ 100%▼"));
+    assert_eq!(line(7), None);
+    // Whatever the width, nothing is cut short.
+    for width in 0..60 {
+        if let Some(text) = line(width) {
+            assert!(text.width() <= width && !text.contains('…'), "{text}");
+        }
+    }
 }
 
 #[test]

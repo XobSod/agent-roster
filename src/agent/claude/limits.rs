@@ -27,8 +27,8 @@ const PRINT_LOGIN: &str = r#"f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials
 /// an API key, or never logged in).
 pub(super) fn ask(ask: &Ask<'_>) -> Option<Result<Usage>> {
     let argv = ["sh", "-c", PRINT_LOGIN].map(String::from).into();
-    let login = match ask(Question::of(argv)) {
-        Ok(file) => login(&file)?,
+    let login = match ask(Question::of(argv)).and_then(|file| login(&file)) {
+        Ok(login) => login?,
         Err(e) => return Some(Err(e.context("couldn't read Claude's login"))),
     };
     let now = now_ms();
@@ -72,15 +72,24 @@ struct Login {
     plan: Option<String>,
 }
 
-/// Claude's login to Claude.ai, from the file it keeps it in.
-fn login(file: &str) -> Option<Login> {
-    let file: Value = serde_json::from_str(file).ok()?;
+/// Claude's login to Claude.ai, from the file it keeps it in: None if there's
+/// none, nor one in it (it may hold only MCP servers' logins). A file that
+/// isn't JSON (something else printed before it, say) is an error, not taken
+/// for no login; what it holds isn't said, being secret.
+fn login(file: &str) -> Result<Option<Login>> {
+    if file.trim().is_empty() {
+        return Ok(None);
+    }
+    let file: Value = serde_json::from_str(file).context("it isn't JSON")?;
     let login = &file["claudeAiOauth"];
-    Some(Login {
-        token: login["accessToken"].as_str()?.to_string(),
+    let Some(token) = login["accessToken"].as_str() else {
+        return Ok(None);
+    };
+    Ok(Some(Login {
+        token: token.to_string(),
         expires_at: login["expiresAt"].as_i64().unwrap_or(i64::MAX),
         plan: login["subscriptionType"].as_str().map(String::from),
-    })
+    }))
 }
 
 /// The service's answer, as curl printed it with its status on a last line,
@@ -192,6 +201,18 @@ mod tests {
         assert_eq!(usage.windows[0].used, 5.0);
         assert_eq!(usage.windows[0].resets_at, None);
         assert_eq!(usage.plan.as_deref(), Some("pro"));
+        // A login file that isn't JSON (an env file printed into it): said,
+        // without what it holds.
+        *file.borrow_mut() = "env loaded\n{\"claudeAiOauth\":{\"accessToken\":\"t0k\"}}".into();
+        let err = format!("{:#}", super::ask(&ask).unwrap().unwrap_err());
+        assert!(
+            err.starts_with("couldn't read Claude's login: it isn't JSON"),
+            "{err}"
+        );
+        assert!(!err.contains("t0k"), "{err}");
+        // One with only MCP servers' logins: none.
+        *file.borrow_mut() = r#"{"mcpOAuth":{"server":{"accessToken":"m"}}}"#.into();
+        assert!(super::ask(&ask).is_none());
         // Its login couldn't be read: said.
         let failing = |_: Question<'_>| anyhow::bail!("env file failed");
         let err = super::ask(&failing).unwrap().unwrap_err();

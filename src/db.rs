@@ -14,7 +14,7 @@ use rusqlite::{
 use crate::model::{Event, Project, Session, State};
 use crate::note::{Note, Whose};
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -62,7 +62,9 @@ CREATE TABLE sessions (
     note_pin          INTEGER,
     note_at           INTEGER,
     asked_by          TEXT,
-    given_prompt      TEXT
+    given_prompt      TEXT,
+    subagents         TEXT,
+    awaiting_subagents INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -122,7 +124,8 @@ const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.note, s.note_pin, s.note_at";
+    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting_subagents,
+    s.note, s.note_pin, s.note_at";
 
 const PROJECT_COLUMNS: &str = "id, name, origin, agent, model, effort, note, note_pin, note_at";
 
@@ -206,6 +209,11 @@ const MIGRATIONS: &[(i64, Migration)] = &[
         Sql("ALTER TABLE sessions ADD COLUMN given_prompt TEXT;"),
     ),
     (12, Code(spent_by_number)),
+    (
+        13,
+        Sql("ALTER TABLE sessions ADD COLUMN subagents TEXT;
+         ALTER TABLE sessions ADD COLUMN awaiting_subagents INTEGER NOT NULL DEFAULT 0;"),
+    ),
 ];
 
 /// Schema 12: what was spent refers to its file and model by number, and to
@@ -669,11 +677,17 @@ impl Db {
             fork_from,
             asked_by,
             given_prompt,
+            subagents,
+            awaiting_subagents,
         } = after;
         let state_name = state.as_str();
+        let subagents_text = subagents_text(subagents);
         let mut set: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
         if before.state != *state {
             set.push(("state", &state_name));
+        }
+        if before.subagents != *subagents {
+            set.push(("subagents", &subagents_text));
         }
         macro_rules! changed {
             ($($field:ident),*) => {$(
@@ -705,7 +719,8 @@ impl Db {
             worked_ms,
             fork_from,
             asked_by,
-            given_prompt
+            given_prompt,
+            awaiting_subagents
         );
         if set.is_empty() {
             return Ok(());
@@ -842,6 +857,37 @@ impl Db {
 
     /// Applies events reported since the last fold, in one transaction, so any
     /// number of roster processes can fold concurrently. Returns how many were applied.
+    /// Forgets the subagents sessions haven't heard of for a while
+    /// (`Session::forget_quiet_subagents`), as of `now`; a session whose own
+    /// turn is over with none left is idle. Each read again under the write
+    /// lock, so what another roster saved meanwhile isn't overwritten; the
+    /// lock taken only when there's something to forget.
+    pub fn forget_quiet_subagents(&mut self, now: i64) -> Result<()> {
+        let waiting = |conn: &Connection| -> Result<Vec<Session>> {
+            let sql = format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.deleted_at IS NULL AND (s.subagents IS NOT NULL OR s.awaiting_subagents)"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map([], session_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let stale = |s: &Session| s.clone().forget_quiet_subagents(now);
+        if !waiting(&self.conn)?.iter().any(stale) {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for mut s in waiting(&tx)? {
+            if s.forget_quiet_subagents(now) {
+                save_session(&tx, &s)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn fold_events(&mut self, now: i64) -> Result<usize> {
         // Most of the time nothing is new: find that out without taking the
         // write lock, which agents' hooks wait for.
@@ -931,7 +977,7 @@ impl Db {
 
     /// Gives many free pages back (hundreds of MB, say), a few MB at a time
     /// with a pause between, for hooks' reports to be written meanwhile
-    /// (they wait half a second at most); then the log of those writes,
+    /// meanwhile); then the log of those writes,
     /// which holds as much again until no roster has the file open (the TUI
     /// may run for days), gives its room back too.
     fn give_back_free_pages_slowly(&self) -> Result<()> {
@@ -1318,7 +1364,9 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              worked_ms = :worked_ms,
              fork_from = :fork_from,
              asked_by = :asked_by,
-             given_prompt = :given_prompt
+             given_prompt = :given_prompt,
+             subagents = :subagents,
+             awaiting_subagents = :awaiting_subagents
          WHERE id = :id",
         named_params! {
             ":id": s.id,
@@ -1346,6 +1394,8 @@ fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":fork_from": s.fork_from,
             ":asked_by": s.asked_by,
             ":given_prompt": s.given_prompt,
+            ":subagents": subagents_text(&s.subagents),
+            ":awaiting_subagents": s.awaiting_subagents,
         },
     )
     .map_err(|e| {
@@ -1452,8 +1502,18 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         fork_from: r.get("fork_from")?,
         asked_by: r.get("asked_by")?,
         given_prompt: r.get("given_prompt")?,
+        subagents: (r.get::<_, Option<String>>("subagents")?)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default(),
+        awaiting_subagents: r.get("awaiting_subagents")?,
         note: note_from_row(r)?,
     })
+}
+
+/// A session's subagents as kept: JSON, by id when each was last heard of;
+/// nothing for none.
+fn subagents_text(subagents: &std::collections::BTreeMap<String, i64>) -> Option<String> {
+    (!subagents.is_empty()).then(|| serde_json::to_string(subagents).unwrap_or_default())
 }
 
 /// The highest project id given, 0 for none.
@@ -1861,6 +1921,8 @@ mod tests {
         after.fork_from = Some("f".into());
         after.asked_by = Some("a1".into());
         after.given_prompt = Some("g".into());
+        after.subagents = [("a2".to_string(), 8)].into();
+        after.awaiting_subagents = true;
         db.save_changes(&before, &after).unwrap();
         assert_eq!(db.session(&s.id).unwrap(), after);
     }

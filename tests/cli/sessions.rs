@@ -4,7 +4,7 @@
 use std::fs;
 use std::process::Command;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::common::TestEnv;
 
@@ -64,6 +64,40 @@ fn session_lifecycle() {
         (s["state"].as_str(), s["unread"].as_bool()),
         (Some("idle"), Some(false))
     );
+
+    // A turn that ends with a subagent left at work: working till it stops.
+    let subagent = r#"{"session_id":"conv-1","agent_id":"b1","agent_type":"Explore"}"#;
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "subagent-start", subagent);
+    t.report(&id, "idle", &payload);
+    let state = |t: &TestEnv| {
+        let s = t.session("one", false).unwrap();
+        (
+            s["state"].clone(),
+            s["unread"].clone(),
+            s["subagents"].clone(),
+        )
+    };
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    // Its screen, still meanwhile, doesn't end it.
+    std::thread::sleep(std::time::Duration::from_millis(4500));
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    t.report(&id, "subagent-stop", subagent);
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "one"]);
+    // One never heard of again is taken for gone, by any roster.
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "subagent-start", subagent);
+    t.report(&id, "idle", &payload);
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    let db = rusqlite::Connection::open(t.db()).unwrap();
+    db.execute(
+        "UPDATE sessions SET subagents = '{\"b1\":1000}' WHERE id = ?1",
+        [&id],
+    )
+    .unwrap();
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "one"]);
 
     // Stop keeps the session; start resumes the conversation once its transcript exists.
     fs::write(&transcript, "{}").unwrap();

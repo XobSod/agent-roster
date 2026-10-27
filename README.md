@@ -93,6 +93,11 @@ else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--eff
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
 Roster can tell when one is open in Claude, but not in pi or Codex.
 
+A Claude session whose own turn ended with subagents still at work (in the background)
+stays working until the last one is done, and its card says how many: `↳2`. One unheard
+of for fifteen minutes is taken for gone. Sessions started before roster knew this
+(before it was updated) don't say when their subagents start: restart them.
+
 Under the preview's header is what roster knows of the session: when it was made, its
 prompts, the time it worked, and from its agent's conversation, the context used,
 output tokens (its subagents' too), cost and lines changed.

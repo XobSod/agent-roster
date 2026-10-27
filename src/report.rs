@@ -49,7 +49,10 @@ fn report(args: &[String]) -> Result<()> {
         db,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    conn.busy_timeout(Duration::from_millis(500))?;
+    // As long as roster itself waits: a report lost while roster writes
+    // (eight subagents starting at once, seen lost two) is a state wrong
+    // till the agent's next; the agent waits only while roster writes.
+    conn.busy_timeout(Duration::from_secs(5))?;
     let payload = trimmed(payload);
     let payload = (!payload.is_empty()).then_some(payload.as_str());
     crate::db::insert_event(&conn, &session, kind, now_ms(), payload)

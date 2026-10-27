@@ -20,7 +20,9 @@
 //! - `prompt`: you gave it a task; it's working.
 //! - `working`: it's still at it (after a tool, or a question answered).
 //! - `needs-input`: it's waiting for you in the middle of a turn.
-//! - `idle`: the turn is over.
+//! - `idle`: the turn is over, unless subagents it started run on.
+//! - `subagent-start`, `subagent-stop`: one of its subagents started or
+//!   stopped (Claude's); a turn of its own ends working while any runs.
 //! - anything else (pi's extension says `info`): only its payload counts.
 //!
 //! An agent that reports needs to report the start of a turn as well as its

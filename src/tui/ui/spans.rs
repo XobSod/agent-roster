@@ -97,7 +97,14 @@ pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
             _ => Span::styled("stopped", Style::new().fg(FAINT)),
         },
     };
-    vec![span]
+    // Its subagents at work, before it.
+    match s.subagents_running(now) {
+        0 => vec![span],
+        n => vec![
+            Span::styled(format!("↳{n} "), Style::new().fg(WORKING)),
+            span,
+        ],
+    }
 }
 
 /// The state in words, for the header.
@@ -105,10 +112,14 @@ pub(super) fn state_words(s: &Session, now: i64) -> Span<'static> {
     let since = now - s.state_since.unwrap_or(s.created_at);
     match (s.state, s.unread) {
         (State::NeedsInput, _) => Span::styled("needs input", Style::new().fg(INPUT)),
-        (State::Working, _) => Span::styled(
-            format!("working {}", theme::clock(since)),
-            Style::new().fg(WORKING),
-        ),
+        (State::Working, _) => {
+            let words = match s.subagents_running(now) {
+                0 => format!("working {}", theme::clock(since)),
+                1 => format!("working {}, a subagent too", theme::clock(since)),
+                n => format!("working {}, {n} subagents too", theme::clock(since)),
+            };
+            Span::styled(words, Style::new().fg(WORKING))
+        }
         (State::Idle, true) => Span::styled(
             format!("finished {}", theme::ago(since)),
             Style::new().fg(UNREAD),

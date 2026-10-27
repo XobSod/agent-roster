@@ -422,6 +422,7 @@ pub fn list_sessions(
                     "running_model": s.running_model, "running_effort": s.running_effort,
                     "title_override": s.title_override, "created_at": s.created_at,
                     "turns": s.turns, "worked_ms": s.worked(util::now_ms()),
+                    "subagents": s.subagents_running(util::now_ms()),
                     "note": s.note.as_ref().map(|n| &n.text),
                     "note_pin": s.note.as_ref().and_then(|n| n.pin),
                 })

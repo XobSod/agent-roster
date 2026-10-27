@@ -1,6 +1,7 @@
 //! Projects, sessions, reported events, and how events and screen changes move a
 //! session between states.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::note::{Note, Noted, Whose};
@@ -10,6 +11,11 @@ use crate::note::{Note, Noted, Whose};
 /// interrupted with Esc; while it really works, its spinner changes the screen
 /// several times a second.
 pub const QUIET_MS: i64 = 4000;
+
+/// How long a subagent may go unheard of before it's taken for gone: one
+/// stopped (killed) may never say it stopped. Past the longest a tool call
+/// of Claude's may take (10 minutes, a command's), not to forget one in it.
+pub const SUBAGENT_QUIET_MS: i64 = 15 * 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -153,6 +159,13 @@ pub struct Session {
     /// one it may never have taken (it exited first), kept to give again,
     /// asked for (`Roster::give_prompt_again`), never on its own.
     pub given_prompt: Option<String>,
+    /// The subagents its agent started that haven't said they stopped, each
+    /// with when it was last heard of (ms): for agents that say when one
+    /// starts (Claude's SubagentStart and SubagentStop).
+    pub subagents: BTreeMap<String, i64>,
+    /// Its agent's own turn ended while subagents it started ran on (in the
+    /// background): it's working on, till the last stops.
+    pub awaiting_subagents: bool,
     /// What the user wrote about it (saved apart from the rest, so a save of
     /// the session doesn't overwrite a note saved meanwhile).
     pub note: Option<Note>,
@@ -208,6 +221,8 @@ impl Session {
             fork_from: None,
             asked_by: None,
             given_prompt: None,
+            subagents: BTreeMap::new(),
+            awaiting_subagents: false,
             note: None,
         }
     }
@@ -254,6 +269,11 @@ impl Session {
         }
         if state != State::NeedsInput {
             self.asked_by = None;
+        }
+        // Its agent gone, what it ran went with it.
+        if state == State::Stopped {
+            self.subagents.clear();
+            self.awaiting_subagents = false;
         }
         self.state = state;
         self.state_since = Some(at);
@@ -404,7 +424,28 @@ impl Session {
         ) {
             self.given_prompt = None;
         }
+        // A subagent it said started, heard of again.
+        if let Some(id) = &report.subagent
+            && let Some(heard) = self.subagents.get_mut(id)
+        {
+            *heard = (*heard).max(e.at);
+        }
         match e.kind.as_str() {
+            "subagent-start" => {
+                if let Some(id) = &report.subagent {
+                    self.subagents.insert(id.clone(), e.at);
+                }
+            }
+            "subagent-stop" => {
+                if let Some(id) = &report.subagent {
+                    self.subagents.remove(id);
+                    // Its question goes with it.
+                    if self.state == State::NeedsInput && self.asked_by.as_ref() == Some(id) {
+                        self.set_state(State::Working, e.at);
+                    }
+                }
+                self.end_awaited_turn(e.at);
+            }
             // A subagent at work, or given its task, is inside the session's
             // turn, or after it (one left running): either way not a turn of
             // its own. Its question is the session's to answer, though, and
@@ -414,11 +455,29 @@ impl Session {
                     self.set_state(State::Working, e.at);
                 }
             }
-            // A prompt you submitted starts a turn.
-            "working" | "prompt" => self.set_state(State::Working, e.at),
+            // A prompt you submitted starts a turn: one of its own while it
+            // waited on subagents, working as it was.
+            "working" | "prompt" => {
+                if e.kind == "prompt" && self.awaiting_subagents {
+                    self.turns += 1;
+                }
+                self.set_state(State::Working, e.at);
+                self.awaiting_subagents = false;
+            }
+            // Its own turn ended: with subagents left running it works on,
+            // as it takes their results up when they're done.
             "idle" => {
-                self.set_state(State::Idle, e.at);
-                self.unread = true;
+                self.forget_quiet_subagents(e.at);
+                if self.subagents.is_empty() {
+                    self.set_state(State::Idle, e.at);
+                    self.unread = true;
+                } else {
+                    // A subagent's question still waits on you.
+                    if !(self.state == State::NeedsInput && self.asked_by.is_some()) {
+                        self.set_state(State::Working, e.at);
+                    }
+                    self.awaiting_subagents = true;
+                }
             }
             "needs-input" => {
                 // Whose question it is: its own waits for you whatever a
@@ -428,13 +487,22 @@ impl Session {
                 if !its_own {
                     self.asked_by = report.subagent.clone();
                 }
+                // Its own question: it's in a turn of its own again.
+                if report.subagent.is_none() {
+                    self.awaiting_subagents = false;
+                }
                 self.unread = true;
             }
             // A compaction, which Claude and codex make mid-turn when the
             // context is full, leaves it as it was.
             "session" if report.compacted => {}
-            // The agent (re)started or cleared its conversation and waits for a prompt.
-            "session" => self.set_state(State::Idle, e.at),
+            // The agent (re)started or cleared its conversation and waits
+            // for a prompt: what it left running is gone or not its now.
+            "session" => {
+                self.subagents.clear();
+                self.awaiting_subagents = false;
+                self.set_state(State::Idle, e.at);
+            }
             _ => return,
         }
         self.last_event_at = Some(e.at);
@@ -455,9 +523,48 @@ impl Session {
     }
 
     /// True if the session claims to be working but no hook has reported anything
-    /// for a while, so only the screen can tell whether it still is.
+    /// for a while, so only the screen can tell whether it still is: not
+    /// while its subagents work on after its turn, its screen still then.
     pub fn needs_screen_check(&self, now: i64) -> bool {
-        self.state == State::Working && self.last_event_at.is_none_or(|t| now - t >= QUIET_MS)
+        self.state == State::Working
+            && !self.awaiting_subagents
+            && self.last_event_at.is_none_or(|t| now - t >= QUIET_MS)
+    }
+
+    /// Its subagents running as of `now`: those heard of lately.
+    pub fn subagents_running(&self, now: i64) -> usize {
+        (self.subagents.values())
+            .filter(|heard| now - **heard <= SUBAGENT_QUIET_MS)
+            .count()
+    }
+
+    /// Forgets the subagents not heard of for a while (`SUBAGENT_QUIET_MS`);
+    /// its own turn over, with none left, it's idle. Whether anything
+    /// changed.
+    pub fn forget_quiet_subagents(&mut self, now: i64) -> bool {
+        let before = self.subagents.len();
+        self.subagents
+            .retain(|_, heard| now - *heard <= SUBAGENT_QUIET_MS);
+        let forgot = self.subagents.len() != before;
+        // Waiting on none (forgotten, or kept so by a save that raced
+        // another's): it's over.
+        let ended = self.end_awaited_turn(now);
+        forgot || ended
+    }
+
+    /// Its own turn over and its last subagent stopped: idle, its results
+    /// yours to read (and Claude's, which takes them up in a turn of its own
+    /// next, working again). Whether it was.
+    fn end_awaited_turn(&mut self, at: i64) -> bool {
+        if !self.awaiting_subagents || !self.subagents.is_empty() {
+            return false;
+        }
+        self.awaiting_subagents = false;
+        if self.state == State::Working {
+            self.set_state(State::Idle, at);
+            self.unread = true;
+        }
+        true
     }
 
     /// Turns a stale "working" into idle once the screen has stopped changing.
@@ -467,6 +574,9 @@ impl Session {
         let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
         if self.needs_screen_check(now) && still {
             self.set_state(State::Idle, now);
+            // Interrupted (Esc), its subagents said nothing: gone with the
+            // turn, or ones left running take theirs up in a turn of their own.
+            self.subagents.clear();
             return true;
         }
         false
@@ -829,6 +939,129 @@ pub mod tests {
         apply(&mut s, "working", 7_000);
         assert_eq!(s.state, State::Working);
         assert_eq!(s.turns, 1);
+    }
+
+    #[test]
+    fn subagents_left_running_after_its_turn_keep_it_working() {
+        let subagent = |id: &str| Report {
+            subagent: Some(id.into()),
+            ..Report::default()
+        };
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.state_since = Some(0);
+        apply(&mut s, "prompt", 1_000);
+        // One in the background, one it waits on within its turn.
+        s.apply(&event("subagent-start", 2_000), &subagent("b1"));
+        s.apply(&event("subagent-start", 2_500), &subagent("f1"));
+        assert_eq!(s.subagents_running(3_000), 2);
+        s.apply(&event("subagent-stop", 3_000), &subagent("f1"));
+        assert_eq!((s.state, s.awaiting_subagents), (State::Working, false));
+        // Its turn ends with one still at work: working on, no turn more,
+        // nothing to read yet, its screen not asked.
+        apply(&mut s, "idle", 4_000);
+        assert_eq!(
+            (s.state, s.awaiting_subagents, s.unread, s.turns),
+            (State::Working, true, false, 1)
+        );
+        assert!(!s.needs_screen_check(60_000));
+        // Heard of at work, then stopped: idle, to read.
+        s.apply(&event("working", 50_000), &subagent("b1"));
+        assert_eq!(s.subagents["b1"], 50_000);
+        s.apply(&event("subagent-stop", 60_000), &subagent("b1"));
+        assert_eq!(
+            (s.state, s.awaiting_subagents, s.unread),
+            (State::Idle, false, true)
+        );
+        assert_eq!(s.worked_ms, 59_000);
+        // One that never says it stopped is taken for gone after a while.
+        apply(&mut s, "prompt", 70_000);
+        s.apply(&event("subagent-start", 71_000), &subagent("b2"));
+        apply(&mut s, "idle", 72_000);
+        assert!(!s.forget_quiet_subagents(71_000 + SUBAGENT_QUIET_MS));
+        assert_eq!(s.state, State::Working);
+        assert_eq!(s.subagents_running(71_001 + SUBAGENT_QUIET_MS), 0);
+        assert!(s.forget_quiet_subagents(71_001 + SUBAGENT_QUIET_MS));
+        assert_eq!((s.state, s.unread), (State::Idle, true));
+        // Taken up again while one works on: its own turn, then waiting again.
+        s.apply(&event("subagent-start", 200_000), &subagent("b3"));
+        apply(&mut s, "idle", 201_000);
+        assert!(s.awaiting_subagents);
+        apply(&mut s, "prompt", 202_000);
+        assert!(!s.awaiting_subagents);
+        apply(&mut s, "idle", 203_000);
+        assert!(s.awaiting_subagents);
+        // Its own question: a turn of its own again.
+        apply(&mut s, "needs-input", 204_000);
+        assert!(!s.awaiting_subagents);
+        // Restarted, or stopped: what it ran is gone.
+        apply(&mut s, "session", 205_000);
+        assert!(s.subagents.is_empty());
+        s.apply(&event("subagent-start", 206_000), &subagent("b4"));
+        s.set_state(State::Stopped, 207_000);
+        assert!(s.subagents.is_empty());
+        // Subagents it never said started (codex's, as roster takes its
+        // hooks) aren't waited for.
+        let mut c = session("c");
+        apply(&mut c, "prompt", 1_000);
+        c.apply(&event("working", 2_000), &subagent("x"));
+        apply(&mut c, "idle", 3_000);
+        assert_eq!((c.state, c.subagents_running(3_000)), (State::Idle, 0));
+    }
+
+    #[test]
+    fn what_subagents_ask_and_leave_is_settled() {
+        let subagent = |id: &str| Report {
+            subagent: Some(id.into()),
+            ..Report::default()
+        };
+        let mut s = session("a");
+        s.state = State::Idle;
+        // Its only subagent stopping within its turn doesn't end it.
+        apply(&mut s, "prompt", 1_000);
+        s.apply(&event("subagent-start", 1_100), &subagent("f1"));
+        s.apply(&event("subagent-stop", 1_200), &subagent("f1"));
+        assert_eq!((s.state, s.unread), (State::Working, false));
+        // Two left running: one stopping leaves it waiting on the other.
+        s.apply(&event("subagent-start", 1_300), &subagent("b1"));
+        s.apply(&event("subagent-start", 1_400), &subagent("b2"));
+        apply(&mut s, "idle", 2_000);
+        s.apply(&event("subagent-stop", 3_000), &subagent("b1"));
+        assert_eq!((s.state, s.awaiting_subagents), (State::Working, true));
+        // A prompt meanwhile is a turn of its own.
+        apply(&mut s, "prompt", 3_500);
+        assert_eq!(s.turns, 2);
+        apply(&mut s, "idle", 3_600);
+        // b2 asks: its own turn ending meanwhile leaves the question.
+        s.apply(&event("needs-input", 4_000), &subagent("b2"));
+        assert!(s.awaiting_subagents);
+        apply(&mut s, "idle", 4_500);
+        assert_eq!(
+            (s.state, s.asked_by.as_deref()),
+            (State::NeedsInput, Some("b2"))
+        );
+        // b2 stops (denied): its question goes, and nothing's left to wait on.
+        s.apply(&event("subagent-stop", 5_000), &subagent("b2"));
+        assert_eq!(
+            (s.state, s.unread, s.awaiting_subagents),
+            (State::Idle, true, false)
+        );
+        // Interrupted with one at work (Esc: no hooks): the screen ends the
+        // turn, and its subagent with it, so its next turn ends as it should.
+        apply(&mut s, "prompt", 6_000);
+        s.apply(&event("subagent-start", 6_100), &subagent("f2"));
+        s.observe_screen("still", 6_200);
+        assert!(s.correct_stale_working(6_200 + QUIET_MS));
+        assert!(s.subagents.is_empty());
+        apply(&mut s, "prompt", 20_000);
+        apply(&mut s, "idle", 21_000);
+        assert_eq!((s.state, s.unread), (State::Idle, true));
+        // Kept waiting on none (a save that raced another's): settled.
+        s.state = State::Working;
+        s.awaiting_subagents = true;
+        assert!(s.forget_quiet_subagents(22_000));
+        assert_eq!((s.state, s.awaiting_subagents), (State::Idle, false));
+        assert!(!s.forget_quiet_subagents(23_000));
     }
 
     #[test]

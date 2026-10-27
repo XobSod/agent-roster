@@ -230,6 +230,10 @@ fn settings(roster_exe: &Path) -> String {
         "PostToolUse": report("working"),
         "PermissionRequest": report("needs-input"),
         "Stop": report("idle"),
+        // Its subagents', for a turn of its own that ends with some still at
+        // work (in the background) to leave it working.
+        "SubagentStart": report("subagent-start"),
+        "SubagentStop": report("subagent-stop"),
     }})
     .to_string()
 }
@@ -322,6 +326,15 @@ mod tests {
             settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             "'/my tools/roster' report needs-input"
         );
+        for (hook, kind) in [
+            ("SubagentStart", "subagent-start"),
+            ("SubagentStop", "subagent-stop"),
+        ] {
+            assert_eq!(
+                settings["hooks"][hook][0]["hooks"][0]["command"],
+                format!("'/my tools/roster' report {kind}")
+            );
+        }
     }
 
     #[test]

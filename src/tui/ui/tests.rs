@@ -693,6 +693,32 @@ fn a_note_shows_its_pinned_lines_above_the_screen() {
 }
 
 #[test]
+fn a_card_says_how_many_subagents_are_at_work() {
+    let mut app = app();
+    let now = crate::util::now_ms();
+    app.sessions[0].state = crate::model::State::Working;
+    app.sessions[0].state_since = Some(now - 65_000);
+    app.sessions[0].subagents = [("b1".to_string(), now), ("b2".to_string(), now - 1000)].into();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    let at = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+        .unwrap();
+    app.selected = at;
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("↳2 "), "{screen}");
+    assert!(screen.contains("working 1m, 2 subagents too"), "{screen}");
+    // One unheard of for long isn't counted.
+    let mut sessions = app.sessions.clone();
+    sessions[0]
+        .subagents
+        .insert("b2".into(), now - crate::model::SUBAGENT_QUIET_MS - 1000);
+    app.set_data(app.projects.clone(), sessions);
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("↳1 "), "{screen}");
+    assert!(screen.contains("a subagent too"), "{screen}");
+}
+
+#[test]
 fn the_note_editor_sits_above_the_screen() {
     let mut app = app();
     app.sessions[0].note = Some(crate::note::Note {

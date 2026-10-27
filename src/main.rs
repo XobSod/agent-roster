@@ -151,6 +151,10 @@ enum Cmd {
         /// Don't ask before starting a new conversation for agents that can't resume
         #[arg(short, long)]
         yes: bool,
+        /// Give the agent again the first prompt it exited before taking
+        /// (Codex, at a screen it showed first, say)
+        #[arg(long)]
+        prompt_again: bool,
     },
     /// Stop a session's agent, keeping the session (asks first if it's working)
     Stop {
@@ -546,15 +550,34 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             }
             r.attach(&s.id)?;
         }
-        Cmd::Start { session, yes } => {
+        Cmd::Start {
+            session,
+            yes,
+            prompt_again,
+        } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
-            // A running one fails to start anyway; don't ask about it first.
+            // What can't be done isn't asked about first.
+            if prompt_again && let Some(refused) = s.prompt_again_refused() {
+                bail!(refused);
+            }
+            // A running one fails to start anyway.
             if s.state == State::Stopped && !confirm_new_conversation(r, &s, yes)? {
+                return Ok(());
+            }
+            if prompt_again {
+                r.give_prompt_again(&s.id)?;
+                println!("Started {}, its first prompt given again", s.label());
                 return Ok(());
             }
             r.start(&s.id)?;
             println!("Started {}", s.label());
+            if s.given_prompt.is_some() {
+                println!(
+                    "Its first prompt, not seen taken, is kept: `roster start --prompt-again {}` gives it again",
+                    s.label()
+                );
+            }
         }
         Cmd::Stop { session, yes } => {
             r.refresh()?;

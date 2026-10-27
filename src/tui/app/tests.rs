@@ -443,6 +443,66 @@ fn agents_that_cant_resume_ask_before_a_new_conversation() {
 }
 
 #[test]
+fn a_kept_first_prompt_is_given_again_asking_as_a_start_would() {
+    let mut app = app();
+    app.agents.push("codex".into());
+    // Codex, gone before saying which conversation it's on.
+    let mut cx = with("c1", (1, "alpha"), State::Stopped, false, 1);
+    cx.agent = "codex".into();
+    cx.conversation_id = None;
+    cx.given_prompt = Some("fix\tit\nand more".into());
+    let mut sessions = app.sessions.clone();
+    sessions.push(cx.clone());
+    app.folded.clear();
+    app.set_data(app.projects.clone(), sessions.clone());
+    select(&mut app, "c1");
+    assert_eq!(keys(&mut app, "sp"), None);
+    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+        panic!("no confirmation")
+    };
+    assert!(question.contains("can't resume"), "{question}");
+    assert_eq!(keys(&mut app, "y"), Some(Op::PromptAgain("c1".into())));
+    // Its panel: the prompt on one line, and what to do on its own.
+    let text = |app: &App, s: &Session| -> Vec<String> {
+        (app.session_info(s, &[], &[], 10).lines.iter())
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    };
+    let lines = text(&app, &cx);
+    let at = lines
+        .iter()
+        .position(|l| l.contains("First prompt"))
+        .unwrap();
+    assert!(lines[at].ends_with("fix it and more"), "{lines:?}");
+    assert!(
+        lines[at + 1].trim() == "s p gives it again (not seen taken)",
+        "{lines:?}"
+    );
+    // Archived, it says what it is, not a key that doesn't work there.
+    let mut gone = cx.clone();
+    gone.deleted_at = Some(5);
+    let lines = text(&app, &gone);
+    assert!(
+        lines.iter().any(|l| l.trim() == "not seen taken"),
+        "{lines:?}"
+    );
+    // Its conversation known, nothing to ask.
+    sessions.last_mut().unwrap().conversation_id = Some("x".into());
+    app.set_data(app.projects.clone(), sessions.clone());
+    assert_eq!(keys(&mut app, "sp"), Some(Op::PromptAgain("c1".into())));
+    // Nothing kept, or running: said why.
+    sessions.last_mut().unwrap().given_prompt = None;
+    app.set_data(app.projects.clone(), sessions.clone());
+    assert_eq!(keys(&mut app, "sp"), None);
+    assert!(app.dialog.is_none() && app.message().unwrap().error);
+    let s = sessions.last_mut().unwrap();
+    (s.given_prompt, s.state) = (Some("fix it".into()), State::Idle);
+    app.set_data(app.projects.clone(), sessions);
+    assert_eq!(keys(&mut app, "sp"), None);
+    assert!(app.message().unwrap().text.contains("is running"));
+}
+
+#[test]
 fn server_view_scrolls_kills_orphans_and_goes_back() {
     use crate::doctor::{Diagnosis, Level, Line};
     let mut app = app();

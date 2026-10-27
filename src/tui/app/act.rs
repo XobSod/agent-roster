@@ -52,6 +52,7 @@ impl App {
             | Action::Start
             | Action::Stop
             | Action::Restart
+            | Action::PromptAgain
             | Action::Archive
             | Action::Delete
             | Action::ToggleRead
@@ -274,6 +275,18 @@ impl App {
                 None
             }
             Action::Start => Some(Op::Start(s.id)),
+            Action::PromptAgain => {
+                if let Some(refused) = s.prompt_again_refused() {
+                    self.fail(refused);
+                    return None;
+                }
+                // A new conversation, as starting it at all would be.
+                if !crate::agent::resumes(&s) {
+                    self.confirm(self.new_conversation_question(&s), Op::PromptAgain(s.id));
+                    return None;
+                }
+                Some(Op::PromptAgain(s.id))
+            }
             // Stopping a working session cuts its turn short, as restarting
             // one does: both ask.
             Action::Stop if s.state == State::Working => {

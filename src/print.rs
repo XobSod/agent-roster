@@ -418,6 +418,7 @@ pub fn list_sessions(
                     "conversation_id": s.conversation_id, "transcript_path": s.transcript_path, "workdir": s.workdir, "archived_at": s.deleted_at,
                     "title": s.title, "model": s.model, "effort": s.effort, "state_since": s.state_since,
                     "pending_prompt": s.pending_prompt.is_some(),
+                    "given_prompt": s.given_prompt.is_some(),
                     "running_model": s.running_model, "running_effort": s.running_effort,
                     "title_override": s.title_override, "created_at": s.created_at,
                     "turns": s.turns, "worked_ms": s.worked(util::now_ms()),

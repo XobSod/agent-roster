@@ -3,7 +3,7 @@
 use std::fs;
 use std::process::Command;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::common::TestEnv;
 
@@ -334,4 +334,81 @@ fn codex_conversations_can_be_adopted() {
     t.wait_for("the copy resumed", |t| {
         t.ok(&["show", "b"]).contains(&format!("resume {copy}"))
     });
+}
+
+#[test]
+fn a_first_prompt_codex_exited_before_taking_is_kept_to_give_again() {
+    let Some(t) = TestEnv::new("codex-again") else {
+        return;
+    };
+    with_fake_codex(&t);
+    let proj = t.path("proj");
+    fs::create_dir_all(&proj).unwrap();
+    t.ok(&["project", "add", "demo", proj.to_str().unwrap()]);
+    // Declined at what it showed first: gone before its first turn.
+    fs::write(proj.join(".exit-early"), "").unwrap();
+    t.ok(&["new", "demo", "--name", "s", "--prompt", "fix it"]);
+    t.wait_for("codex gone", |t| {
+        t.session("s", false).unwrap()["state"] == "stopped"
+    });
+    let s = t.session("s", false).unwrap();
+    assert_eq!(
+        (&s["given_prompt"], &s["pending_prompt"]),
+        (&json!(true), &json!(false))
+    );
+    fs::remove_file(proj.join(".exit-early")).unwrap();
+    // A start giving it again that fails (its agent gone from the config)
+    // leaves it kept as it was, not to be given by a plain start.
+    let config = t.config_dir().join("config.toml");
+    let with_codex = fs::read_to_string(&config).unwrap();
+    let without: String = (with_codex.lines())
+        .filter(|l| {
+            !(*l == "default_agent = \"codex\""
+                || *l == "[agents.codex]"
+                || l.starts_with("command = ") && l.contains("fake-codex"))
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&config, without).unwrap();
+    let out = t.run(&["start", "--yes", "--prompt-again", "s"]);
+    assert!(!out.status.success());
+    fs::write(&config, &with_codex).unwrap();
+    let s = t.session("s", false).unwrap();
+    assert_eq!(
+        (&s["state"], &s["given_prompt"], &s["pending_prompt"]),
+        (&json!("stopped"), &json!(true), &json!(false))
+    );
+    // Started plainly, it goes without it, and says it's kept.
+    let out = t.ok(&["start", "--yes", "s"]);
+    assert!(out.contains("roster start --prompt-again"), "{out}");
+    t.wait_for("codex up", |t| t.ok(&["show", "s"]).contains("fake codex:"));
+    assert!(!t.ok(&["show", "s"]).contains("turn: fix it"));
+    t.ok(&["stop", "--yes", "s"]);
+    // Asked for, it's given again; taken, it's no longer kept.
+    t.ok(&["start", "--yes", "--prompt-again", "s"]);
+    t.wait_for("its first turn", |t| {
+        t.ok(&["show", "s"]).contains("turn: fix it")
+    });
+    t.wait_for("taken", |t| {
+        t.session("s", false).unwrap()["given_prompt"] == false
+    });
+    // Nothing to give again now.
+    t.ok(&["stop", "--yes", "s"]);
+    assert!(
+        !t.run(&["start", "--yes", "--prompt-again", "s"])
+            .status
+            .success()
+    );
+    // Nor in one never given a first prompt, whose conversation isn't known
+    // (it exited before saying): said so, rather than asked about starting a
+    // new one.
+    fs::write(proj.join(".exit-early"), "").unwrap();
+    t.ok(&["new", "demo", "--name", "np"]);
+    t.wait_for("codex gone", |t| {
+        t.session("np", false).unwrap()["state"] == "stopped"
+    });
+    let out = t.run(&["start", "--prompt-again", "np"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("has no first prompt to give again"), "{said}");
 }

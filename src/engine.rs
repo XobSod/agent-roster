@@ -687,11 +687,32 @@ impl Roster {
     /// Starts a stopped session: sources the env files and launches its agent,
     /// resuming the conversation if it has one.
     pub fn start(&mut self, id: &str) -> Result<()> {
+        self.start_giving(id, false)
+    }
+
+    /// Starts a stopped session giving its agent the first prompt it was
+    /// started with before (`Session::given_prompt`), which it may never
+    /// have taken: asked for, never on its own, as given twice it would be
+    /// acted on twice.
+    pub fn give_prompt_again(&mut self, id: &str) -> Result<()> {
+        self.start_giving(id, true)
+    }
+
+    /// `start`, giving its kept first prompt `again`: taken from where it's
+    /// kept only in what a start that worked saves, so one that fails leaves
+    /// it there, and no later start gives it unasked.
+    fn start_giving(&mut self, id: &str, again: bool) -> Result<()> {
         // A first prompt this roster gave up on is tried again once started.
         self.prompt_tries.remove(id);
         self.refresh()?;
         let mut s = self.live_session(id)?;
         let before = s.clone();
+        if again {
+            if let Some(refused) = s.prompt_again_refused() {
+                bail!(refused);
+            }
+            s.pending_prompt = s.given_prompt.take();
+        }
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
         }
@@ -760,9 +781,10 @@ impl Roster {
             s.running_model = Some(self.db.meta(&learned)?.unwrap_or_else(|| model.clone()));
         }
         s.running_effort = s.effort.clone();
-        // Handed to it on its command line: nothing left to type in.
+        // Handed to it on its command line: nothing left to type in, but
+        // kept until it reports its first turn (it may exit first).
         if agent::adapter(&s.agent).takes_prompt() {
-            s.pending_prompt = None;
+            s.given_prompt = s.pending_prompt.take().or(s.given_prompt.take());
         }
         s.set_state(State::Working, now);
         s.unread = false;

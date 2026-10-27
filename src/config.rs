@@ -236,6 +236,9 @@ pub struct SessionKeys {
     pub start: KeyList,
     pub stop: KeyList,
     pub restart: KeyList,
+    /// Start a session, giving its agent the first prompt it may not have
+    /// taken again (one it exited before taking).
+    pub prompt: KeyList,
     /// Archive a session, or restore an archived one.
     pub archive: KeyList,
     /// Delete an archived session for good.
@@ -311,6 +314,7 @@ impl Default for SessionKeys {
             start: keys(&["s"]),
             stop: keys(&["x"]),
             restart: keys(&["r"]),
+            prompt: keys(&["p"]),
             archive: keys(&["d"]),
             delete: keys(&["D"]),
             toggle_read: keys(&["u"]),
@@ -652,10 +656,16 @@ mod tests {
             .map(|l| l.trim_start().to_string() + "\n")
             .collect();
         let config = Config::parse(&toml).unwrap();
-        assert_eq!(
-            format!("{:?}", config.keys),
-            format!("{:?}", Keys::default())
-        );
+        let defaults = format!("{:?}", Keys::default());
+        assert_eq!(format!("{:?}", config.keys), defaults);
+        // Each of them: one left out would take its default unseen. As many
+        // as there are, none unknown (that fails to parse) nor twice.
+        fn keys(table: &toml::Table) -> usize {
+            (table.values()).map(|v| v.as_table().map_or(1, keys)).sum()
+        }
+        let table: toml::Table = toml.parse().unwrap();
+        let there = defaults.matches(": KeyList(").count() + defaults.matches("detach: ").count();
+        assert_eq!(keys(&table), there, "{block}");
     }
 
     #[test]

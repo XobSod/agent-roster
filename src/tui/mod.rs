@@ -623,6 +623,13 @@ fn perform(
             busy(terminal, app, format!("Starting {label}…"))?;
             roster.start(&id).map(|()| format!("Started {label}"))
         }
+        Op::PromptAgain(id) => {
+            let label = app.session_label(&id);
+            busy(terminal, app, format!("Starting {label}…"))?;
+            roster
+                .give_prompt_again(&id)
+                .map(|()| format!("Started {label}, its first prompt given again"))
+        }
         Op::Stop(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Stopping {label}…"))?;

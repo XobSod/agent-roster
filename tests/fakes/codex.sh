@@ -55,6 +55,8 @@ turn() {
   report working "$pay"
   report idle "$pay"
 }
+# As at a screen it shows first, declined: gone before its first turn.
+if [ -e .exit-early ]; then echo "declined"; exit 1; fi
 [ -n "$prompt" ] && turn "$prompt"
 while read -r line; do
   case "$line" in

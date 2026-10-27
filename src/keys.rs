@@ -49,6 +49,8 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+    /// Start, giving the first prompt the agent may not have taken again.
+    PromptAgain,
     /// Archive, or restore when archived.
     Archive,
     /// Delete an archived session for good.
@@ -98,6 +100,7 @@ impl Action {
             Action::Start => "start",
             Action::Stop => "stop",
             Action::Restart => "restart",
+            Action::PromptAgain => "start, prompt again",
             Action::Archive => "archive / restore",
             Action::Delete => "delete for good",
             Action::ToggleRead => "read/unread",
@@ -319,6 +322,7 @@ impl Keymap {
         session.bind(t, "start", &k.start, Action::Start, &mut labels)?;
         session.bind(t, "stop", &k.stop, Action::Stop, &mut labels)?;
         session.bind(t, "restart", &k.restart, Action::Restart, &mut labels)?;
+        session.bind(t, "prompt", &k.prompt, Action::PromptAgain, &mut labels)?;
         session.bind(
             t,
             "toggle_read",
@@ -503,8 +507,16 @@ mod tests {
             .collect();
         assert_eq!(
             items,
-            ["n", "c", "e", "s", "x", "r", "u", "t", "o", "a", "d", "D"]
+            [
+                "n", "c", "e", "s", "x", "r", "p", "u", "t", "o", "a", "d", "D"
+            ]
         );
+        // Its popup as wide as its longest item: the new chat's, to fit
+        // narrow terminals.
+        let widest = (map.menu_items(Menu::Session).into_iter())
+            .max_by_key(|(key, action)| key.len() + action.describe_in(Menu::Session).len())
+            .unwrap();
+        assert_eq!(widest, ("c", Action::NewChat));
     }
 
     #[test]

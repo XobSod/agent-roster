@@ -148,6 +148,11 @@ pub struct Session {
     /// The subagent whose question it needs input for (its agent's id for
     /// it); None while it needs input for its own, or none.
     pub asked_by: Option<String>,
+    /// A first prompt its agent was started with on its command line
+    /// (`Adapter::takes_prompt`), until the agent reports its first turn:
+    /// one it may never have taken (it exited first), kept to give again,
+    /// asked for (`Roster::give_prompt_again`), never on its own.
+    pub given_prompt: Option<String>,
     /// What the user wrote about it (saved apart from the rest, so a save of
     /// the session doesn't overwrite a note saved meanwhile).
     pub note: Option<Note>,
@@ -202,6 +207,7 @@ impl Session {
             worked_ms: 0,
             fork_from: None,
             asked_by: None,
+            given_prompt: None,
             note: None,
         }
     }
@@ -324,6 +330,24 @@ impl Session {
         self.title().unwrap_or(&self.name)
     }
 
+    /// Why it can't be started giving its kept first prompt again
+    /// (`Roster::give_prompt_again`): None if it can.
+    pub fn prompt_again_refused(&self) -> Option<String> {
+        if self.given_prompt.is_none() {
+            Some(format!(
+                "{} has no first prompt to give again",
+                self.label()
+            ))
+        } else if self.state != State::Stopped {
+            Some(format!(
+                "{} is running: stop it, then give it its first prompt again",
+                self.label()
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Applies a reported event, with what its payload says (`report`).
     pub fn apply(&mut self, e: &Event, report: &crate::agent::Report) {
         if self.deleted_at.is_some() {
@@ -371,6 +395,14 @@ impl Session {
             && (title.is_some() || moved_on || e.kind != "session")
         {
             self.title = title.clone();
+        }
+        // Its agent reporting at all is its first turn begun: the prompt it
+        // was given, taken.
+        if matches!(
+            e.kind.as_str(),
+            "session" | "prompt" | "working" | "idle" | "needs-input"
+        ) {
+            self.given_prompt = None;
         }
         match e.kind.as_str() {
             // A subagent at work, or given its task, is inside the session's
@@ -552,6 +584,38 @@ pub mod tests {
             (s.state, s.unread, s.last_event_at),
             (State::Idle, true, Some(40))
         );
+    }
+
+    #[test]
+    fn any_report_of_its_agents_is_its_first_prompt_taken() {
+        for kind in ["session", "prompt", "working", "idle", "needs-input"] {
+            let mut s = session("a");
+            s.given_prompt = Some("fix it".into());
+            apply(&mut s, kind, 10);
+            assert_eq!(s.given_prompt, None, "{kind}");
+        }
+        // A title roster made, or a kind it doesn't know, isn't its agent's.
+        for kind in [AUTO_TITLE, "unknown"] {
+            let mut s = session("a");
+            s.given_prompt = Some("fix it".into());
+            apply(&mut s, kind, 10);
+            assert_eq!(s.given_prompt.as_deref(), Some("fix it"), "{kind}");
+        }
+    }
+
+    #[test]
+    fn its_first_prompt_is_given_again_only_stopped_and_kept() {
+        let mut s = session("a");
+        s.state = State::Stopped;
+        assert!(
+            s.prompt_again_refused()
+                .unwrap()
+                .contains("no first prompt")
+        );
+        s.given_prompt = Some("fix it".into());
+        assert_eq!(s.prompt_again_refused(), None);
+        s.state = State::Idle;
+        assert!(s.prompt_again_refused().unwrap().contains("is running"));
     }
 
     #[test]

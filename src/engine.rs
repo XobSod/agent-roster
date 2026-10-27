@@ -783,21 +783,38 @@ impl Roster {
     /// a thread included (see `asker`).
     pub fn model_lister(&self) -> impl Fn(&str) -> Vec<agent::Model> + Send + 'static {
         let config = self.agents_config();
-        let ask = self.asker();
-        move |name: &str| agent::adapter(name).models(&config, &|q| ask(name, q))
+        let asker = self.asker();
+        move |name: &str| agent::adapter(name).models(&config, &|q| asker.run(name, q, None))
     }
 
     /// What asks every agent that can be started what its account has used
     /// of its limits (`Adapter::usage`), all at once, to run anywhere, a
     /// thread included (see `asker`): those that say, in the order agents are
-    /// offered (the default first).
+    /// offered (the default first). The env file is sourced once for all of
+    /// them, as the first asks: they're asked every few minutes, and an env
+    /// file may ask a password manager.
     pub fn usage_reader(
         &self,
     ) -> impl Fn() -> Vec<(String, Result<crate::usage::Usage>)> + Send + 'static {
         let config = self.agents_config();
         let agents = agent::available(&self.config);
-        let ask = self.asker();
+        let asker = self.asker();
+        // Nothing is asked with account_limits off, whoever calls this.
+        let allowed = self.config.account_limits();
         move || {
+            if !allowed {
+                return Vec::new();
+            }
+            // Sourced as the first agent asks; what it started ends with
+            // the round, as this goes.
+            let env: std::sync::OnceLock<std::result::Result<launch::Environment, String>> =
+                std::sync::OnceLock::new();
+            let ask = |name: &str, question: agent::Question<'_>| match env
+                .get_or_init(|| asker.environment().map_err(|e| format!("{e:#}")))
+            {
+                Ok(env) => asker.run(name, question, Some(env)),
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            };
             std::thread::scope(|scope| {
                 let asking: Vec<_> = agents
                     .iter()
@@ -808,10 +825,20 @@ impl Roster {
                         (name, said)
                     })
                     .collect();
-                asking
+                let mut answers: Vec<_> = asking
                     .into_iter()
                     .filter_map(|(name, said)| asked(name, said.join()))
-                    .collect()
+                    .collect();
+                // The env file failing is said as that, not as what each
+                // agent couldn't do for it.
+                if let Some(Err(e)) = env.get() {
+                    for (_, said) in &mut answers {
+                        if said.is_err() {
+                            *said = Err(anyhow::anyhow!("{e}"));
+                        }
+                    }
+                }
+                answers
             })
         }
     }
@@ -824,36 +851,12 @@ impl Roster {
         }
     }
 
-    /// What runs agent `name`'s commands (`agent::Ask`) as its sessions
-    /// would, to run anywhere, a thread included: the global env file
-    /// sourced (in roster's state directory, away from any project's
-    /// settings), for at most 10 seconds.
-    fn asker(
-        &self,
-    ) -> impl Fn(&str, agent::Question<'_>) -> Result<String> + Send + Sync + 'static {
-        let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
-        let global_env = self.paths.global_env();
-        let dir = self.paths.state_dir.clone();
-        move |name: &str, question: agent::Question<'_>| {
-            let argv = launch::wrap(&shell, &global_env, Path::new(""), None, &question.argv);
-            let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..])
-                .current_dir(&dir)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            for var in crate::tmux::LEAKY_ENV {
-                cmd.env_remove(var);
-            }
-            let output = launch::converse(cmd, name, Duration::from_secs(10), question.input)?;
-            if !output.status.success() {
-                let said = String::from_utf8_lossy(&output.stderr);
-                match said.lines().rfind(|l| !l.trim().is_empty()) {
-                    Some(line) => bail!("{}", line.trim()),
-                    None => bail!("{} exited with {}", question.argv[0], output.status),
-                }
-            }
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    /// What runs agents' commands as their sessions would (`Asker`).
+    fn asker(&self) -> Asker {
+        Asker {
+            shell: launch::shell(&self.config, std::env::var("SHELL").ok().as_deref()),
+            global_env: self.paths.global_env(),
+            dir: self.paths.state_dir.clone(),
         }
     }
 
@@ -1429,6 +1432,86 @@ fn validate_name(what: &str, name: &str) -> Result<()> {
         bail!("{what} name {name:?} may only contain letters, digits, '-', '_' and '.'");
     }
     Ok(())
+}
+
+/// What runs an agent's commands (`agent::Ask`) as its sessions would, to
+/// run anywhere, a thread included: the global env file sourced (in roster's
+/// state directory, away from any project's settings), each for at most 10
+/// seconds.
+struct Asker {
+    shell: String,
+    global_env: PathBuf,
+    dir: PathBuf,
+}
+
+impl Asker {
+    /// Runs `question` for agent `name` and returns what it printed: in
+    /// `env`, else with the env file sourced for it alone.
+    fn run(
+        &self,
+        name: &str,
+        question: agent::Question<'_>,
+        env: Option<&launch::Environment>,
+    ) -> Result<String> {
+        let printed = self.printed(name, question, env)?;
+        Ok(String::from_utf8_lossy(&printed).into_owned())
+    }
+
+    fn printed(
+        &self,
+        name: &str,
+        question: agent::Question<'_>,
+        env: Option<&launch::Environment>,
+    ) -> Result<Vec<u8>> {
+        let mut cmd = match env {
+            Some(env) => {
+                let mut cmd = std::process::Command::new(&question.argv[0]);
+                cmd.args(&question.argv[1..])
+                    .env_clear()
+                    .envs(env.vars.iter().map(|(k, v)| (k, v)));
+                cmd
+            }
+            None => {
+                let argv = launch::wrap(
+                    &self.shell,
+                    &self.global_env,
+                    Path::new(""),
+                    None,
+                    &question.argv,
+                );
+                let mut cmd = std::process::Command::new(&argv[0]);
+                cmd.args(&argv[1..]);
+                for var in crate::tmux::LEAKY_ENV {
+                    cmd.env_remove(var);
+                }
+                cmd
+            }
+        };
+        cmd.current_dir(&self.dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = launch::converse(cmd, name, Duration::from_secs(10), question.input)?;
+        if !output.status.success() {
+            let said = String::from_utf8_lossy(&output.stderr);
+            match said.lines().rfind(|l| !l.trim().is_empty()) {
+                Some(line) => bail!("{}", line.trim()),
+                None => bail!("{} exited with {}", question.argv[0], output.status),
+            }
+        }
+        Ok(output.stdout)
+    }
+
+    /// The variables the env file makes, for several commands to run in, so
+    /// it's sourced once for all of them (`launch::environment`).
+    fn environment(&self) -> Result<launch::Environment> {
+        launch::environment(
+            &self.shell,
+            &self.global_env,
+            &self.dir,
+            Duration::from_secs(10),
+        )
+    }
 }
 
 /// What asking agent `name` what its account has used came to: its answer;

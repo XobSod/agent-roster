@@ -175,6 +175,8 @@ pub struct App {
     /// What the agents' accounts have used of their limits, and whether the
     /// sidebar shows it (config.toml).
     pub limits: super::limits::Limits,
+    /// Whether the accounts are asked at all (`account_limits`).
+    pub account_limits: bool,
     pub sidebar_usage: bool,
     /// What the agents spent, and the period the usage view shows of it
     /// (None: the limits).
@@ -231,6 +233,7 @@ impl App {
             titling: Vec::new(),
             notes: Default::default(),
             limits: Default::default(),
+            account_limits: true,
             sidebar_usage: true,
             tokens: Default::default(),
             usage_period: None,

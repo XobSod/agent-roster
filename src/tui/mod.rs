@@ -55,6 +55,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     let mut app = App::new(keymap, cwd, agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
+    app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
     app.set_grouped(roster.config.grouped());
     app.config_file = roster.paths.config_file();
@@ -149,6 +150,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.set_agents(agent::available(&roster.config));
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
+    app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
     app.set_grouped(roster.config.grouped());
     app.preview.fitted.clear();
@@ -191,8 +193,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             update_preview(roster, app);
         }
         // What the agents' accounts have used, asked in the background
-        // while something shows it.
-        if app.limits.due(app.sidebar_usage || app.mode == Mode::Usage) {
+        // while something shows it, unless they're not to be asked.
+        if app.account_limits && app.limits.due(app.sidebar_usage || app.mode == Mode::Usage) {
             app.limits.ask(roster.usage_reader());
         }
         app.limits.arrived();

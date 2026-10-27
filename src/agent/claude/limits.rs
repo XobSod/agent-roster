@@ -21,12 +21,13 @@ const BETA: &str = "oauth-2025-04-20";
 const EXPIRED: &str = "Claude's login has expired; Claude renews it the next time it runs";
 
 /// Prints Claude's login, where Claude looks for it: nothing without one.
-const PRINT_LOGIN: &str = r#"f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"; if [ -f "$f" ]; then cat "$f"; fi"#;
+const PRINT_LOGIN: &str = r#"f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"; if [ -f "$f" ]; then /bin/cat "$f"; fi"#;
 
 /// Asks the usage service with Claude's login. None without one (Claude on
 /// an API key, or never logged in).
 pub(super) fn ask(ask: &Ask<'_>) -> Option<Result<Usage>> {
-    let argv = ["sh", "-c", PRINT_LOGIN].map(String::from).into();
+    // By its path: the env file's PATH may have no sh.
+    let argv = ["/bin/sh", "-c", PRINT_LOGIN].map(String::from).into();
     let login = match ask(Question::of(argv)).and_then(|file| login(&file)) {
         Ok(login) => login?,
         Err(e) => return Some(Err(e.context("couldn't read Claude's login"))),
@@ -174,7 +175,7 @@ mod tests {
         let file = std::cell::RefCell::new(String::new());
         let curled = std::cell::Cell::new(false);
         let ask = |q: Question<'_>| {
-            if q.argv[0] == "sh" {
+            if q.argv[0] == "/bin/sh" {
                 return Ok(file.borrow().clone());
             }
             curled.set(true);

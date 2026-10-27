@@ -1103,6 +1103,27 @@ fn the_usage_view_shows_each_window_and_why_an_agent_couldnt_say() {
 }
 
 #[test]
+fn with_account_limits_off_the_usage_view_says_how_to_ask() {
+    let mut app = app();
+    app.account_limits = false;
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    let screen = render(&app, 160, 20);
+    assert!(
+        screen.contains("account_limits is off") && !screen.contains("Asking the agents"),
+        "{screen}"
+    );
+    assert!(!screen.contains("ask again"), "{screen}");
+    // Enter says why it doesn't ask.
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let screen = render(&app, 160, 20);
+    assert!(
+        screen.contains("Roster doesn't ask your accounts"),
+        "{screen}"
+    );
+}
+
+#[test]
 fn the_usage_views_tabs_show_what_was_spent_in_each_period() {
     use crate::tokens::tests::{call, hours_of};
     use crate::tokens::{Period, Report};

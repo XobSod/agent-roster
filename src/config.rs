@@ -9,6 +9,9 @@
 //!                                 # with the project, session and title
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
 //!                                 # sized to the TUI's preview while no one's attached
+//! account_limits = false          # default true: asks your Claude and codex accounts
+//!                                 # what's left of their limits (Claude's login sent to
+//!                                 # Claude.ai's usage service, codex's server asked)
 //! sidebar_usage = false           # default true: under the session list, what your
 //!                                 # Claude and codex accounts have used of their limits
 //! group_by = "project"            # "attention" (default): the list on shelves, by what
@@ -71,6 +74,9 @@ pub struct Config {
     pub fit_preview: Option<FitPreview>,
     /// While attached, a line at the top saying where you are (default on).
     pub status_line: Option<bool>,
+    /// Whether the agents' accounts are asked what's left of their limits
+    /// (default on): Claude's with its login, codex's of its server.
+    pub account_limits: Option<bool>,
     /// Under the session list, a line with what the agents' accounts have
     /// used of their limits (default on).
     pub sidebar_usage: Option<bool>,
@@ -465,6 +471,10 @@ impl Config {
 
     pub fn status_line(&self) -> bool {
         self.status_line.unwrap_or(true)
+    }
+
+    pub fn account_limits(&self) -> bool {
+        self.account_limits.unwrap_or(true)
     }
 
     pub fn sidebar_usage(&self) -> bool {

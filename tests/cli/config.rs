@@ -20,9 +20,16 @@ fn settings_change_config_toml_in_place() {
     text.insert_str(0, "# Mine.\n");
     fs::write(&file, &text).unwrap();
 
+    // What a setting is, as listed (its name, padded, then its value).
+    let value = |shown: &str, name: &str| -> Option<String> {
+        shown
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix(&format!("{name} ")))
+            .and_then(|rest| rest.split_whitespace().next().map(String::from))
+    };
     let shown = t.ok(&["config"]);
     assert!(
-        shown.contains("status_line    on") && shown.contains("default"),
+        value(&shown, "status_line").as_deref() == Some("on") && shown.contains("default"),
         "{shown}"
     );
     t.ok(&["config", "set", "status_line", "off"]);
@@ -41,7 +48,7 @@ fn settings_change_config_toml_in_place() {
     );
     let shown = t.ok(&["config"]);
     assert!(
-        shown.contains("status_line    off") && shown.contains("yours"),
+        value(&shown, "status_line").as_deref() == Some("off") && shown.contains("yours"),
         "{shown}"
     );
     // An invalid one is refused, and the file stays as it was.

@@ -131,12 +131,20 @@ pace: `▼ slow` (used slower than its time goes, so there's more to use), `◆ 
 over), or `✕ used up`; the bar and what's left are blue, grey or red to match.
 The sidebar's last line has the same, briefly (`claude 69%▲
 48%◆  codex 93%▼ 87%▼`, the 5-hour window first; the agents' marks in place of their
-names where those don't fit), dim when old. Roster asks
-Claude.ai's usage service with Claude's login (through `curl`; the login is Claude's
-to renew, so once it expires roster waits for Claude to), and Codex's own server
-(`codex app-server`): at the start, every 5 minutes while the figures show, and when
-the view opens; `Enter` there asks again. Codex also writes them into its rollouts as it
-works, which roster reads as they change. pi and other agents say nothing of the kind.
+names, then only the 5-hour windows, where those don't fit), dim and without a pace
+when old.
+
+To know, roster reads Claude's login from `<claude dir>/.credentials.json` (`~/.claude`,
+or `$CLAUDE_CONFIG_DIR`) and sends its token to `https://api.anthropic.com/api/oauth/usage`,
+the endpoint Claude's own `/usage` asks, which isn't documented (through `curl`, the
+token on its stdin; the login is Claude's to renew, so once it expires roster waits for
+Claude to). For Codex it starts Codex's own server, `codex app-server`, and asks it.
+It asks at the start, every 5 minutes while the figures show, and when the view opens;
+`Enter` there asks again. Each time, the global env file is sourced once for all of
+them, as for the agents' sessions. `account_limits = false` stops all of it: no login
+read, nothing sent, no server started; `v u` and `roster usage` say how to turn it back
+on. Codex also writes its limits into its rollouts as it works, which roster reads as
+they change, asked or not. pi and other agents say nothing of the kind.
 
 To the right of the limits (`h`/`l` move along the tabs), what the agents spent in the
 last 24 hours, 7, 30 or 90 days, from every conversation they keep on this machine,
@@ -212,6 +220,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     a row from the agent). It's set as you attach, so a title the agent picks
     meanwhile shows from the next attach. Turning it on or off changes sessions'
     height by a row on their next attach.
+  - `account_limits`: `false`: roster never asks your Claude and Codex accounts
+    what's left of their limits (no login read, nothing sent to Claude.ai, no
+    `codex app-server`); `v u` and `roster usage` say so.
   - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
     Codex accounts have used of their limits (`v u` still shows it).
   - `group_by`: `"attention"` (default), the session list on shelves by what waits

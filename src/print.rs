@@ -204,6 +204,9 @@ pub fn list_projects(r: &Roster) -> Result<()> {
 /// and when it starts over. An error if an agent's couldn't be read.
 pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
     use crate::usage::Pace;
+    if !r.config.account_limits() {
+        anyhow::bail!("{}", crate::usage::OFF);
+    }
     let said = r.usage_reader()();
     let now = util::now_ms();
     let failed = said.iter().filter(|(_, u)| u.is_err()).count();

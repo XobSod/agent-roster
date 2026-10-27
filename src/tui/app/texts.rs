@@ -37,11 +37,12 @@ impl App {
             Mode::Server => self.labelled([(Action::Down, "scroll")]),
             Mode::Settings => self.settings_view_hints(),
             Mode::Usage => {
-                let enter = match self.usage_period {
-                    None => "ask again",
-                    Some(_) => "read again",
+                // Nothing to ask again with account_limits off.
+                let mut hints = match (self.usage_period, self.account_limits) {
+                    (None, false) => Vec::new(),
+                    (None, true) => self.labelled([(Action::Confirm, "ask again")]),
+                    (Some(_), _) => self.labelled([(Action::Confirm, "read again")]),
                 };
-                let mut hints = self.labelled([(Action::Confirm, enter)]);
                 if let (Some(left), Some(right)) = (
                     self.keymap.label(Action::Collapse),
                     self.keymap.label(Action::Expand),

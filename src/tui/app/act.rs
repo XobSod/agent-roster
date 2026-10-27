@@ -163,6 +163,7 @@ impl App {
                 }
             }
             Action::Confirm if self.usage_period.is_some() => self.tokens.want(),
+            Action::Confirm if !self.account_limits => self.fail(crate::usage::OFF),
             Action::Confirm if self.limits.asking() => self.flash("Asking them already"),
             Action::Confirm => self.limits.want(true),
             Action::Up => self.usage_scroll = self.usage_scroll.saturating_sub(1),

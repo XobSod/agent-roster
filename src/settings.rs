@@ -453,6 +453,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         agents: configured,
         fit_preview,
         status_line,
+        account_limits,
         sidebar_usage,
         default_agent,
         notes,
@@ -492,6 +493,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &["auto", "never"],
                 fit(fit_preview),
                 "agents drawing full screen are sized to the preview while you're not attached",
+            ),
+            bool_setting(
+                &["account_limits"],
+                account_limits.unwrap_or(true),
+                "send Claude's login to Claude.ai's usage service and ask codex's own server what's left of your accounts' limits",
             ),
             bool_setting(
                 &["sidebar_usage"],

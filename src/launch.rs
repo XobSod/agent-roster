@@ -107,26 +107,10 @@ pub fn converse(
     input: Option<Input<'_>>,
 ) -> Result<std::process::Output> {
     use std::io::{Read, Write};
-    use std::os::unix::process::CommandExt;
     use std::sync::{Arc, Mutex};
-    // In a session of its own, so a process group of its own: what it starts
-    // goes with it, on a timeout or when, its work done, something it left
-    // running would hold its output open. Without a terminal, too: something
-    // asking on one (an env file's `read </dev/tty`) fails at once, where in
-    // a group of the terminal's but not its foreground it would stop until
-    // the timeout. Ctrl+C on roster doesn't reach it, though.
-    // So, where it can, it ends with roster, as it would have in its group.
-    // SAFETY: setsid and prctl are async-signal-safe, as `pre_exec` needs.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            #[cfg(target_os = "linux")]
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            Ok(())
-        });
-    }
+    // What it starts goes with it, on a timeout or when, its work done,
+    // something it left running would hold its output open.
+    own_session(&mut cmd);
     if input.is_some() {
         cmd.stdin(std::process::Stdio::piped());
     }
@@ -218,6 +202,200 @@ pub fn converse(
 /// How long a command's output may stay open after it exits.
 const LINGER: Duration = Duration::from_millis(500);
 
+/// `cmd` to run in a session of its own, so a process group of its own, for
+/// what it starts to be ended with it. Without a terminal, too: something
+/// asking on one (an env file's `read </dev/tty`) fails at once, where in a
+/// group of the terminal's but not its foreground it would stop until the
+/// timeout. Ctrl+C on roster doesn't reach it, though. So, where it can, it
+/// ends with roster, as it would have in its group.
+fn own_session(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid and prctl are async-signal-safe, as `pre_exec` needs.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            Ok(())
+        });
+    }
+}
+
+/// What the global env file makes, for several commands to run in, so it's
+/// sourced once for all of them: its variables, and the shell that sourced
+/// it, waiting while they're used. What the file started (a tunnel, say)
+/// lives in that shell's process group until this goes, as in a session it
+/// lives with the agent's pane: the shell waits on a pipe only roster
+/// writes to (`_held`), and once it's closed, as this goes or roster does,
+/// however, it ends its group.
+pub struct Environment {
+    pub vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    shell: std::process::Child,
+    _held: std::os::fd::OwnedFd,
+}
+
+impl Drop for Environment {
+    fn drop(&mut self) {
+        // SAFETY: kill only sends a signal, to the group the shell leads.
+        unsafe {
+            libc::kill(-(self.shell.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = self.shell.wait();
+    }
+}
+
+/// A pipe: the end to read from, and the end to write to, neither of them
+/// given to a program roster starts (but as it's given).
+fn waiting_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills `fds` with two descriptors, which are then ours.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("can't make a pipe");
+    }
+    // SAFETY: just made, and owned by nothing else.
+    Ok(unsafe {
+        (
+            std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+            std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+        )
+    })
+}
+
+/// Sources `global_env` with `shell` (as `wrap` does, roster's own
+/// variables kept out), in `dir`, for at most `timeout`: the variables it
+/// makes. An error says why it failed, naming the file.
+pub fn environment(
+    shell: &str,
+    global_env: &Path,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<Environment> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let file = global_env.display();
+    // A mark of its own each time, between which the variables come: what
+    // the file prints itself comes before it, and can't be it by chance.
+    let mark = format!("roster-environment-{}", uuid::Uuid::new_v4().simple());
+    // The shell and env by their paths, the file's PATH having neither,
+    // maybe; it waits on the pipe roster holds (fd 3), then ends its group.
+    let script =
+        r#"printf '%s\0' "$1"; /usr/bin/env -0; printf '%s\0' "$1"; read -r _ <&3; kill -KILL 0"#;
+    let argv: Vec<String> = ["/bin/sh", "-c", script, "roster-environment", &mark]
+        .map(String::from)
+        .into();
+    let argv = wrap(shell, global_env, Path::new(""), None, &argv);
+    let mut cmd = std::process::Command::new(&argv[0]);
+    // Nothing to read for the file: what reads (`ssh` without -n) gets none.
+    cmd.args(&argv[1..])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for var in crate::tmux::LEAKY_ENV {
+        cmd.env_remove(var);
+    }
+    let (wait_on, held) = waiting_pipe()?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&wait_on);
+    // In a session of its own, and not ended with the thread that started
+    // it (a signal at its parent's death is, on Linux): its pipe tells it.
+    // SAFETY: setsid, dup2 and fcntl are async-signal-safe, as `pre_exec`
+    // needs.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
+            if libc::setsid() == -1
+                || (fd != 3 && libc::dup2(fd, 3) == -1)
+                || libc::fcntl(3, libc::F_SETFD, 0) == -1
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut shell = cmd
+        .spawn()
+        .with_context(|| format!("can't source the env file {file}"))?;
+    drop(wait_on);
+    let (stdout, stderr) = (shell.stdout.take(), shell.stderr.take());
+    // Ended as it goes, whatever happens.
+    let mut env = Environment {
+        vars: Vec::new(),
+        shell,
+        _held: held,
+    };
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let into = Arc::clone(&out);
+        std::thread::spawn(move || {
+            let Some(mut pipe) = pipe else { return };
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                into.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+        out
+    };
+    let stdout = drain(stdout.map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(stderr.map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let mark = format!("{mark}\0").into_bytes();
+    let find = |bytes: &[u8], from: usize| {
+        bytes
+            .get(from..)?
+            .windows(mark.len())
+            .position(|w| w == mark)
+            .map(|at| from + at)
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let printed = stdout.lock().unwrap();
+            if let Some(start) = find(&printed, 0)
+                && let Some(end) = find(&printed, start + mark.len())
+            {
+                env.vars = vars(&printed[start + mark.len()..end]);
+                return Ok(env);
+            }
+        }
+        if env.shell.try_wait()?.is_some() {
+            // What it said as it failed, once it has all been read.
+            sleep(Duration::from_millis(50));
+            let said = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+            match said.lines().rfind(|l| !l.trim().is_empty()) {
+                Some(line) => bail!("the env file {file} failed: {}", line.trim()),
+                None => bail!("the env file {file} failed"),
+            }
+        }
+        if Instant::now() > deadline {
+            bail!(
+                "the env file {file} took longer than {}s",
+                timeout.as_secs()
+            );
+        }
+        sleep(Duration::from_millis(10));
+    }
+}
+
+/// Variables as `env -0` prints them: `NAME=value`, each ended by a NUL.
+fn vars(printed: &[u8]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    use std::os::unix::ffi::OsStrExt;
+    printed
+        .split(|&b| b == 0)
+        .filter_map(|var| {
+            let eq = var.iter().position(|&b| b == b'=')?;
+            let (name, value) = (&var[..eq], &var[eq + 1..]);
+            Some((
+                std::ffi::OsStr::from_bytes(name).to_os_string(),
+                std::ffi::OsStr::from_bytes(value).to_os_string(),
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +412,116 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(shell(&config, Some("/usr/bin/zsh")), "/opt/bash");
+    }
+
+    #[test]
+    fn the_env_files_variables_are_read_once_whatever_it_prints() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("env");
+        // It prints, a mark of the kind roster's is among it, and its PATH
+        // has neither sh nor env.
+        std::fs::write(
+            &file,
+            "echo noise\nprintf 'roster-environment-x\\0B=2\\0'\nA='one two'\nPATH=/nowhere\n",
+        )
+        .unwrap();
+        let env = environment("/bin/sh", &file, dir.path(), Duration::from_secs(10)).unwrap();
+        let var = |name: &str| {
+            env.vars
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+        };
+        assert_eq!(var("A").as_deref(), Some("one two"));
+        assert_eq!(var("PATH").as_deref(), Some("/nowhere"));
+        assert_eq!(var("B"), None);
+        // Failing, it says so, naming the file.
+        std::fs::write(&file, "false\n").unwrap();
+        let err = environment("/bin/sh", &file, dir.path(), Duration::from_secs(10))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.starts_with(&format!("the env file {} failed: ", file.display())),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn what_the_env_file_started_lives_while_its_variables_are_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, pid) = (dir.path().join("env"), dir.path().join("pid"));
+        // A tunnel, say, left running, its output the shell's.
+        std::fs::write(
+            &file,
+            format!("sleep 30 &\necho $! > '{}'\n", pid.display()),
+        )
+        .unwrap();
+        // Made on a thread that's done before they're used, as an ask's.
+        let (env_file, cwd) = (file.clone(), dir.path().to_path_buf());
+        let env = std::thread::spawn(move || {
+            environment("/bin/sh", &env_file, &cwd, Duration::from_secs(10))
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        let pid = read_pid(&pid);
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(alive(pid), "gone before its variables were used");
+        drop(env);
+        assert!(gone_soon(pid), "left running after them");
+    }
+
+    #[test]
+    fn what_the_env_file_started_ends_with_roster_however_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, pid) = (dir.path().join("env"), dir.path().join("pid"));
+        std::fs::write(
+            &file,
+            format!("sleep 30 &\necho $! > '{}'\n", pid.display()),
+        )
+        .unwrap();
+        let env = environment("/bin/sh", &file, dir.path(), Duration::from_secs(10)).unwrap();
+        let pid = read_pid(&pid);
+        // Roster gone without letting go of it (killed): its end of the
+        // pipe closes, as the system closes a gone process's files.
+        let env = std::mem::ManuallyDrop::new(env);
+        // SAFETY: closes roster's end, which nothing uses after.
+        unsafe { libc::close(std::os::fd::AsRawFd::as_raw_fd(&env._held)) };
+        assert!(gone_soon(pid), "left running after roster");
+    }
+
+    #[test]
+    fn an_env_file_reading_its_input_gets_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("env");
+        std::fs::write(&file, "cat > /dev/null\nA=1\n").unwrap();
+        let started = Instant::now();
+        let env = environment("/bin/sh", &file, dir.path(), Duration::from_secs(10)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(env.vars.iter().any(|(k, v)| k == "A" && v == "1"));
+    }
+
+    fn read_pid(file: &Path) -> libc::pid_t {
+        std::fs::read_to_string(file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn alive(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only asks whether the process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Whether `pid` is gone within a few seconds.
+    fn gone_soon(pid: libc::pid_t) -> bool {
+        let by = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < by {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !alive(pid)
     }
 
     #[test]

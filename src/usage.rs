@@ -6,6 +6,9 @@ use serde::Serialize;
 
 use crate::util::{local_when, until};
 
+/// What's said where the accounts would be asked, but `account_limits` is off.
+pub const OFF: &str = "Roster doesn't ask your accounts: account_limits is off (`roster config set account_limits true`, or in the settings view)";
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Usage {
     /// The account's plan, as the agent names it (pro, plus).

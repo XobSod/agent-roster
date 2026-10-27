@@ -88,6 +88,46 @@ fn usage_is_asked_of_each_agents_service() {
     assert_eq!(json[0]["windows"][1]["minutes"], 10_080);
     assert_eq!(json[1]["windows"][1]["pace"], "fast");
 
+    // The env file, printing as it goes, is sourced once for every agent
+    // asked, and what it prints isn't taken for what they print.
+    let runs = t.path("env-runs");
+    fs::write(
+        t.config_dir().join("env"),
+        format!(
+            "echo run >> \"{}\"\necho env loaded\nPATH=\"{}:$PATH\"\n",
+            runs.display(),
+            bin.display()
+        ),
+    )
+    .unwrap();
+    let out = t.ok(&["usage"]);
+    assert!(
+        out.contains("codex  plus\n") && out.contains("claude  pro\n"),
+        "{out}"
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap(), "run\n");
+
+    // The env file failing is said as that, for each agent, not as what
+    // each couldn't do.
+    fs::write(t.config_dir().join("env"), "false\n").unwrap();
+    let out = t.run(&["usage"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let failed = format!(
+        "can't tell: the env file {} failed: ",
+        t.config_dir().join("env").display()
+    );
+    assert!(
+        !out.status.success()
+            && stdout.contains(&format!("codex  {failed}"))
+            && stdout.contains(&format!("claude  {failed}")),
+        "{stdout}"
+    );
+    fs::write(
+        t.config_dir().join("env"),
+        format!("PATH=\"{}:$PATH\"\n", bin.display()),
+    )
+    .unwrap();
+
     // Claude's sessions are given another account by the env file: that's
     // the one asked about.
     let elsewhere = t.path("claude-elsewhere");
@@ -115,6 +155,45 @@ fn usage_is_asked_of_each_agents_service() {
         format!("PATH=\"{}:$PATH\"\n", bin.display()),
     )
     .unwrap();
+
+    // Turned off, nothing is asked: neither Claude's login read nor curl
+    // run, nor codex run, nor the env file sourced.
+    fs::remove_file(bin.join("curl-args")).unwrap();
+    let (codex, real) = (t.path("fake-codex"), t.path("fake-codex-real"));
+    let (codex_runs, env_runs) = (t.path("codex-runs"), t.path("env-runs-off"));
+    fs::rename(&codex, &real).unwrap();
+    fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nexec '{}' \"$@\"\n",
+            codex_runs.display(),
+            real.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        t.config_dir().join("env"),
+        format!(
+            "echo run >> '{}'\nPATH=\"{}:$PATH\"\n",
+            env_runs.display(),
+            bin.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["config", "set", "account_limits", "false"]);
+    let out = t.run(&["usage"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("account_limits is off"),
+        "{err}"
+    );
+    assert!(!bin.join("curl-args").exists());
+    assert!(!codex_runs.exists() && !env_runs.exists());
+    // Turned on again, both run.
+    t.ok(&["config", "set", "account_limits", "true"]);
+    t.ok(&["usage"]);
+    assert!(codex_runs.exists() && env_runs.exists());
 
     // Claude's login expired: said, and the command fails, codex's still
     // shown.

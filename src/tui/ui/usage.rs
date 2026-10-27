@@ -233,7 +233,9 @@ fn limits_state(app: &App, now: i64) -> Span<'static> {
 /// and why it couldn't be asked last time, if it couldn't.
 fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
-    if app.limits.agents.is_empty() {
+    if !app.account_limits {
+        lines.push(Line::styled(crate::usage::OFF, Style::new().fg(MUTED)));
+    } else if app.limits.agents.is_empty() {
         let text = if app.limits.asking() || app.limits.asked().is_none() {
             "Asking the agents…"
         } else {

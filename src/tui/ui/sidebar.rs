@@ -156,7 +156,19 @@ pub(super) fn list_lines(
             }
             Entry::Card(s) => {
                 let noted = !app.grouped && project_noted(app, s);
-                card(s, hit(app, s), !app.grouped, noted, content, now)
+                use crate::config::CardSubagents;
+                let shown = app.subagents_shown(s, now);
+                // How many, unless always unfolded: then the lines say it.
+                let mark = match app.card_subagents {
+                    CardSubagents::Count => subagents_mark(s, now, None),
+                    CardSubagents::Folded => subagents_mark(s, now, Some(shown)),
+                    CardSubagents::Unfolded => Vec::new(),
+                };
+                let mut rows = card(s, hit(app, s), !app.grouped, noted, mark, content, now);
+                if shown {
+                    rows.extend(subagent_rows(app, s, content, now));
+                }
+                rows
             }
             Entry::Row(s) => vec![row(app, s, content, now)],
         };
@@ -269,6 +281,7 @@ pub(super) fn card(
     hit: Option<&Hit>,
     with_project: bool,
     project_noted: bool,
+    subagents: Vec<Span<'static>>,
     width: usize,
     now: i64,
 ) -> Vec<Vec<Span<'static>>> {
@@ -303,6 +316,7 @@ pub(super) fn card(
         width,
         [vec![Span::raw("   ")], details(s, &hit.name, meta_style)].concat(),
         [
+            subagents,
             note_mark(s),
             vec![Span::styled(
                 format!("{} ", theme::ago(now - s.created_at)),
@@ -313,6 +327,48 @@ pub(super) fn card(
     );
     lines.extend([first, second]);
     lines
+}
+
+/// A line for each of `s`'s subagents at work, as they started: the model it
+/// runs, what it's doing (its latest step; else what it was given to do),
+/// cut to fit, and how long it's been at it.
+fn subagent_rows(app: &App, s: &Session, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
+    let mut running: Vec<_> = (s.subagents.iter())
+        .filter(|(_, a)| now - a.heard <= crate::model::SUBAGENT_QUIET_MS)
+        .collect();
+    running.sort_by_key(|(id, a)| (a.started, *id));
+    (running.into_iter())
+        .map(|(id, a)| {
+            let info = app.subagent_info.get(id);
+            let what = (app.subagent_doing.get(id).cloned())
+                .or_else(|| info.and_then(|i| i.task.clone()))
+                .or_else(|| a.kind.clone())
+                .unwrap_or_else(|| "a subagent".into());
+            // Its parent's: the session's. Too narrow for it, what it's at
+            // says more.
+            let model = info.and_then(|i| i.model.as_deref()).and_then(|m| match m {
+                "inherit" => s.running_model.as_deref(),
+                m => Some(m),
+            });
+            let model = model
+                .filter(|_| width >= 24)
+                .and_then(crate::util::short_model);
+            let mut left = vec![Span::raw("   "), Span::styled("↳ ", Style::new().fg(MUTED))];
+            if let Some(model) = model {
+                left.push(Span::styled(model, Style::new().fg(MUTED)));
+                left.push(Span::styled(" · ", Style::new().fg(FAINT)));
+            }
+            left.push(Span::styled(
+                crate::util::one_line(&what),
+                Style::new().fg(MUTED),
+            ));
+            let right = vec![Span::styled(
+                format!("{} ", theme::clock(now - a.started)),
+                Style::new().fg(FAINT),
+            )];
+            fit(width, left, right)
+        })
+        .collect()
 }
 
 /// A stopped or archived session's line: its agent's mark, project / title,

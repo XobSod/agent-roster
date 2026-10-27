@@ -506,7 +506,7 @@ mod tests {
         assert!(!source("resume").started && !source("resume").cleared);
         assert!(source("compact").compacted && !source("compact").started);
         // A subagent's: its parent's conversation, but its own rollout and
-        // model, of which the session takes neither.
+        // model, of which the session takes neither; what kind it is.
         let report = Codex.report(&serde_json::json!({
             "session_id": "01a1",
             "transcript_path": rollout,
@@ -518,6 +518,7 @@ mod tests {
             report,
             Report {
                 subagent: Some("019a0000-0000-7000-8000-000000000002".into()),
+                subagent_kind: Some("worker".into()),
                 ..Report::default()
             }
         );

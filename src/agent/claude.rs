@@ -3,6 +3,7 @@
 
 pub mod conversations;
 mod limits;
+mod subagents;
 mod tokens;
 mod transcript;
 
@@ -165,7 +166,11 @@ impl Adapter for Claude {
             .and_then(Value::as_str)
             .map(String::from)
             .filter(|_| report.subagent.is_none());
-        Report { effort, ..report }
+        Report {
+            effort,
+            subagents_start_said: report.subagent.is_some(),
+            ..report
+        }
     }
 
     fn names_its_task(&self) -> bool {
@@ -187,6 +192,14 @@ impl Adapter for Claude {
 
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
         Some(Box::new(ClaudeTranscript::new(path)))
+    }
+
+    fn subagent_info(&self, transcript: &Path, id: &str) -> super::SubagentInfo {
+        subagents::info(transcript, id)
+    }
+
+    fn subagent_doing(&self, file: &Path) -> Option<String> {
+        subagents::doing(file)
     }
 
     fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
@@ -408,7 +421,8 @@ mod tests {
         assert!(report.compacted && !report.cleared && !report.started);
         let report = read_report(CLAUDE, Some(r#"{"effort":{"level":"xhigh"}}"#));
         assert_eq!(report.effort.as_deref(), Some("xhigh"));
-        // A subagent's: its effort isn't the session's, nor anything else.
+        // A subagent's: its effort isn't the session's, nor anything else;
+        // Claude says when each starts.
         let report = read_report(
             CLAUDE,
             Some(
@@ -419,6 +433,7 @@ mod tests {
             report,
             Report {
                 subagent: Some("a1".into()),
+                subagents_start_said: true,
                 ..Report::default()
             }
         );

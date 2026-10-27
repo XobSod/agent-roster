@@ -178,6 +178,19 @@ pub trait Adapter: Sync {
         None
     }
 
+    /// What it keeps of its subagent `id` in the conversation whose
+    /// transcript is at `transcript`: the task it was given and the model
+    /// it runs, as far as it says yet.
+    fn subagent_info(&self, _transcript: &Path, _id: &str) -> SubagentInfo {
+        SubagentInfo::default()
+    }
+
+    /// What one of its subagents is doing now, from its transcript at
+    /// `file` (`SubagentInfo::file`), in a few words: its latest step.
+    fn subagent_doing(&self, _file: &Path) -> Option<String> {
+        None
+    }
+
     /// Every file it keeps what it spent in (its conversations', started in
     /// roster or not), each with the id of the conversation it's of.
     fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
@@ -367,6 +380,11 @@ pub struct Report {
     /// From one of its subagents (its agent's id for it), inside a turn: of
     /// the session's own conversation, model and turn it says nothing.
     pub subagent: Option<String>,
+    /// What kind that subagent is (Claude's `agent_type`: Explore, …).
+    pub subagent_kind: Option<String>,
+    /// Its agent says when each of its subagents starts (Claude): one not
+    /// heard starting started all the same, its start's report lost.
+    pub subagents_start_said: bool,
     /// The model and effort it's running.
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -397,6 +415,7 @@ pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
         Some(id) => {
             return Report {
                 subagent: Some(id.as_str().map_or_else(|| id.to_string(), String::from)),
+                subagent_kind: text(payload.get("agent_type")).filter(|k| !k.is_empty()),
                 ..Report::default()
             };
         }
@@ -411,6 +430,21 @@ pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
         model: text(payload.get("model")),
         ..Report::default()
     }
+}
+
+/// What an agent keeps of one of its subagents (`Adapter::subagent_info`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SubagentInfo {
+    /// What it was given to do, in a few words.
+    pub task: Option<String>,
+    /// The model it runs, as its agent names it (an alias, `sonnet`, or an
+    /// id); `inherit`: its parent's.
+    pub model: Option<String>,
+    /// All there: its agent's record of it read, and the model the one its
+    /// replies are from, not one asked for. Neither changes after.
+    pub settled: bool,
+    /// Its transcript, once found, where what it's doing is read.
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// What a report from agent `name` says; nothing if its payload isn't JSON.

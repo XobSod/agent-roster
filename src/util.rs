@@ -309,6 +309,22 @@ pub fn ago(elapsed_ms: i64) -> String {
     }
 }
 
+/// A model's name, short: a Claude model's family wherever it is in it
+/// (`claude-haiku-4-5-2025…`, `claude-3-5-sonnet-…`, `us.anthropic.claude-
+/// opus-…` → `haiku`, `sonnet`, `opus`), else the name cut to 10
+/// characters; none for none.
+pub fn short_model(model: &str) -> Option<String> {
+    const FAMILIES: &[&str] = &["opus", "sonnet", "haiku", "fable", "mythos"];
+    let lower = model.to_lowercase();
+    if let Some(family) =
+        (lower.split(|c: char| !c.is_ascii_alphanumeric())).find(|part| FAMILIES.contains(part))
+    {
+        return Some(family.to_string());
+    }
+    let name = model.trim();
+    (!name.is_empty()).then(|| name.chars().take(10).collect())
+}
+
 /// A running clock: `12s`, `5m`, `1h 2m`.
 pub fn clock(elapsed_ms: i64) -> String {
     let secs = elapsed_ms.max(0) / 1000;
@@ -322,6 +338,19 @@ pub fn clock(elapsed_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_is_named_short() {
+        let short = |m| short_model(m).unwrap_or_default();
+        assert_eq!(short("claude-haiku-4-5-20251001"), "haiku");
+        assert_eq!(short("claude-opus-5-5[1m]"), "opus");
+        assert_eq!(short("sonnet"), "sonnet");
+        assert_eq!(short("claude-3-5-sonnet-20241022"), "sonnet");
+        assert_eq!(short("us.anthropic.claude-opus-4-6-v1:0"), "opus");
+        assert_eq!(short("Claude-Fable-5"), "fable");
+        assert_eq!(short("gpt-6-luna-codex"), "gpt-6-luna");
+        assert_eq!(short_model(" "), None);
+    }
 
     #[test]
     fn home_is_shortened_by_whole_directories() {

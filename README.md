@@ -94,9 +94,13 @@ the CLI). Close it where it's open first, or adopt a copy and leave the original
 Roster can tell when one is open in Claude, but not in pi or Codex.
 
 A Claude session whose own turn ended with subagents still at work (in the background)
-stays working until the last one is done, and its card says how many: `↳2`. One unheard
-of for fifteen minutes is taken for gone. Sessions started before roster knew this
-(before it was updated) don't say when their subagents start: restart them.
+stays working until the last one is done, and its card says how many, on its second
+line: `↳2 ›`. `l` on the card unfolds a line for each, the model it runs, what it's
+doing (its latest step, as Claude's own footer has it; what it was given to do till its
+first) and how long it's been at it; `h` folds it again (`card_subagents` keeps
+them unfolded, the lines then saying how many, or shows the count only). One unheard of
+for fifteen minutes is taken for gone. Sessions started before roster knew this (before
+it was updated) don't say when their subagents start: restart them.
 
 Under the preview's header is what roster knows of the session: when it was made, its
 prompts, the time it worked, and from its agent's conversation, the context used,
@@ -252,6 +256,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     Codex accounts have used of their limits (`v u` still shows it).
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
+  - `card_subagents`: a Claude session's subagents at work, on its card: `"folded"`
+    (default), how many (`↳2 ›`), and a line each once you unfold it with `l`;
+    `"unfolded"`, the lines always; `"count"`, how many only.
   - `[prices."<model>"]`: what a model's calls cost, in dollars per million tokens
     (`input`, `output`, `cache_read`, `cache_write`, the last two 0 unless set, and
     `long = { above = 272000, input = …, output = … }` for a call sending more than

@@ -97,13 +97,23 @@ pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
             _ => Span::styled("stopped", Style::new().fg(FAINT)),
         },
     };
-    // Its subagents at work, before it.
+    vec![span]
+}
+
+/// How many subagents a session has at work, for its card: with whether
+/// their lines show (`unfolded`), where they can be unfolded.
+pub(super) fn subagents_mark(s: &Session, now: i64, unfolded: Option<bool>) -> Vec<Span<'static>> {
+    let chevron = match unfolded {
+        Some(true) => " ⌄",
+        Some(false) => " ›",
+        None => "",
+    };
     match s.subagents_running(now) {
-        0 => vec![span],
-        n => vec![
-            Span::styled(format!("↳{n} "), Style::new().fg(WORKING)),
-            span,
-        ],
+        0 => Vec::new(),
+        n => vec![Span::styled(
+            format!("↳{n}{chevron} "),
+            Style::new().fg(WORKING),
+        )],
     }
 }
 
@@ -115,8 +125,8 @@ pub(super) fn state_words(s: &Session, now: i64) -> Span<'static> {
         (State::Working, _) => {
             let words = match s.subagents_running(now) {
                 0 => format!("working {}", theme::clock(since)),
-                1 => format!("working {}, a subagent too", theme::clock(since)),
-                n => format!("working {}, {n} subagents too", theme::clock(since)),
+                1 => format!("working {}, 1 subagent", theme::clock(since)),
+                n => format!("working {}, {n} subagents", theme::clock(since)),
             };
             Span::styled(words, Style::new().fg(WORKING))
         }

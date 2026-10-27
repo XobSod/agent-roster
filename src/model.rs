@@ -17,6 +17,17 @@ pub const QUIET_MS: i64 = 4000;
 /// of Claude's may take (10 minutes, a command's), not to forget one in it.
 pub const SUBAGENT_QUIET_MS: i64 = 15 * 60_000;
 
+/// One of a session's subagents at work, as its agent said it started.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Subagent {
+    /// What kind it is (Claude's agent type: Explore, general-purpose, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// When it started, and when it was last heard of (ms).
+    pub started: i64,
+    pub heard: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Working,
@@ -159,10 +170,10 @@ pub struct Session {
     /// one it may never have taken (it exited first), kept to give again,
     /// asked for (`Roster::give_prompt_again`), never on its own.
     pub given_prompt: Option<String>,
-    /// The subagents its agent started that haven't said they stopped, each
-    /// with when it was last heard of (ms): for agents that say when one
-    /// starts (Claude's SubagentStart and SubagentStop).
-    pub subagents: BTreeMap<String, i64>,
+    /// The subagents its agent started that haven't said they stopped, by
+    /// its agent's id for each: for agents that say when one starts
+    /// (Claude's SubagentStart and SubagentStop).
+    pub subagents: BTreeMap<String, Subagent>,
     /// Its agent's own turn ended while subagents it started ran on (in the
     /// background): it's working on, till the last stops.
     pub awaiting_subagents: bool,
@@ -424,16 +435,35 @@ impl Session {
         ) {
             self.given_prompt = None;
         }
-        // A subagent it said started, heard of again.
-        if let Some(id) = &report.subagent
-            && let Some(heard) = self.subagents.get_mut(id)
-        {
-            *heard = (*heard).max(e.at);
+        // A subagent it said started, heard of again; one whose start
+        // wasn't heard (its report lost) at work all the same.
+        if let Some(id) = &report.subagent {
+            match self.subagents.get_mut(id) {
+                Some(subagent) => subagent.heard = subagent.heard.max(e.at),
+                None if report.subagents_start_said
+                    && matches!(e.kind.as_str(), "working" | "prompt" | "needs-input") =>
+                {
+                    let subagent = Subagent {
+                        kind: report.subagent_kind.clone(),
+                        started: e.at,
+                        heard: e.at,
+                    };
+                    self.subagents.insert(id.clone(), subagent);
+                }
+                None => {}
+            }
         }
         match e.kind.as_str() {
             "subagent-start" => {
                 if let Some(id) = &report.subagent {
-                    self.subagents.insert(id.clone(), e.at);
+                    self.subagents.insert(
+                        id.clone(),
+                        Subagent {
+                            kind: report.subagent_kind.clone(),
+                            started: e.at,
+                            heard: e.at,
+                        },
+                    );
                 }
             }
             "subagent-stop" => {
@@ -534,7 +564,7 @@ impl Session {
     /// Its subagents running as of `now`: those heard of lately.
     pub fn subagents_running(&self, now: i64) -> usize {
         (self.subagents.values())
-            .filter(|heard| now - **heard <= SUBAGENT_QUIET_MS)
+            .filter(|s| now - s.heard <= SUBAGENT_QUIET_MS)
             .count()
     }
 
@@ -544,7 +574,7 @@ impl Session {
     pub fn forget_quiet_subagents(&mut self, now: i64) -> bool {
         let before = self.subagents.len();
         self.subagents
-            .retain(|_, heard| now - *heard <= SUBAGENT_QUIET_MS);
+            .retain(|_, s| now - s.heard <= SUBAGENT_QUIET_MS);
         let forgot = self.subagents.len() != before;
         // Waiting on none (forgotten, or kept so by a save that raced
         // another's): it's over.
@@ -967,7 +997,7 @@ pub mod tests {
         assert!(!s.needs_screen_check(60_000));
         // Heard of at work, then stopped: idle, to read.
         s.apply(&event("working", 50_000), &subagent("b1"));
-        assert_eq!(s.subagents["b1"], 50_000);
+        assert_eq!(s.subagents["b1"].heard, 50_000);
         s.apply(&event("subagent-stop", 60_000), &subagent("b1"));
         assert_eq!(
             (s.state, s.awaiting_subagents, s.unread),
@@ -999,6 +1029,34 @@ pub mod tests {
         assert!(s.subagents.is_empty());
         s.apply(&event("subagent-start", 206_000), &subagent("b4"));
         s.set_state(State::Stopped, 207_000);
+        assert!(s.subagents.is_empty());
+        // What kind each is, and when it started, kept.
+        let explore = Report {
+            subagent: Some("k1".into()),
+            subagent_kind: Some("Explore".into()),
+            ..Report::default()
+        };
+        s.apply(&event("subagent-start", 208_000), &explore);
+        assert_eq!(
+            s.subagents["k1"],
+            Subagent {
+                kind: Some("Explore".into()),
+                started: 208_000,
+                heard: 208_000,
+            }
+        );
+        // One whose start's report was lost, from an agent that says
+        // subagents start: at work once it's heard of.
+        let lost = Report {
+            subagent: Some("l1".into()),
+            subagents_start_said: true,
+            ..Report::default()
+        };
+        apply(&mut s, "session", 209_000);
+        apply(&mut s, "prompt", 209_500);
+        s.apply(&event("working", 210_000), &lost);
+        assert_eq!(s.subagents["l1"].started, 210_000);
+        s.apply(&event("subagent-stop", 211_000), &lost);
         assert!(s.subagents.is_empty());
         // Subagents it never said started (codex's, as roster takes its
         // hooks) aren't waited for.

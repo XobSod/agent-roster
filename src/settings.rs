@@ -18,8 +18,8 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 
 use crate::agent;
 use crate::config::{
-    AgentConfig, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor, Notes, Order,
-    ProjectKeys, SessionKeys, ViewKeys,
+    AgentConfig, CardSubagents, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor,
+    Notes, Order, ProjectKeys, SessionKeys, ViewKeys,
 };
 
 impl crate::engine::Roster {
@@ -465,6 +465,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         default_agent,
         notes,
         group_by,
+        card_subagents,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
         prices: _,
@@ -522,6 +523,16 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                     GroupBy::Project => "project",
                 },
                 "the session list on shelves by what waits for you, or under each project",
+            ),
+            choice(
+                &["card_subagents"],
+                &["folded", "unfolded", "count"],
+                match card_subagents.unwrap_or_default() {
+                    CardSubagents::Count => "count",
+                    CardSubagents::Folded => "folded",
+                    CardSubagents::Unfolded => "unfolded",
+                },
+                "a session's subagents at work on its card: how many, and a line each once unfolded (l), always, or how many only",
             ),
             text_setting(
                 &["shell"],

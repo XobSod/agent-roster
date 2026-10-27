@@ -178,6 +178,14 @@ pub struct App {
     /// Whether the accounts are asked at all (`account_limits`).
     pub account_limits: bool,
     pub sidebar_usage: bool,
+    /// What cards say of their sessions' subagents at work (config.toml),
+    /// the cards unfolded to show them (`l`), by session, and what's read
+    /// of each subagent, by its agent's id for it.
+    pub card_subagents: crate::config::CardSubagents,
+    pub unfolded: HashSet<String>,
+    pub subagent_info: HashMap<String, crate::agent::SubagentInfo>,
+    /// What each of those is doing now (its latest step), by its id.
+    pub subagent_doing: HashMap<String, String>,
     /// What the agents spent, and the period the usage view shows of it
     /// (None: the limits).
     pub tokens: super::tokens::Tokens,
@@ -235,6 +243,10 @@ impl App {
             limits: Default::default(),
             account_limits: true,
             sidebar_usage: true,
+            card_subagents: Default::default(),
+            unfolded: HashSet::new(),
+            subagent_info: HashMap::new(),
+            subagent_doing: HashMap::new(),
             tokens: Default::default(),
             usage_period: None,
             usage_scroll: 0,
@@ -261,6 +273,18 @@ impl App {
     /// A form in a dialog, with what model choices turned out to be.
     pub(super) fn open_form(&mut self, form: Form) {
         self.dialog = Some(Dialog::Form(Box::new(form.with_models(&self.models))));
+    }
+
+    /// Whether `s`'s card shows a line for each of its subagents at work
+    /// (as of `now`): unfolded, or always.
+    pub fn subagents_shown(&self, s: &Session, now: i64) -> bool {
+        use crate::config::CardSubagents;
+        s.subagents_running(now) > 0
+            && match self.card_subagents {
+                CardSubagents::Count => false,
+                CardSubagents::Folded => self.unfolded.contains(&s.id),
+                CardSubagents::Unfolded => true,
+            }
     }
 
     /// Grouped by project, or on shelves (`group_by` in config.toml).

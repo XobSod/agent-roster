@@ -16,7 +16,7 @@ mod ui;
 
 pub use ui::status_line;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::stdout;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -57,6 +57,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.notes = roster.config.notes.clone();
     app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.card_subagents = roster.config.card_subagents();
     app.set_grouped(roster.config.grouped());
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
@@ -152,6 +153,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.notes = roster.config.notes.clone();
     app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.card_subagents = roster.config.card_subagents();
     app.set_grouped(roster.config.grouped());
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
@@ -247,6 +249,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         {
             let editing = |app: &App| app.note.as_ref().map(|n| n.shown().whose.clone());
             let (selected, mode, was_editing) = (app.selected_key(), app.mode, editing(app));
+            let unfolded = app.unfolded.len();
             match app.on_key(key) {
                 Some(Op::Quit) => return Ok(()),
                 Some(op) => {
@@ -255,6 +258,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                     last_reload = Instant::now();
                 }
                 None if app.mode != mode => reload(roster, app),
+                // A card unfolded: what its subagents are, at once.
+                None if app.unfolded.len() != unfolded => read_subagents(app),
                 // A stopped session's panel shows its note unless it's open.
                 None if app.selected_key() != selected || editing(app) != was_editing => {
                     update_preview(roster, app)
@@ -381,6 +386,7 @@ fn reload(roster: &mut Roster, app: &mut App) {
     if app.sidebar_usage || app.mode == Mode::Usage {
         app.limits.read_transcripts(&app.sessions);
     }
+    read_subagents(app);
     // Only the session list shows the preview.
     if app.mode == Mode::Sessions {
         fit(roster, app);
@@ -511,6 +517,63 @@ fn group_prompts(app: &mut App, group: Group, rows: u16) -> HashMap<String, Stri
         });
     }
     prompts
+}
+
+/// How long after a subagent started what's read of it is read again, till
+/// it's all there (its files written as it starts, its model as it first
+/// replies); then what's there is what shows.
+const SUBAGENT_SETTLES_MS: i64 = 2 * 60_000;
+
+/// What's read of the subagents cards show a line for: their tasks and
+/// models, each read once it's all there (`SubagentInfo::settled`), or for
+/// a while after it started; and what each is doing, each time. What no
+/// card shows any more is let go, and a card whose session has none at work
+/// any more folds.
+fn read_subagents(app: &mut App) {
+    let now = crate::util::now_ms();
+    let busy: HashSet<String> = (app.sessions.iter())
+        .filter(|s| s.subagents_running(now) > 0)
+        .map(|s| s.id.clone())
+        .collect();
+    app.unfolded.retain(|id| busy.contains(id));
+    let mut shown = HashSet::new();
+    let mut unread = Vec::new();
+    let listed = app.mode == Mode::Sessions;
+    for s in app
+        .sessions
+        .iter()
+        .filter(|s| listed && app.subagents_shown(s, now))
+    {
+        let Some(path) = s.transcript_path.as_deref() else {
+            continue;
+        };
+        for (id, subagent) in &s.subagents {
+            if now - subagent.heard > crate::model::SUBAGENT_QUIET_MS {
+                continue;
+            }
+            shown.insert(id.clone());
+            let known = app.subagent_info.get(id);
+            let settling = now - subagent.started <= SUBAGENT_SETTLES_MS;
+            if known.is_none() || known.is_some_and(|i| !i.settled && settling) {
+                unread.push((s.agent.clone(), path.to_string(), id.clone()));
+            }
+        }
+    }
+    for (name, path, id) in unread {
+        let info = agent::adapter(&name).subagent_info(std::path::Path::new(&path), &id);
+        app.subagent_info.insert(id, info);
+    }
+    app.subagent_info.retain(|id, _| shown.contains(id));
+    let agents: HashMap<&str, &str> = (app.sessions.iter())
+        .flat_map(|s| s.subagents.keys().map(|id| (id.as_str(), s.agent.as_str())))
+        .collect();
+    let doing: HashMap<String, String> = (app.subagent_info.iter())
+        .filter_map(|(id, info)| {
+            let adapter = agent::adapter(agents.get(id.as_str())?);
+            Some((id.clone(), adapter.subagent_doing(info.file.as_deref()?)?))
+        })
+        .collect();
+    app.subagent_doing = doing;
 }
 
 /// Keeps the transcripts read on a thread that have come (`group_prompts`);
@@ -992,6 +1055,82 @@ fn attach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_unfolded_cards_show_of_subagents_is_read_and_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("c1/subagents");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join("agent-a1.jsonl"), "").unwrap();
+        std::fs::write(
+            runs.join("agent-a1.meta.json"),
+            r#"{"agentType":"general-purpose","description":"Review it","model":"sonnet"}"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            Keymap::new(&Default::default()).unwrap(),
+            String::new(),
+            Vec::new(),
+        );
+        let now = crate::util::now_ms();
+        let mut s = crate::model::tests::session("a");
+        s.transcript_path = Some(dir.path().join("c1.jsonl").display().to_string());
+        s.subagents = [(
+            "a1".to_string(),
+            crate::model::Subagent {
+                kind: None,
+                started: now,
+                heard: now,
+            },
+        )]
+        .into();
+        app.set_data(Vec::new(), vec![s.clone()]);
+        // Folded: nothing read.
+        read_subagents(&mut app);
+        assert!(app.subagent_info.is_empty());
+        app.unfolded.insert(s.id.clone());
+        read_subagents(&mut app);
+        assert_eq!(app.subagent_info["a1"].task.as_deref(), Some("Review it"));
+        // All there (it replied): not read again; till then, for a while.
+        assert!(!app.subagent_info["a1"].settled);
+        let replied = r#"{"type":"user","message":{"content":"go"}}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5"}}
+"#;
+        std::fs::write(runs.join("agent-a1.jsonl"), replied).unwrap();
+        read_subagents(&mut app);
+        assert!(app.subagent_info["a1"].settled);
+        // What it's doing, read each time.
+        assert!(!app.subagent_doing.contains_key("a1"));
+        let working = format!(
+            "{replied}{}\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/w/db.rs"}}]}}"#
+        );
+        std::fs::write(runs.join("agent-a1.jsonl"), working).unwrap();
+        read_subagents(&mut app);
+        assert_eq!(app.subagent_doing["a1"], "Reading db.rs");
+        std::fs::remove_file(runs.join("agent-a1.meta.json")).unwrap();
+        read_subagents(&mut app);
+        assert_eq!(app.subagent_info["a1"].task.as_deref(), Some("Review it"));
+        let mut late = s.clone();
+        late.subagents.get_mut("a1").unwrap().started = now - SUBAGENT_SETTLES_MS - 1;
+        app.subagent_info.clear();
+        app.set_data(Vec::new(), vec![late]);
+        read_subagents(&mut app);
+        assert!(!app.subagent_info["a1"].settled);
+        std::fs::write(
+            runs.join("agent-a1.meta.json"),
+            r#"{"description":"Review it"}"#,
+        )
+        .unwrap();
+        read_subagents(&mut app);
+        assert_eq!(app.subagent_info["a1"].task, None);
+        // Gone: let go, and its card folds.
+        s.subagents.clear();
+        app.set_data(Vec::new(), vec![s]);
+        read_subagents(&mut app);
+        assert!(app.subagent_info.is_empty());
+        assert!(app.unfolded.is_empty());
+    }
 
     #[test]
     fn only_the_main_threads_panic_gives_the_terminal_back() {

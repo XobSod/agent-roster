@@ -698,7 +698,16 @@ fn a_card_says_how_many_subagents_are_at_work() {
     let now = crate::util::now_ms();
     app.sessions[0].state = crate::model::State::Working;
     app.sessions[0].state_since = Some(now - 65_000);
-    app.sessions[0].subagents = [("b1".to_string(), now), ("b2".to_string(), now - 1000)].into();
+    let heard = |at| crate::model::Subagent {
+        kind: None,
+        started: at,
+        heard: at,
+    };
+    app.sessions[0].subagents = [
+        ("b1".to_string(), heard(now)),
+        ("b2".to_string(), heard(now - 1000)),
+    ]
+    .into();
     app.set_data(app.projects.clone(), app.sessions.clone());
     let at = (app.entries.iter())
         .position(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
@@ -706,16 +715,207 @@ fn a_card_says_how_many_subagents_are_at_work() {
     app.selected = at;
     let screen = render(&app, 120, 16);
     assert!(screen.contains("↳2 "), "{screen}");
-    assert!(screen.contains("working 1m, 2 subagents too"), "{screen}");
+    assert!(screen.contains("working 1m, 2 subagents"), "{screen}");
     // One unheard of for long isn't counted.
     let mut sessions = app.sessions.clone();
-    sessions[0]
-        .subagents
-        .insert("b2".into(), now - crate::model::SUBAGENT_QUIET_MS - 1000);
+    sessions[0].subagents.insert(
+        "b2".into(),
+        heard(now - crate::model::SUBAGENT_QUIET_MS - 1000),
+    );
     app.set_data(app.projects.clone(), sessions);
     let screen = render(&app, 120, 16);
     assert!(screen.contains("↳1 "), "{screen}");
-    assert!(screen.contains("a subagent too"), "{screen}");
+    assert!(screen.contains("working 1m, 1 subagent"), "{screen}");
+    assert!(!screen.contains("subagents"), "{screen}");
+}
+
+#[test]
+fn a_card_unfolds_to_show_its_subagents() {
+    use crate::config::CardSubagents;
+    let mut app = app();
+    let now = crate::util::now_ms();
+    let at = |started: i64, kind: &str| crate::model::Subagent {
+        kind: Some(kind.into()),
+        started: now - started,
+        heard: now,
+    };
+    let mut sessions = app.sessions.clone();
+    sessions[0].state = crate::model::State::Working;
+    sessions[0].running_model = Some("claude-opus-5-5[1m]".into());
+    sessions[0].subagents = [
+        ("b2".to_string(), at(185_000, "general-purpose")),
+        ("b1".to_string(), at(725_000, "Explore")),
+        ("b3".to_string(), at(5_000, "fork")),
+    ]
+    .into();
+    app.set_data(app.projects.clone(), sessions);
+    app.selected = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+        .unwrap();
+    let info = |task: &str, model: &str| crate::agent::SubagentInfo {
+        task: Some(task.into()),
+        model: Some(model.into()),
+        settled: true,
+        file: None,
+    };
+    app.subagent_info = [
+        (
+            "b1".to_string(),
+            info(
+                "Find where the tmux calls are made",
+                "claude-haiku-4-5-20251001",
+            ),
+        ),
+        ("b3".to_string(), info("Fix it", "inherit")),
+    ]
+    .into();
+    let key = |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    // Folded: how many, and that it opens.
+    // Folded: how many, and that it opens, on its details' line.
+    let screen = render(&app, 120, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let card = (lines.iter())
+        .position(|l| l.contains("↳3 › "))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(lines[card].contains("✱ api"), "{screen}");
+    assert!(!lines[card - 1].contains("↳3"), "{screen}");
+    assert!(!screen.contains("↳ haiku"), "{screen}");
+    // Unfolded: a line each, as they started: the model, what it's at cut
+    // to fit, how long.
+    key(&mut app, 'l');
+    let screen = render(&app, 120, 24);
+    assert!(screen.contains("↳3 ⌄ "), "{screen}");
+    let lines: Vec<&str> = screen.lines().collect();
+    let first = (lines.iter())
+        .position(|l| l.contains("↳ haiku · Find where"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(
+        lines[first].contains("…") && lines[first].contains(" 12m"),
+        "{screen}"
+    );
+    // Not read yet: its kind; its parent's model, the session's.
+    assert!(
+        lines[first + 1].contains("↳ general-purpose") && lines[first + 1].contains(" 3m"),
+        "{screen}"
+    );
+    assert!(
+        lines[first + 2].contains("↳ opus · Fix it") && lines[first + 2].contains(" 5s"),
+        "{screen}"
+    );
+    // What it's doing, once it says, in place of what it was given.
+    app.subagent_doing = [("b3".to_string(), "Run the tests".to_string())].into();
+    let screen = render(&app, 120, 24);
+    assert!(screen.contains("↳ opus · Run the tests"), "{screen}");
+    app.subagent_doing.clear();
+    // h folds it, then its shelf.
+    key(&mut app, 'h');
+    assert!(!render(&app, 120, 24).contains("↳ haiku"));
+    assert!(
+        app.entries
+            .iter()
+            .any(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+    );
+    key(&mut app, 'h');
+    assert!(
+        !app.entries
+            .iter()
+            .any(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+    );
+    key(&mut app, 'l');
+    app.selected = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+        .unwrap();
+    // Always unfolded: the lines say how many; the count only: no lines.
+    app.card_subagents = CardSubagents::Unfolded;
+    let screen = render(&app, 120, 24);
+    assert!(!screen.contains("↳3"), "{screen}");
+    assert!(screen.contains("↳ haiku · Find where"), "{screen}");
+    // The header still says how many.
+    assert!(screen.contains("3 subagents"), "{screen}");
+    app.card_subagents = CardSubagents::Count;
+    let screen = render(&app, 120, 24);
+    assert!(
+        screen.contains("↳3 ") && !screen.contains("↳ haiku"),
+        "{screen}"
+    );
+    key(&mut app, 'l');
+    assert!(!render(&app, 120, 24).contains("↳ haiku"));
+}
+
+#[test]
+fn only_a_card_with_subagents_at_work_folds_and_unfolds() {
+    use crate::config::CardSubagents;
+    let mut app = app();
+    let now = crate::util::now_ms();
+    let at = |started: i64, heard: i64| crate::model::Subagent {
+        kind: Some("Explore".into()),
+        started: now - started,
+        heard: now - heard,
+    };
+    let mut sessions = app.sessions.clone();
+    sessions[0].state = crate::model::State::Working;
+    // Two started at once, after their file names; one long unheard of.
+    sessions[0].subagents = [
+        ("b2".to_string(), at(60_000, 0)),
+        ("b1".to_string(), at(60_000, 0)),
+        (
+            "b0".to_string(),
+            at(30_000, crate::model::SUBAGENT_QUIET_MS + 1),
+        ),
+    ]
+    .into();
+    app.set_data(app.projects.clone(), sessions);
+    let card = |app: &App| {
+        (app.entries.iter()).position(|e| matches!(e, Entry::Card(s) if !s.subagents.is_empty()))
+    };
+    app.selected = card(&app).unwrap();
+    let info = |task: &str| crate::agent::SubagentInfo {
+        task: Some(task.into()),
+        ..Default::default()
+    };
+    app.subagent_info = [
+        ("b1".to_string(), info("first")),
+        ("b2".to_string(), info("second")),
+    ]
+    .into();
+    let key = |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    key(&mut app, 'l');
+    let screen = render(&app, 120, 24);
+    assert!(screen.contains("↳2 ⌄"), "{screen}");
+    let lines: Vec<&str> = screen.lines().collect();
+    let first = (lines.iter())
+        .position(|l| l.contains("↳ first"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(lines[first + 1].contains("↳ second"), "{screen}");
+    assert!(!lines[first + 2].contains("↳ "), "{screen}");
+    // Always unfolded, or the count only: l and h are the shelf's.
+    for mode in [CardSubagents::Unfolded, CardSubagents::Count] {
+        app.unfolded.clear();
+        app.card_subagents = mode;
+        key(&mut app, 'l');
+        assert!(app.unfolded.is_empty());
+        app.selected = card(&app).unwrap();
+        key(&mut app, 'h');
+        assert!(card(&app).is_none(), "{mode:?}");
+        key(&mut app, 'l');
+        app.selected = card(&app).unwrap();
+    }
+    // Unfolded once, its subagents gone since: h folds its shelf.
+    app.card_subagents = CardSubagents::Folded;
+    let mut sessions = app.sessions.clone();
+    let id = sessions[0].id.clone();
+    sessions[0].subagents.clear();
+    app.set_data(app.projects.clone(), sessions);
+    app.unfolded.insert(id.clone());
+    app.selected = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if s.id == id))
+        .unwrap();
+    key(&mut app, 'h');
+    assert!(
+        !app.entries
+            .iter()
+            .any(|e| matches!(e, Entry::Card(s) if s.id == id))
+    );
 }
 
 #[test]

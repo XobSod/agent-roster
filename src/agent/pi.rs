@@ -294,6 +294,8 @@ mod tests {
                 started: true,
                 compacted: false,
                 subagent: None,
+                subagent_kind: None,
+                subagents_start_said: false,
                 model: Some("claude-opus-4-8".into()),
                 effort: Some("medium".into()),
                 title: Some(None),

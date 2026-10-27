@@ -17,6 +17,10 @@
 //!                                 # Claude and codex accounts have used of their limits
 //! group_by = "project"            # "attention" (default): the list on shelves, by what
 //!                                 # waits for you; "project": under each project
+//! card_subagents = "unfolded"     # a session's subagents at work, on its card:
+//!                                 # "folded" (default): how many, and a line each
+//!                                 # once unfolded (l); "unfolded": the lines always;
+//!                                 # "count": how many only
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -99,6 +103,9 @@ pub struct Config {
     pub notes: Notes,
     /// How the session list is grouped (default: by attention, on shelves).
     pub group_by: Option<GroupBy>,
+    /// What a card says of its session's subagents at work (default: their
+    /// count, and a line each once unfolded).
+    pub card_subagents: Option<CardSubagents>,
     /// What models' calls cost, by model: in place of roster's own prices,
     /// or for models it has none for (`tokens::Prices`).
     pub prices: BTreeMap<String, Price>,
@@ -151,6 +158,17 @@ pub enum GroupBy {
     #[default]
     Attention,
     Project,
+}
+
+/// What a card says of its session's subagents at work: their count only;
+/// that, and a line each when unfolded (`l`); or the lines always.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CardSubagents {
+    Count,
+    #[default]
+    Folded,
+    Unfolded,
 }
 
 /// Sessions' and projects' notes: where they open, and the editor's keys.
@@ -575,6 +593,10 @@ impl Config {
 
     pub fn sidebar_usage(&self) -> bool {
         self.sidebar_usage.unwrap_or(true)
+    }
+
+    pub fn card_subagents(&self) -> CardSubagents {
+        self.card_subagents.unwrap_or_default()
     }
 
     /// Whether the session list is grouped by project.

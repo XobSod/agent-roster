@@ -178,6 +178,22 @@ impl App {
 
     /// Folds (or unfolds) the selected group; from a session, its group.
     pub(super) fn fold(&mut self, fold: bool) {
+        // A card whose session has subagents at work opens to show them,
+        // and folds before its shelf does.
+        if let Some(Entry::Card(s)) = self.selected_entry()
+            && self.card_subagents == crate::config::CardSubagents::Folded
+        {
+            let id = s.id.clone();
+            let has = s.subagents_running(crate::util::now_ms()) > 0;
+            match fold {
+                false if has => {
+                    self.unfolded.insert(id);
+                    return;
+                }
+                true if has && self.unfolded.remove(&id) => return,
+                _ => {}
+            }
+        }
         let group = match self.selected_entry() {
             Some(Entry::Heading { group, .. }) => *group,
             Some(Entry::Card(s) | Entry::Row(s)) if fold => list::group_of(s, self.grouped),

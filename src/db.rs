@@ -1503,17 +1503,39 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         asked_by: r.get("asked_by")?,
         given_prompt: r.get("given_prompt")?,
         subagents: (r.get::<_, Option<String>>("subagents")?)
-            .and_then(|text| serde_json::from_str(&text).ok())
+            .map(|text| subagents_from(&text))
             .unwrap_or_default(),
         awaiting_subagents: r.get("awaiting_subagents")?,
         note: note_from_row(r)?,
     })
 }
 
-/// A session's subagents as kept: JSON, by id when each was last heard of;
-/// nothing for none.
-fn subagents_text(subagents: &std::collections::BTreeMap<String, i64>) -> Option<String> {
+/// A session's subagents as kept: JSON, by id; nothing for none.
+fn subagents_text(
+    subagents: &std::collections::BTreeMap<String, crate::model::Subagent>,
+) -> Option<String> {
     (!subagents.is_empty()).then(|| serde_json::to_string(subagents).unwrap_or_default())
+}
+
+/// A session's subagents from what's kept; as a build kept them that kept
+/// only when each was last heard of, too. None from what isn't either.
+fn subagents_from(text: &str) -> std::collections::BTreeMap<String, crate::model::Subagent> {
+    use crate::model::Subagent;
+    use std::collections::BTreeMap;
+    if let Ok(subagents) = serde_json::from_str::<BTreeMap<String, Subagent>>(text) {
+        return subagents;
+    }
+    let heard: BTreeMap<String, i64> = serde_json::from_str(text).unwrap_or_default();
+    (heard.into_iter())
+        .map(|(id, at)| {
+            let subagent = Subagent {
+                kind: None,
+                started: at,
+                heard: at,
+            };
+            (id, subagent)
+        })
+        .collect()
 }
 
 /// The highest project id given, 0 for none.
@@ -1921,10 +1943,30 @@ mod tests {
         after.fork_from = Some("f".into());
         after.asked_by = Some("a1".into());
         after.given_prompt = Some("g".into());
-        after.subagents = [("a2".to_string(), 8)].into();
+        after.subagents = [(
+            "a2".to_string(),
+            crate::model::Subagent {
+                kind: Some("Explore".into()),
+                started: 8,
+                heard: 9,
+            },
+        )]
+        .into();
         after.awaiting_subagents = true;
         db.save_changes(&before, &after).unwrap();
         assert_eq!(db.session(&s.id).unwrap(), after);
+    }
+
+    #[test]
+    fn subagents_kept_as_an_older_build_kept_them_are_read() {
+        let old = subagents_from(r#"{"b1":1000}"#);
+        assert_eq!(
+            (old["b1"].started, old["b1"].heard, old["b1"].kind.clone()),
+            (1000, 1000, None)
+        );
+        assert!(subagents_from("not json").is_empty());
+        let new = subagents_text(&old).unwrap();
+        assert_eq!(subagents_from(&new), old);
     }
 
     #[test]

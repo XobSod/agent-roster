@@ -518,6 +518,24 @@ impl Session {
                 }
                 self.unread = true;
             }
+            // A compaction you asked for: work, though not a turn, while it
+            // runs, waiting as it was once done; what else it was at (a
+            // question, subagents left running) stays.
+            "compacting" => {
+                if report.subagent.is_none() && self.state == State::Idle {
+                    let turns = self.turns;
+                    self.set_state(State::Working, e.at);
+                    self.turns = turns;
+                }
+            }
+            "compacted" => {
+                if report.subagent.is_none()
+                    && self.state == State::Working
+                    && !self.awaiting_subagents
+                {
+                    self.set_state(State::Idle, e.at);
+                }
+            }
             // A compaction, which Claude and codex make mid-turn when the
             // context is full, leaves it as it was.
             "session" if report.compacted => {}
@@ -931,6 +949,45 @@ pub mod tests {
         assert_eq!((s.turns, s.worked_ms), (1, 4_000));
         apply(&mut s, "working", 20_000);
         assert_eq!((s.turns, s.worked(25_000)), (2, 9_000));
+    }
+
+    #[test]
+    fn a_compaction_you_asked_for_works_till_its_done() {
+        let subagent = |id: &str| Report {
+            subagent: Some(id.into()),
+            ..Report::default()
+        };
+        let mut s = session("a");
+        s.state = State::Idle;
+        s.state_since = Some(0);
+        // /compact: no prompt, but at work, though no turn; then waiting
+        // again, nothing new to read.
+        apply(&mut s, "compacting", 1_000);
+        assert_eq!((s.state, s.turns), (State::Working, 0));
+        apply(&mut s, "compacted", 5_000);
+        assert_eq!((s.state, s.unread, s.turns), (State::Idle, false, 0));
+        // With subagents left running: working on till they're done.
+        apply(&mut s, "prompt", 6_000);
+        s.apply(&event("subagent-start", 6_100), &subagent("b1"));
+        apply(&mut s, "idle", 7_000);
+        apply(&mut s, "compacting", 8_000);
+        apply(&mut s, "compacted", 9_000);
+        assert_eq!((s.state, s.awaiting_subagents), (State::Working, true));
+        // A question of one of them stays.
+        s.apply(&event("needs-input", 9_500), &subagent("b1"));
+        apply(&mut s, "compacting", 10_000);
+        apply(&mut s, "compacted", 11_000);
+        assert_eq!(s.state, State::NeedsInput);
+        s.apply(&event("subagent-stop", 12_000), &subagent("b1"));
+        assert_eq!((s.state, s.unread), (State::Idle, true));
+        // A subagent's isn't the session's.
+        s.apply(&event("compacting", 13_000), &subagent("b2"));
+        assert_eq!(s.state, State::Idle);
+        // One that failed (no end said): the still screen ends it.
+        apply(&mut s, "compacting", 14_000);
+        s.observe_screen("still", 14_000);
+        assert!(s.correct_stale_working(14_000 + QUIET_MS, false));
+        assert_eq!(s.state, State::Idle);
     }
 
     #[test]

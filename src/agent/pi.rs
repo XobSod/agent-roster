@@ -359,6 +359,8 @@ openrouter gpt-5              400K     128K     yes       yes
             "idle",
             "needs-input",
             "info",
+            "compacting",
+            "compacted",
         ] {
             assert!(
                 EXTENSION.contains(&format!("report(\"{kind}\"")),

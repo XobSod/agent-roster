@@ -57,6 +57,16 @@ export default function (pi: any) {
   pi.on("agent_start", () => report("working"));
   pi.on("tool_execution_end", () => report("working"));
   pi.on("agent_settled", () => report("idle"));
+  // A compaction you asked for (/compact), work outside a turn, till it's
+  // done or failed; pi's own run inside a turn.
+  pi.on("session_before_compact", (event: any) => {
+    if (event.reason === "manual") report("compacting");
+  });
+  const compacted = (event: any) => {
+    if (event.reason === "manual") report("compacted");
+  };
+  pi.on("session_compact", compacted);
+  pi.on("session_compact_failed", compacted);
 
   // A dialog (an extension asking permission, say) blocking a turn.
   let asking = false;

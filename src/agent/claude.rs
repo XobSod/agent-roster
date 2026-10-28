@@ -246,7 +246,8 @@ impl Adapter for Claude {
 /// Extra settings for this run only: hooks that report to roster. They run next to
 /// the user's and the project's own hooks.
 fn settings(roster_exe: &Path) -> String {
-    let report = |kind: &str| json!([{"hooks": [{"type": "command", "command": format!("{} report {kind}", sh_quote(&roster_exe.to_string_lossy()))}]}]);
+    let command = |kind: &str| json!({"type": "command", "command": format!("{} report {kind}", sh_quote(&roster_exe.to_string_lossy()))});
+    let report = |kind: &str| json!([{"hooks": [command(kind)]}]);
     json!({"hooks": {
         "SessionStart": report("session"),
         // Working too, and tells that you gave it a task.
@@ -258,6 +259,11 @@ fn settings(roster_exe: &Path) -> String {
         // work (in the background) to leave it working.
         "SubagentStart": report("subagent-start"),
         "SubagentStop": report("subagent-stop"),
+        // A compaction you asked for (`/compact`), work without a prompt;
+        // Claude's own, mid-turn or a subagent's (which says nothing of
+        // whose it is), are left out.
+        "PreCompact": [{"matcher": "manual", "hooks": [command("compacting")]}],
+        "PostCompact": [{"matcher": "manual", "hooks": [command("compacted")]}],
     }})
     .to_string()
 }
@@ -353,11 +359,16 @@ mod tests {
         for (hook, kind) in [
             ("SubagentStart", "subagent-start"),
             ("SubagentStop", "subagent-stop"),
+            ("PreCompact", "compacting"),
+            ("PostCompact", "compacted"),
         ] {
             assert_eq!(
                 settings["hooks"][hook][0]["hooks"][0]["command"],
                 format!("'/my tools/roster' report {kind}")
             );
+        }
+        for hook in ["PreCompact", "PostCompact"] {
+            assert_eq!(settings["hooks"][hook][0]["matcher"], "manual");
         }
     }
 

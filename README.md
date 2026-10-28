@@ -317,7 +317,12 @@ All files are optional and live in `~/.config/agent-roster/`:
     attached, so it shows all of their screen; `"never"` turns that off, also per agent
     under `[agents.<name>]`. Agents drawing on the normal screen, Claude's classic
     renderer among them, keep your terminal's size: resizing would garble their
-    history in tmux.
+    history in tmux. `"always"` sizes every agent to the preview's width and keeps it
+    there, while you're attached too (with your terminal's height; the rest of the
+    terminal left blank, and narrower only in a narrower terminal): the preview shows all
+    of each agent's screen, and copy mode its history as written, since its width changes
+    only with the preview's. New sessions start at the size the TUI last showed, from
+    the CLI too.
   - `[order]`: per shelf (`needs_input`, `idle`, `stopped`, `working`, `archived`),
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
@@ -398,7 +403,11 @@ All files are optional and live in `~/.config/agent-roster/`:
   `export TOKEN="$(token-cmd)"` hides the command's failure, so the agent starts
   with `TOKEN` empty. A `.agent-roster.env` in a project's directory is sourced after it.
 - `tmux.conf`: additions to roster's tmux, such as the scrolling setup below. By
-  default every key except Ctrl+Q goes to the agent.
+  default every key except Ctrl+Q goes to the agent, and pane borders are hidden (each
+  session has one pane, and with `fit_preview = "always"` tmux would draw a line at the
+  edge of a window narrower than your terminal); set a border style here to bring them
+  back, as `examples/tmux.conf` shows. It's read after roster's own settings, so yours
+  win. Your own tmux, outside roster's, isn't touched.
 
 State lives in `~/.local/state/agent-roster/`. Uninstall: remove the binary and both
 directories, and `tmux -L agent-roster kill-server`.

@@ -230,6 +230,83 @@ fn agents_drawing_full_screen_fit_the_preview() {
 }
 
 #[test]
+fn fitted_always_every_agent_keeps_the_previews_width() {
+    let Some(t) = TestEnv::new("fitalways") else {
+        return;
+    };
+    let config = t.config_dir().join("config.toml");
+    // Global, so before the agents' tables.
+    let text =
+        "fit_preview = \"always\"\n".to_string() + &std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, text).unwrap();
+    let full = t.path("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join(".fullscreen"), "").unwrap();
+    t.ok(&[
+        "project",
+        "add",
+        "classic",
+        t.path("proj").to_str().unwrap(),
+    ]);
+    t.ok(&["project", "add", "full", full.to_str().unwrap()]);
+    t.ok(&["new", "classic", "--name", "a"]);
+    t.ok(&["new", "full", "--name", "b"]);
+    t.wait_for("the agents idle", |t| {
+        ["a", "b"]
+            .iter()
+            .all(|n| t.session(n, false).unwrap()["state"] == "idle")
+    });
+    let size = |name: &str| -> String {
+        let id = t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket, "display", "-p", "-t"])
+            .arg(format!("=r-{id}:"))
+            .arg("#{window_width}x#{window_height}")
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // Both fitted, the one on the normal screen too.
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    t.wait_for("both fitted", |_| {
+        size("a") == "82x26" && size("b") == "82x26"
+    });
+    // Attached: the preview's width kept, the terminal's height (less the
+    // line at the top) given; back, the preview's again.
+    for _ in 0..10 {
+        if term.screen().contains("classic / a ") {
+            break;
+        }
+        term.keys(&["j"]);
+    }
+    term.wait_for("a selected", "classic / a ");
+    term.keys(&["Enter"]);
+    term.wait_for_gone("the agent full screen", "Enter attach");
+    t.wait_for("a as wide as the preview", |_| size("a") == "82x29");
+    term.keys(&["C-q"]);
+    term.wait_for("the list again", "Enter attach");
+    t.wait_for("a fitted again", |_| size("a") == "82x26");
+    // Started from the CLI meanwhile: the preview's size, as the TUI said it.
+    t.ok(&["new", "classic", "--name", "n"]);
+    assert_eq!(size("n"), "82x26");
+    // Back to the default: its size let go, an attach sizes it to the
+    // terminal again.
+    t.ok(&["config", "set", "fit_preview", "auto"]);
+    term.wait_for("the setting in use", "config.toml changed");
+    term.wait_for("a selected", "classic / a ");
+    term.keys(&["Enter"]);
+    term.wait_for_gone("the agent full screen", "Enter attach");
+    t.wait_for("a at the terminal's size", |_| size("a") == "120x29");
+    term.keys(&["C-q"]);
+    term.wait_for("the list again", "Enter attach");
+}
+
+#[test]
 fn pi_offers_the_models_it_lists() {
     use std::os::unix::fs::PermissionsExt;
     let Some(t) = TestEnv::new("models") else {

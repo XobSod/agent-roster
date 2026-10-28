@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::Config;
+use crate::config::{Config, FitPreview};
 use crate::db::Db;
 use crate::model::{Project, QUIET_MS, Session, State};
 use crate::note::{self, Note, Noted, Whose};
@@ -110,6 +110,9 @@ fn config_notice(e: &anyhow::Error) -> String {
 const DEFAULT_SIZE: (u16, u16) = (160, 48);
 /// How long `stop` waits after SIGTERM before SIGKILL.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The TUI's preview size, in the database's meta table: `WxH`.
+const PREVIEW_SIZE: &str = "preview_size";
 /// Screen changes this soon after a start are the agent starting up, not a turn.
 const BOOT_GRACE_MS: i64 = 5000;
 /// Screen changes this soon after roster resized a window are the agent
@@ -147,6 +150,8 @@ pub struct Roster {
     pub(crate) notices: Vec<String>,
     /// The processes as last read, for the CPU each took since.
     sampler: procs::Sampler,
+    /// The preview's size as this process last saved it (`PREVIEW_SIZE`).
+    told_preview: Option<(u16, u16)>,
     /// Which of its sessions each process was started in, by pid and start,
     /// as read once from its environment.
     sessions_of: HashMap<(i32, u64), Option<String>>,
@@ -261,6 +266,7 @@ impl Roster {
             config_text,
             config_refused: None,
             sampler: procs::Sampler::default(),
+            told_preview: None,
             sessions_of: HashMap::new(),
         })
     }
@@ -451,42 +457,69 @@ impl Roster {
         })
     }
 
-    /// Sizes the windows of agents drawing full screen to `size` (the TUI's
-    /// preview) while no one is attached, so their screens fit it instead of
-    /// being cut. Only the alternate screen is safe to resize: it keeps no
+    /// Sizes the windows of agents to `size` (the TUI's preview) while no one
+    /// is attached, so their screens fit it instead of being cut. By default
+    /// only those drawing full screen: the alternate screen keeps no
     /// scrollback that a resize could garble, so agents on the normal screen
-    /// (Claude's classic renderer, say) keep the terminal's size. Attaching
-    /// sizes a window to the terminal again, as before. Each running agent is
-    /// fitted once (`fitted` notes it by window and process; the caller clears
-    /// it for a new size or after an attach), so a window someone else sized,
-    /// another TUI for instance, isn't fought over.
-    /// `sessions` are the live ones, as just loaded.
+    /// (Claude's classic renderer, say) keep the terminal's size, and
+    /// attaching sizes a window to the terminal again. With `fit_preview =
+    /// "always"`, every agent, its window's size kept as an attach comes
+    /// (`attach_terminal` gives it the terminal's height): its width never
+    /// changes but with the preview's, so its history isn't wrapped anew.
+    /// Each running agent is fitted once (`fitted` notes it by window and
+    /// process; the caller clears it for a new size or after an attach), so
+    /// a window someone else sized, another TUI for instance, isn't fought
+    /// over. `sessions` are the live ones, as just loaded.
     pub fn fit_screens(
         &mut self,
         sessions: &[Session],
         size: (u16, u16),
         fitted: &mut HashSet<String>,
     ) -> Result<()> {
+        // For sessions started from the CLI meanwhile, or before the TUI
+        // runs again.
+        if self.told_preview != Some(size) {
+            self.db
+                .set_meta(PREVIEW_SIZE, &format!("{}x{}", size.0, size.1))?;
+            self.told_preview = Some(size);
+        }
         let panes = self.panes()?.into_owned();
         for s in sessions.iter().filter(|s| s.deleted_at.is_none()) {
             let name = s.tmux_name();
             let Some(pane) = panes.get(&name) else {
                 continue;
             };
-            if pane.dead
-                || !pane.alternate
-                || pane.clients > 0
-                || !agent::fits_preview(&s.agent, &self.config)
-            {
+            let mode = agent::fit_mode(&s.agent, &self.config);
+            let fits = match mode {
+                FitPreview::Never => false,
+                FitPreview::Auto => pane.alternate,
+                FitPreview::Always => true,
+            };
+            let key = format!("{name} {:?}", pane.pid);
+            // Attached elsewhere: fitted again once that's over.
+            if pane.clients > 0 {
+                fitted.remove(&key);
+            }
+            if pane.dead || pane.clients > 0 || !fits {
                 continue;
             }
-            if fitted.insert(format!("{name} {:?}", pane.pid)) && pane.size != size {
-                self.tmux.resize(&name, size)?;
+            if fitted.insert(key) && pane.size != size {
+                match mode {
+                    FitPreview::Always => self.tmux.resize_fixed(&name, size)?,
+                    _ => self.tmux.resize(&name, size)?,
+                }
                 self.resized
                     .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
             }
         }
         Ok(())
+    }
+
+    /// The TUI's preview size as it last fitted agents to it.
+    fn preview_size(&self) -> Option<(u16, u16)> {
+        let size = self.db.meta(PREVIEW_SIZE).ok()??;
+        let (w, h) = size.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
     }
 
     /// `refresh` for one-shot commands. The TUI polls anyway; a single command has
@@ -874,9 +907,19 @@ impl Roster {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)
         } else {
             let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
-            // A row less for the status line, so attaching doesn't resize it.
-            let size = (w, h - u16::from(self.config.status_line() && h > 1));
-            self.tmux.new_session(&name, &s.workdir, size, &env, &argv)
+            // A row less for the status line, so attaching doesn't resize it;
+            // fitted always, the preview's size, as a TUI last told it.
+            let mut size = (w, h - u16::from(self.config.status_line() && h > 1));
+            let always = agent::fit_mode(&s.agent, &self.config) == FitPreview::Always;
+            if always {
+                size = self.preview_size().unwrap_or(size);
+            }
+            let started = self.tmux.new_session(&name, &s.workdir, size, &env, &argv);
+            // Kept so as an attach comes; if not, the TUI fits it again.
+            if always && started.is_ok() {
+                self.tmux.resize_fixed(&name, size).ok();
+            }
+            started
         };
         // Not started: no script to read the prompt's file and remove it.
         if let Err(e) = started {
@@ -1302,6 +1345,19 @@ impl Roster {
         if self.config.status_line() {
             let (left, right) = crate::tui::status_line(&s, &self.config.keys.detach);
             self.tmux.label(&s.tmux_name(), &left, &right).ok();
+        }
+        // Fitted always: the preview's width kept (narrower only in a
+        // narrower terminal, which would cut it), the terminal's height (less
+        // the status line) given, a height not wrapping its history. Fitted
+        // otherwise: a size kept from before, let go, so the terminal sizes it.
+        let name = s.tmux_name();
+        if agent::fit_mode(&s.agent, &self.config) != FitPreview::Always {
+            self.tmux.release_size(&name).ok();
+        } else if let (Some((w, h)), Some(pane)) =
+            (util::terminal_size(), self.tmux.panes()?.get(&name))
+        {
+            let h = h - u16::from(self.config.status_line() && h > 1);
+            self.tmux.resize_fixed(&name, (pane.size.0.min(w), h))?;
         }
         let since = now_ms();
         let status = self.tmux.attach(&s.tmux_name())?;

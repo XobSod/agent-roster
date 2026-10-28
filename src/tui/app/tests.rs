@@ -1064,7 +1064,7 @@ fn the_settings_view_changes_settings() {
     select(&mut app, "fit_preview");
     assert_eq!(
         app.on_key(key(KeyCode::Right)),
-        Some(change("fit_preview", Some("never")))
+        Some(change("fit_preview", Some("always")))
     );
     // A key: the next one pressed; `a` adds one; Backspace leaves none.
     select(&mut app, "keys.session.stop");

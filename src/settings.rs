@@ -286,7 +286,11 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
                 "args" => Some(Kind::Words),
                 "idle_after" => Some(Kind::Seconds),
                 "auto_title" => Some(Kind::Bool),
-                "fit_preview" => Some(Kind::Choice(vec!["auto".into(), "never".into()])),
+                "fit_preview" => Some(Kind::Choice(vec![
+                    "auto".into(),
+                    "always".into(),
+                    "never".into(),
+                ])),
                 _ => None,
             }
         }
@@ -470,8 +474,9 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         // Not set: said with what's gone (`Config::gone`).
         yielded: _,
     } = config;
-    let fit = |f: &Option<FitPreview>| match f.unwrap_or(FitPreview::Auto) {
+    let fit = |f: &Option<FitPreview>| match f.unwrap_or_default() {
         FitPreview::Auto => "auto",
+        FitPreview::Always => "always",
         FitPreview::Never => "never",
     };
     // The one asked for, among the choices even if it can't be started.
@@ -501,9 +506,9 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             ),
             choice(
                 &["fit_preview"],
-                &["auto", "never"],
+                &["auto", "always", "never"],
                 fit(fit_preview),
-                "agents drawing full screen are sized to the preview while you're not attached",
+                "agents drawing full screen sized to the preview while you're not attached; always: every agent, at the preview's width even while attached, its history never rewrapped",
             ),
             bool_setting(
                 &["account_limits"],
@@ -691,7 +696,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             ),
             choice(
                 &p("fit_preview"),
-                &["auto", "never"],
+                &["auto", "always", "never"],
                 fit(&agent_fit.or(*fit_preview)),
                 "as fit_preview above, for this agent",
             ),

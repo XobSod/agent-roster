@@ -8,7 +8,9 @@
 //! status_line = false             # default true: while attached, a line at the top
 //!                                 # with the project, session and title
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
-//!                                 # sized to the TUI's preview while no one's attached
+//!                                 # sized to the TUI's preview while no one's attached;
+//!                                 # "always": every agent, kept at the preview's width
+//!                                 # even while attached, its history never rewrapped
 //! account_limits = false          # default true: asks your Claude and codex accounts
 //!                                 # what's left of their limits (claude -p, codex
 //!                                 # app-server)
@@ -259,13 +261,17 @@ pub enum NoteEditor {
     External,
 }
 
-/// Whether an agent drawing full screen (in the terminal's alternate screen,
-/// as Claude's fullscreen renderer does) gets the TUI preview's size while no
-/// one is attached, so its screen fits instead of being cut.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+/// How agents are sized to the TUI's preview, so their screens fit it instead
+/// of being cut: `Auto`, one drawing full screen (in the terminal's alternate
+/// screen, as Claude's fullscreen renderer does) while no one is attached;
+/// `Always`, every one, to the preview's width even while attached (the rest
+/// of the terminal left blank), so its history never wraps anew; `Never`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FitPreview {
+    #[default]
     Auto,
+    Always,
     Never,
 }
 

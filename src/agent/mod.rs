@@ -731,11 +731,12 @@ pub fn idle_after_ms(name: &str, config: &Config) -> i64 {
         .map_or(QUIET_MS, |secs| secs as i64 * 1000)
 }
 
-/// Whether `name`'s sessions may be sized to the TUI's preview (when drawing
-/// full screen): its own setting, else the global one, else yes.
-pub fn fits_preview(name: &str, config: &Config) -> bool {
-    let setting = config.agent(name).fit_preview.or(config.fit_preview);
-    setting != Some(crate::config::FitPreview::Never)
+/// How `name`'s sessions are sized to the TUI's preview: its own setting,
+/// else the global one, else as agents drawing full screen are.
+pub fn fit_mode(name: &str, config: &Config) -> crate::config::FitPreview {
+    (config.agent(name).fit_preview)
+        .or(config.fit_preview)
+        .unwrap_or_default()
 }
 
 /// How to start `s` now: its command and the config's arguments, completed by
@@ -863,13 +864,21 @@ mod tests {
         assert!(adapter(CLAUDE).resumes());
         // An effort means nothing to it.
         assert!(check_effort("aider", "extreme").is_ok());
-        // Fitting the preview: the agent's setting, else the global one, else yes.
+        // Fitting the preview: the agent's setting, else the global one, else
+        // full-screen agents.
+        use crate::config::FitPreview;
         let mut config = config;
-        assert!(fits_preview("aider", &config));
-        config.fit_preview = Some(crate::config::FitPreview::Never);
-        assert!(!fits_preview("aider", &config) && !fits_preview("claude", &config));
-        config.agents.get_mut("aider").unwrap().fit_preview = Some(crate::config::FitPreview::Auto);
-        assert!(fits_preview("aider", &config) && !fits_preview("claude", &config));
+        assert_eq!(fit_mode("aider", &config), FitPreview::Auto);
+        config.fit_preview = Some(FitPreview::Always);
+        assert_eq!(
+            (fit_mode("aider", &config), fit_mode("claude", &config)),
+            (FitPreview::Always, FitPreview::Always)
+        );
+        config.agents.get_mut("aider").unwrap().fit_preview = Some(FitPreview::Never);
+        assert_eq!(
+            (fit_mode("aider", &config), fit_mode("claude", &config)),
+            (FitPreview::Never, FitPreview::Always)
+        );
         // Built-in agents first: Claude, then the others installed here, then
         // the one only the config knows.
         let mut expected: Vec<String> = vec![CLAUDE.into()];

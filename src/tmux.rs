@@ -569,6 +569,38 @@ impl Tmux {
         .map(drop)
     }
 
+    /// Sizes the session's window for good: attaching doesn't size it to the
+    /// terminal, which shows it in its corner (`fit_preview = "always"`).
+    pub fn resize_fixed(&self, name: &str, size: (u16, u16)) -> Result<()> {
+        self.run(&[
+            "resize-window".into(),
+            "-t".into(),
+            Arg::Pane(name),
+            "-x".into(),
+            Arg::Number(size.0.into()),
+            "-y".into(),
+            Arg::Number(size.1.into()),
+        ])
+        .map(drop)
+    }
+
+    /// Lets go of a size `resize_fixed` gave: the next attach sizes the
+    /// window to its terminal again.
+    pub fn release_size(&self, name: &str) -> Result<()> {
+        let unset = [
+            "set-option".into(),
+            "-w".into(),
+            "-u".into(),
+            "-t".into(),
+            Arg::Pane(name),
+            "window-size".into(),
+        ];
+        match self.run(&unset) {
+            Err(e) if is_missing(&e) => Ok(()),
+            other => other.map(drop),
+        }
+    }
+
     /// What the status line shows while attached to the session
     /// (`config_text`): tmux markup for its left and right.
     pub fn label(&self, name: &str, left: &str, right: &str) -> Result<()> {
@@ -773,6 +805,13 @@ set -sq extended-keys-format csi-u
 set -s set-clipboard on
 set -g history-limit 50000
 set -g remain-on-exit on
+# A window kept narrower than the terminal (fit_preview = \"always\"): the rest
+# blank, not dotted (tmux before 3.4 doesn't know the option), and the line
+# tmux draws at its edge, a pane's border, hidden (a session's one pane has no
+# other border).
+set -gq fill-character ' '
+set -g pane-border-style hidden
+set -g pane-active-border-style hidden
 
 source-file -q \""
     );

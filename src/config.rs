@@ -93,6 +93,9 @@ pub struct Config {
     pub keys: Keys,
     pub agents: BTreeMap<String, AgentConfig>,
     pub fit_preview: Option<FitPreview>,
+    /// What keys roster has by default gave way to the config's (`gone`).
+    #[serde(skip)]
+    pub yielded: Vec<String>,
     /// While attached, a line at the top saying where you are (default on).
     pub status_line: Option<bool>,
     /// Whether the agents' accounts are asked what's left of their limits
@@ -389,6 +392,68 @@ impl Default for SessionKeys {
     }
 }
 
+impl SessionKeys {
+    /// The session menu's keys, by setting (`menu`, which opens it, is the
+    /// list's).
+    fn menu_keys(&mut self) -> [(&'static str, &mut KeyList); 12] {
+        [
+            ("new", &mut self.new),
+            ("chat", &mut self.chat),
+            ("edit", &mut self.edit),
+            ("start", &mut self.start),
+            ("stop", &mut self.stop),
+            ("restart", &mut self.restart),
+            ("toggle_read", &mut self.toggle_read),
+            ("retitle", &mut self.retitle),
+            ("note", &mut self.note),
+            ("archive", &mut self.archive),
+            ("delete", &mut self.delete),
+            ("adopt", &mut self.adopt),
+        ]
+    }
+
+    /// A key the config sets for one action that archive or adopt has by
+    /// default (archive's "a" was adopt's, adopt's "A" was free): their
+    /// default gives it way, so a config written before still loads, and
+    /// that's said. Any other default the config sets for another action
+    /// stays an error, as do two the config sets (`Keymap::new`).
+    fn yield_defaults(&mut self) -> Vec<String> {
+        const MOVED: [&str; 2] = ["archive", "adopt"];
+        let mut defaults = SessionKeys::default();
+        let defaults: Vec<Vec<String>> = (defaults.menu_keys().into_iter())
+            .map(|(_, list)| list.0.clone())
+            .collect();
+        let mut keys = self.menu_keys();
+        let set: Vec<bool> = (keys.iter().zip(&defaults))
+            .map(|((_, list), default)| list.0 != *default)
+            .collect();
+        let taken: Vec<(crate::keys::Key, &str)> = (keys.iter().zip(&set))
+            .filter(|(_, set)| **set)
+            .flat_map(|((name, list), _)| {
+                (list.0.iter()).filter_map(|k| Some((crate::keys::Key::parse(k).ok()?, *name)))
+            })
+            .collect();
+        let mut said = Vec::new();
+        for ((name, list), set) in keys.iter_mut().zip(&set) {
+            if *set || !MOVED.contains(name) {
+                continue;
+            }
+            list.0.retain(|k| {
+                let key = crate::keys::Key::parse(k).ok();
+                let Some((_, by)) = taken.iter().find(|(t, _)| Some(*t) == key) else {
+                    return true;
+                };
+                said.push(format!(
+                    "keys.session.{by} takes {k:?}, {name}'s key by default, so {name} goes \
+                     without it: give it one in config.toml (roster config --edit)"
+                ));
+                false
+            });
+        }
+        said
+    }
+}
+
 impl Default for ProjectKeys {
     fn default() -> Self {
         ProjectKeys {
@@ -489,8 +554,9 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config> {
-        let config: Config = toml::from_str(text)?;
+        let mut config: Config = toml::from_str(text)?;
         check_detach(&config.keys.detach)?;
+        config.yielded = config.keys.session.yield_defaults();
         crate::keys::Keymap::new(&config.keys)?;
         if let Some(agent) = &config.default_agent
             && !crate::agent::BUILT_IN.contains(&agent.as_str())
@@ -571,9 +637,10 @@ impl Config {
     }
 
     /// What it sets that roster no longer has, to say: taken all the same,
-    /// so a config that set it still works.
+    /// so a config that set it still works. And keys it sets that roster's
+    /// defaults had, which those gave way to.
     pub fn gone(&self) -> Vec<String> {
-        let mut gone = Vec::new();
+        let mut gone = self.yielded.clone();
         if self.keys.view.group.is_some() {
             gone.push(
                 "keys.view.group is gone: group_by = \"project\" groups the list by \
@@ -855,6 +922,40 @@ mod tests {
             gone.iter()
                 .any(|g| g.contains("keys.session.prompt") && g.contains("asks")),
             "{gone:?}"
+        );
+    }
+
+    #[test]
+    fn a_default_key_gives_way_to_one_the_config_sets() {
+        // Set for another action before archive took "a", or adopt "A":
+        // theirs, and said.
+        for (text, by, yields) in [
+            ("toggle_read = \"a\"", "toggle_read", "archive"),
+            ("adopt = \"a\"", "adopt", "archive"),
+            ("retitle = [\"t\", \"A\"]", "retitle", "adopt"),
+        ] {
+            let config = Config::parse(&format!("[keys.session]\n{text}")).unwrap();
+            let gone = config.gone();
+            assert!(
+                gone.len() == 1
+                    && gone[0].starts_with(&format!("keys.session.{by} takes "))
+                    && gone[0].contains(&format!("{yields} goes without it")),
+                "{gone:?}"
+            );
+            let mut keys = config.keys.session;
+            let lists = keys.menu_keys();
+            let list = &lists.iter().find(|(name, _)| *name == yields).unwrap().1;
+            assert!(list.0.is_empty(), "{text}");
+        }
+        // Another default, or two the config sets: still an error.
+        assert!(Config::parse("[keys.session]\nadopt = \"n\"").is_err());
+        assert!(Config::parse("[keys.session]\ntoggle_read = \"a\"\nretitle = \"a\"").is_err());
+        // The defaults as they are: nothing to say.
+        assert!(
+            Config::parse("[keys.session]\narchive = \"a\"")
+                .unwrap()
+                .gone()
+                .is_empty()
         );
     }
 

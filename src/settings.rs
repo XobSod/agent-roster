@@ -470,6 +470,8 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
         prices: _,
+        // Not set: said with what's gone (`Config::gone`).
+        yielded: _,
     } = config;
     let fit = |f: &Option<FitPreview>| match f.unwrap_or(FitPreview::Auto) {
         FitPreview::Auto => "auto",

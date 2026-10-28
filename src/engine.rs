@@ -594,6 +594,31 @@ impl Roster {
         }
     }
 
+    /// `resolve` among live and archived sessions alike, for what can't be
+    /// undone (deleting for good): an address naming one of each, but the
+    /// id of neither, says so rather than choosing.
+    pub fn resolve_either(&self, addr: &str) -> Result<Session> {
+        match (self.find(addr, false)?, self.find(addr, true)?) {
+            (Some(live), Some(archived)) => {
+                if live.id == addr {
+                    return Ok(live);
+                }
+                if archived.id == addr {
+                    return Ok(archived);
+                }
+                bail!(
+                    "{addr:?} names a live session, {} ({}), and an archived one, {} ({}): give the id of the one to delete",
+                    live.label(),
+                    live.id,
+                    archived.label(),
+                    archived.id
+                )
+            }
+            (Some(s), None) | (None, Some(s)) => Ok(s),
+            (None, None) => bail!("no session {addr:?}"),
+        }
+    }
+
     /// The session `addr` names, None if none does, an error if several do.
     fn find(&self, addr: &str, archived: bool) -> Result<Option<Session>> {
         let pool: Vec<Session> = self

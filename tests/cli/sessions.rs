@@ -169,6 +169,28 @@ fn session_lifecycle() {
         .output()
         .unwrap();
     assert!(!tmux.status.success());
+    // A name a live session and an archived one share names neither: what
+    // goes for good is given by its id.
+    t.ok(&["new", "demo", "--name", "dup"]);
+    let gone = t.session("dup", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    t.ok(&["archive", "--yes", "dup"]);
+    t.ok(&["new", "demo", "--name", "dup"]);
+    let out = t.run(&["rm", "--yes", "dup"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("a live session") && err.contains(&gone),
+        "{err}"
+    );
+    assert!(t.session("dup", false).is_some() && t.session("dup", true).is_some());
+    t.ok(&["rm", "--yes", &gone]);
+    t.ok(&["rm", "--yes", "dup"]);
+    assert!(t.session("dup", false).is_none() && t.session("dup", true).is_none());
+    let out = t.run(&["rm", "--yes", "dup"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no session \"dup\""), "{err}");
     // Removing a project asks too: its archived sessions would go with it.
     t.ok(&["new", "demo", "--name", "two"]);
     t.ok(&["archive", "--yes", "two"]);

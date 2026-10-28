@@ -697,7 +697,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             // What its hooks said since, in the question: a turn or a subagent
             // it would cut short.
             r.refresh()?;
-            let s = r.resolve_any(&session)?;
+            let s = r.resolve_either(&session)?;
             if !confirm(&agent::delete_question(&s), yes)? {
                 return Ok(());
             }

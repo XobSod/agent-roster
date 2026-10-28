@@ -584,13 +584,14 @@ impl Session {
         let forgot = self.subagents.len() != before;
         let asker_gone =
             (self.asked_by.as_ref()).is_some_and(|id| !self.subagents.contains_key(id));
-        if self.state == State::NeedsInput && asker_gone {
+        let unasked = self.state == State::NeedsInput && asker_gone;
+        if unasked {
             self.set_state(State::Working, now);
         }
         // Waiting on none (forgotten, or kept so by a save that raced
         // another's): it's over.
         let ended = self.end_awaited_turn(now);
-        forgot || ended
+        forgot || unasked || ended
     }
 
     /// Its own turn over and its last subagent stopped: idle, its results
@@ -1157,6 +1158,12 @@ pub mod tests {
         assert!(s.forget_quiet_subagents(22_000));
         assert_eq!((s.state, s.awaiting_subagents), (State::Idle, false));
         assert!(!s.forget_quiet_subagents(23_000));
+        // Asked by one gone already, none forgotten now: its question goes,
+        // and that's a change, to save.
+        s.state = State::NeedsInput;
+        s.asked_by = Some("b4".into());
+        assert!(s.forget_quiet_subagents(24_000));
+        assert_eq!(s.state, State::Working);
     }
 
     #[test]

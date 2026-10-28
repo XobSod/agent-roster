@@ -288,6 +288,12 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `card_subagents`: a Claude or Codex session's subagents at work, on its card: `"folded"`
     (default), how many (`↳2 ›`), and a line each once you unfold it with `l`;
     `"unfolded"`, the lines always; `"count"`, how many only.
+  - `memory_warning`: a session whose processes (its agent, all it started, and what it
+    left running) use more memory than this is marked in red: `⚠` and how much on its card,
+    in its header and on a folded group's heading, and a line under the summary saying how
+    many are over; till it's back under 90% of it. A size of at least a megabyte (`"8G"`,
+    `"512M"`, `"1.5GiB"`) or `"off"`; by default a quarter of the machine's memory (or of
+    the container's, if it's given less).
   - `[prices."<model>"]`: what a model's calls cost, in dollars per million tokens
     (`input`, `output`, `cache_read`, `cache_write`, the last two 0 unless set, and
     `long = { above = 272000, input = …, output = … }` for a call sending more than

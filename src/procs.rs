@@ -43,9 +43,14 @@ impl Process {
 /// Every process running now; which session of the roster keeping its
 /// database at `db` each was started in, read only for one's own processes
 /// outside the trees of `roots` (the agents', whose processes are theirs
-/// anyway): reading a process's environment waits on its memory, which a
-/// process thrashing holds up.
-pub fn processes(roots: &[i32], db: &Path) -> Result<Vec<Process>> {
+/// anyway), and only once a process (`known`, by pid and start, its
+/// environment set as it started): reading a process's environment waits on
+/// its memory, which a process thrashing holds up.
+pub fn processes(
+    roots: &[i32],
+    db: &Path,
+    known: &mut HashMap<(i32, u64), Option<String>>,
+) -> Result<Vec<Process>> {
     // SAFETY: sysconf only reads system constants.
     let (ticks, page) = unsafe {
         (
@@ -84,24 +89,32 @@ pub fn processes(roots: &[i32], db: &Path) -> Result<Vec<Process>> {
     // through a symlink, say): the same file.
     let file = |path: &Path| fs::metadata(path).ok().map(|m| (m.dev(), m.ino()));
     let ours = file(db);
-    let mut known: HashMap<Vec<u8>, bool> = HashMap::new();
+    let mut same_db: HashMap<Vec<u8>, bool> = HashMap::new();
     for p in &mut all {
         p.agent = roots.contains(&p.pid);
         if !own.contains(&p.pid) || agents.contains(&p.pid) {
             continue;
         }
-        let Ok(env) = fs::read(format!("/proc/{}/environ", p.pid)) else {
+        if let Some(session) = known.get(&p.key()) {
+            p.session = session.clone();
             continue;
-        };
-        let Some((id, its_db)) = session_in(&env) else {
-            continue;
-        };
-        let same = *known.entry(its_db.to_vec()).or_insert_with(|| {
-            its_db == db.as_os_str().as_bytes()
-                || ours.is_some_and(|f| file(Path::new(OsStr::from_bytes(its_db))) == Some(f))
-        });
-        p.session = same.then_some(id);
+        }
+        let env = fs::read(format!("/proc/{}/environ", p.pid)).ok();
+        p.session = env
+            .as_deref()
+            .and_then(session_in)
+            .and_then(|(id, its_db)| {
+                let same = *same_db.entry(its_db.to_vec()).or_insert_with(|| {
+                    its_db == db.as_os_str().as_bytes()
+                        || ours
+                            .is_some_and(|f| file(Path::new(OsStr::from_bytes(its_db))) == Some(f))
+                });
+                same.then_some(id)
+            });
+        known.insert(p.key(), p.session.clone());
     }
+    let alive: HashSet<(i32, u64)> = all.iter().map(Process::key).collect();
+    known.retain(|key, _| alive.contains(key));
     Ok(all)
 }
 
@@ -359,6 +372,17 @@ impl Sampler {
     }
 }
 
+/// The machine's memory, in bytes (`MemTotal` in `/proc/meminfo`), or a
+/// container's, if it's given less (its cgroup's `memory.max`).
+pub fn total_memory() -> Option<u64> {
+    let info = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemTotal:"))?;
+    let total = line.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024;
+    let given = (fs::read_to_string("/sys/fs/cgroup/memory.max").ok())
+        .and_then(|max| max.trim().parse::<u64>().ok());
+    Some(given.map_or(total, |given| given.min(total)))
+}
+
 /// Bytes as a person reads them: `640 MB`, `11.8 GB`.
 pub fn size(bytes: u64) -> String {
     const MB: f64 = 1024.0 * 1024.0;
@@ -413,13 +437,13 @@ mod tests {
         // one, read from its environment; not under an agent's tree.
         let me = std::process::id() as i32;
         let db = std::env::var_os("ROSTER_DB").map_or("/nowhere".into(), std::path::PathBuf::from);
-        let all = processes(&[], &db).unwrap();
+        let all = processes(&[], &db, &mut HashMap::new()).unwrap();
         assert!(all.iter().any(|p| p.pid == me && p.rss > 0));
         let session = (std::env::var("ROSTER_SESSION").ok())
             .filter(|s| !s.is_empty() && db != Path::new("/nowhere"));
         assert_eq!(all.iter().find(|p| p.pid == me).unwrap().session, session);
         assert!(
-            processes(&[], Path::new("/nowhere"))
+            processes(&[], Path::new("/nowhere"), &mut HashMap::new())
                 .unwrap()
                 .iter()
                 .all(|p| p.session.is_none())
@@ -429,10 +453,24 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let link = dir.path().join("roster.db");
             std::os::unix::fs::symlink(&db, &link).unwrap();
-            let all = processes(&[], &link).unwrap();
+            let all = processes(&[], &link, &mut HashMap::new()).unwrap();
             assert_eq!(all.iter().find(|p| p.pid == me).unwrap().session, session);
         }
-        let under = processes(&[me], &db).unwrap();
+        // Known already: not read again; one ended, forgotten.
+        let mine = all.iter().find(|p| p.pid == me).unwrap().key();
+        let mut known = HashMap::from([(mine, Some("known".to_string())), ((me, 0), None)]);
+        let again = processes(&[], &db, &mut known).unwrap();
+        assert_eq!(
+            again
+                .iter()
+                .find(|p| p.pid == me)
+                .unwrap()
+                .session
+                .as_deref(),
+            Some("known")
+        );
+        assert!(!known.contains_key(&(me, 0)));
+        let under = processes(&[me], &db, &mut HashMap::new()).unwrap();
         assert_eq!(under.iter().find(|p| p.pid == me).unwrap().session, None);
     }
 
@@ -548,7 +586,7 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id() as i32;
-        let all = processes(&[], Path::new("/nowhere")).unwrap();
+        let all = processes(&[], Path::new("/nowhere"), &mut HashMap::new()).unwrap();
         let p = all.iter().find(|p| p.pid == pid).unwrap().clone();
         // Taken for another started at another time: not held.
         let mut other = p.clone();
@@ -561,6 +599,11 @@ mod tests {
         assert!(!child.wait().unwrap().success());
         assert!(!held.signal(libc::SIGKILL));
         assert!(Held::new(&p).is_none());
+    }
+
+    #[test]
+    fn the_machines_memory_is_read() {
+        assert!(total_memory().is_some_and(|bytes| bytes > 64 * 1024 * 1024));
     }
 
     #[test]

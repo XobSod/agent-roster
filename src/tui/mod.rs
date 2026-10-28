@@ -43,6 +43,10 @@ use op::Op;
 
 /// How often states and the preview refresh.
 const TICK: Duration = Duration::from_secs(1);
+
+/// How often what the sessions' processes use is read for the memory
+/// warning: a leak grows over minutes, and reading costs a pass over /proc.
+const RESOURCES_EVERY: Duration = Duration::from_secs(5);
 /// The smallest size agents are fitted to; a narrower preview cuts their lines.
 const MIN_FIT: (u16, u16) = (60, 10);
 
@@ -58,6 +62,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
     app.card_subagents = roster.config.card_subagents();
+    app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
@@ -154,6 +159,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
     app.card_subagents = roster.config.card_subagents();
+    app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
@@ -256,6 +262,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                 Some(Op::Quit) => return Ok(()),
                 Some(op) => {
                     perform(terminal, roster, app, op)?;
+                    // What it ended, or started, shows at once.
+                    app.resources_read = None;
                     reload(roster, app);
                     last_reload = Instant::now();
                 }
@@ -384,6 +392,18 @@ fn reload(roster: &mut Roster, app: &mut App) {
     match (roster.projects(), roster.sessions(true)) {
         (Ok(projects), Ok(sessions)) => app.set_data(projects, sessions),
         (Err(e), _) | (_, Err(e)) => app.fail(format!("{e:#}")),
+    }
+    // What the sessions' processes use, every few seconds while it's to be
+    // said of any using too much (the server view reads them itself);
+    // nothing, if it can't be read.
+    if app.memory_limit.is_none() {
+        app.set_resources(HashMap::new());
+        app.resources_read = None;
+    } else if app.mode != Mode::Server
+        && (app.resources_read).is_none_or(|at| at.elapsed() >= RESOURCES_EVERY)
+    {
+        app.set_resources(roster.resources().unwrap_or_default());
+        app.resources_read = Some(Instant::now());
     }
     if let Ok(names) = roster.db.model_names() {
         app.models.names = names;

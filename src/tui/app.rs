@@ -193,6 +193,14 @@ pub struct App {
     /// the cards unfolded to show them (`l`), by session, and what's read
     /// of each subagent, by its agent's id for it.
     pub card_subagents: crate::config::CardSubagents,
+    /// Above how much memory a session's processes are said to use too
+    /// much; None: not said.
+    pub memory_limit: Option<u64>,
+    /// What each session's processes use, by its id, read every few seconds
+    /// while that's said (and when), and those said to use too much.
+    pub resources: HashMap<String, crate::procs::Totals>,
+    pub resources_read: Option<Instant>,
+    memory_marked: HashSet<String>,
     pub unfolded: HashSet<String>,
     pub subagent_info: HashMap<String, crate::agent::SubagentInfo>,
     /// What each of those is doing now (its latest step), by its id.
@@ -260,6 +268,10 @@ impl App {
             account_limits: true,
             sidebar_usage: true,
             card_subagents: Default::default(),
+            memory_limit: None,
+            resources: HashMap::new(),
+            resources_read: None,
+            memory_marked: HashSet::new(),
             unfolded: HashSet::new(),
             subagent_info: HashMap::new(),
             subagent_doing: HashMap::new(),
@@ -549,6 +561,39 @@ impl App {
             None => lines.get(at).map(|l| (l.text.clone(), last - at)),
         };
         (self.report_cursor, self.report_selected, self.report_anchor) = (at, what, anchor);
+    }
+
+    /// Above how much memory a session's processes use too much; changed,
+    /// none marked under the old limit, and read again at once.
+    pub fn set_memory_limit(&mut self, limit: Option<u64>) {
+        if limit != self.memory_limit {
+            self.memory_marked.clear();
+            self.resources_read = None;
+        }
+        self.memory_limit = limit;
+    }
+
+    /// What the sessions' processes use now; those over the limit marked,
+    /// and those marked before kept so till well under it (a build hovering
+    /// at it doesn't flap).
+    pub fn set_resources(&mut self, resources: HashMap<String, crate::procs::Totals>) {
+        let limit = self.memory_limit.unwrap_or(u64::MAX);
+        let marked = std::mem::take(&mut self.memory_marked);
+        self.memory_marked = (resources.iter())
+            .filter(|(id, t)| {
+                t.memory > limit || (marked.contains(*id) && t.memory > limit / 10 * 9)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.resources = resources;
+    }
+
+    /// How much memory `s`'s processes use, if marked as more than they
+    /// should.
+    pub fn over_memory(&self, s: &Session) -> Option<u64> {
+        self.memory_limit?;
+        let memory = self.resources.get(&s.id)?.memory;
+        self.memory_marked.contains(&s.id).then_some(memory)
     }
 
     /// The report's lines as the server view shows them: a session's

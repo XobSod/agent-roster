@@ -147,6 +147,9 @@ pub struct Roster {
     pub(crate) notices: Vec<String>,
     /// The processes as last read, for the CPU each took since.
     sampler: procs::Sampler,
+    /// Which of its sessions each process was started in, by pid and start,
+    /// as read once from its environment.
+    sessions_of: HashMap<(i32, u64), Option<String>>,
 }
 
 /// A first prompt `refresh` couldn't type into session `id`, and why;
@@ -258,6 +261,7 @@ impl Roster {
             config_text,
             config_refused: None,
             sampler: procs::Sampler::default(),
+            sessions_of: HashMap::new(),
         })
     }
 
@@ -1369,7 +1373,7 @@ impl Roster {
     /// last read them; `agents`, the agents' pids, are where each one's
     /// session is known from without reading their environment.
     pub fn processes(&mut self, agents: &[i32]) -> Result<procs::Snapshot> {
-        let all = procs::processes(agents, &self.paths.db())?;
+        let all = procs::processes(agents, &self.paths.db(), &mut self.sessions_of)?;
         Ok(self.sampler.read(all, now_ms()))
     }
 

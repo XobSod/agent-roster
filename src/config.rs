@@ -23,6 +23,10 @@
 //!                                 # "folded" (default): how many, and a line each
 //!                                 # once unfolded (l); "unfolded": the lines always;
 //!                                 # "count": how many only
+//! memory_warning = "8G"           # a session whose processes use more is marked
+//!                                 # (its card, header, a folded group's heading, the
+//!                                 # summary); "off"; default: a quarter of the
+//!                                 # machine's memory
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -110,6 +114,9 @@ pub struct Config {
     /// What a card says of its session's subagents at work (default: their
     /// count, and a line each once unfolded).
     pub card_subagents: Option<CardSubagents>,
+    /// Above how much memory a session's processes are said to use too much
+    /// (default: a quarter of the machine's).
+    pub memory_warning: Option<MemoryWarning>,
     /// What models' calls cost, by model: in place of roster's own prices,
     /// or for models it has none for (`tokens::Prices`).
     pub prices: BTreeMap<String, Price>,
@@ -150,6 +157,45 @@ pub enum GroupBy {
     #[default]
     Attention,
     Project,
+}
+
+/// Above how much memory a session's processes are said to use too much,
+/// as config.toml says it: a size (`8G`, `512M`, `1.5GiB`), or `off`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(try_from = "String")]
+pub struct MemoryWarning {
+    /// As written.
+    pub text: String,
+    /// In bytes; None: off.
+    above: Option<u64>,
+}
+
+impl TryFrom<String> for MemoryWarning {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        let wrong = || format!("{text:?} isn't a size of at least 1M (8G, 512M) or off");
+        let size = text.trim();
+        if size.eq_ignore_ascii_case("off") {
+            return Ok(MemoryWarning { text, above: None });
+        }
+        let lower = size.to_ascii_lowercase();
+        let unit = lower.trim_end_matches("ib").trim_end_matches('b');
+        let scale = match unit.chars().last() {
+            Some('k') => 1u64 << 10,
+            Some('m') => 1 << 20,
+            Some('g') => 1 << 30,
+            Some('t') => 1 << 40,
+            _ => return Err(wrong()),
+        };
+        let number: f64 = unit[..unit.len() - 1].trim().parse().map_err(|_| wrong())?;
+        let bytes = number * scale as f64;
+        if !bytes.is_finite() || bytes < (1u64 << 20) as f64 || bytes > u64::MAX as f64 {
+            return Err(wrong());
+        }
+        let above = Some(bytes as u64);
+        Ok(MemoryWarning { text, above })
+    }
 }
 
 /// What a card says of its session's subagents at work: their count only;
@@ -663,6 +709,15 @@ impl Config {
         self.card_subagents.unwrap_or_default()
     }
 
+    /// Above how much memory a session's processes are said to use too
+    /// much, in bytes; None if not said at all.
+    pub fn memory_warning(&self) -> Option<u64> {
+        match &self.memory_warning {
+            Some(warning) => warning.above,
+            None => crate::procs::total_memory().map(|total| total / 4),
+        }
+    }
+
     /// Whether the session list is grouped by project.
     pub fn grouped(&self) -> bool {
         self.group_by.unwrap_or_default() == GroupBy::Project
@@ -901,6 +956,39 @@ mod tests {
                 .any(|g| g.contains("keys.session.prompt") && g.contains("asks")),
             "{gone:?}"
         );
+    }
+
+    #[test]
+    fn the_memory_warning_is_a_size_or_off_else_a_quarter_of_memory() {
+        let warning = |text: &str| {
+            Config::parse(&format!("memory_warning = {text:?}")).map(|c| c.memory_warning())
+        };
+        for (text, bytes) in [
+            ("8G", 8 << 30),
+            ("8g", 8 << 30),
+            ("8 GB", 8 << 30),
+            ("8GiB", 8 << 30),
+            ("512M", 512 << 20),
+            ("1.5G", 3 << 29),
+            ("2048K", 2 << 20),
+        ] {
+            assert_eq!(warning(text).unwrap(), Some(bytes), "{text:?}");
+        }
+        assert_eq!(warning("off").unwrap(), None);
+        assert_eq!(warning("Off").unwrap(), None);
+        // No unit (bytes, by mistake), under a megabyte, endless, not a size.
+        for wrong in [
+            "8", "0.5", "512K", "0G", "-1G", "infG", "1e999G", "lots", "8X", "",
+        ] {
+            assert!(warning(wrong).is_err(), "{wrong:?}");
+        }
+        // Without one: a quarter of the machine's.
+        let quarter = crate::procs::total_memory().map(|total| total / 4);
+        assert!(quarter.is_some_and(|q| q > 0));
+        assert_eq!(Config::parse("").unwrap().memory_warning(), quarter);
+        // Shown as written.
+        let config = Config::parse("memory_warning = \"1.3G\"").unwrap();
+        assert_eq!(config.memory_warning.unwrap().text, "1.3G");
     }
 
     #[test]

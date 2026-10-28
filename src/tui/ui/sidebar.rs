@@ -9,13 +9,28 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
         .sidebar_usage
         .then(|| usage_line(app, width, now))
         .flatten();
-    let [top, sub, list, bottom] = Layout::vertical([
+    // Archived sessions too: what they left running.
+    let over = (app.sessions.iter())
+        .filter(|s| app.over_memory(s).is_some())
+        .count();
+    let [top, warning, sub, list, bottom] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(u16::from(over > 0)),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(u16::from(usage.is_some())),
     ])
     .areas(area);
+    if let (true, Some(limit)) = (over > 0, app.memory_limit) {
+        let sessions = if over == 1 { "session" } else { "sessions" };
+        let text = format!(" ⚠ {over} {sessions} over {}", crate::procs::size(limit));
+        let line = Line::from(fit(
+            width,
+            vec![Span::styled(text, Style::new().fg(ERROR))],
+            Vec::new(),
+        ));
+        f.render_widget(Paragraph::new(line), warning);
+    }
     if let Some(usage) = usage {
         f.render_widget(Paragraph::new(usage), bottom);
     }
@@ -152,7 +167,13 @@ pub(super) fn list_lines(
                     Group::Project(id) => app.project(*id).is_some_and(|p| p.note.is_some()),
                     Group::Shelf(_) => false,
                 };
-                vec![heading(*group, label, *count, *open, noted, content)]
+                // Folded, a session in it using too much memory shows on it.
+                let over = !*open
+                    && (app.sessions.iter()).any(|s| {
+                        crate::tui::list::group_of(s, app.grouped) == *group
+                            && app.over_memory(s).is_some()
+                    });
+                vec![heading(*group, label, *count, *open, noted, over, content)]
             }
             Entry::Card(s) => {
                 let noted = !app.grouped && project_noted(app, s);
@@ -164,6 +185,7 @@ pub(super) fn list_lines(
                     CardSubagents::Folded => subagents_mark(s, now, Some(shown)),
                     CardSubagents::Unfolded => Vec::new(),
                 };
+                let mark = [memory_mark(app, s), mark].concat();
                 let mut rows = card(s, hit(app, s), !app.grouped, noted, mark, content, now);
                 if shown {
                     rows.extend(subagent_rows(app, s, content, now));
@@ -206,13 +228,19 @@ pub(super) fn heading(
     count: usize,
     open: bool,
     noted: bool,
+    over_memory: bool,
     width: usize,
 ) -> Vec<Span<'static>> {
     let chevron = Span::styled(if open { " ⌄ " } else { " › " }, Style::new().fg(MUTED));
+    let chevron = match over_memory {
+        true => vec![Span::styled(" ⚠", Style::new().fg(ERROR)), chevron],
+        false => vec![chevron],
+    };
+    let chevron_width: usize = chevron.iter().map(Span::width).sum();
     let count = Span::styled(format!(" ({count}) "), Style::new().fg(MUTED));
     // A long name is cut, so its note's mark, the count and the chevron
     // always show.
-    let room = width.saturating_sub(count.width() + chevron.width());
+    let room = width.saturating_sub(count.width() + chevron_width);
     let mut left = match group {
         Group::Project(_) => {
             let mark = match noted {
@@ -235,12 +263,12 @@ pub(super) fn heading(
             count,
         ],
     };
-    let used: usize = left.iter().map(Span::width).sum::<usize>() + chevron.width();
+    let used: usize = left.iter().map(Span::width).sum::<usize>() + chevron_width;
     left.push(Span::styled(
         "─".repeat(width.saturating_sub(used)),
         Style::new().fg(FAINT),
     ));
-    left.push(chevron);
+    left.extend(chevron);
     left
 }
 
@@ -381,7 +409,7 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
         )],
         None => [status(s, now), vec![Span::raw(" ")]].concat(),
     };
-    let right = [note_mark(s), right].concat();
+    let right = [memory_mark(app, s), note_mark(s), right].concat();
     let none = Hit::default();
     let hit = hit(app, s).unwrap_or(&none);
     let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));
@@ -413,6 +441,17 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
         .concat()
     };
     fit(width, left, right)
+}
+
+/// How much memory `s`'s processes use, if more than they should.
+pub(super) fn memory_mark(app: &App, s: &Session) -> Vec<Span<'static>> {
+    match app.over_memory(s) {
+        Some(memory) => vec![Span::styled(
+            format!("⚠ {} ", crate::procs::size(memory)),
+            Style::new().fg(ERROR),
+        )],
+        None => Vec::new(),
+    }
 }
 
 fn note_mark(s: &Session) -> Vec<Span<'static>> {

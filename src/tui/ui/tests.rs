@@ -492,6 +492,76 @@ fn server_view_shows_the_report() {
 }
 
 #[test]
+fn a_session_using_too_much_memory_is_marked() {
+    let mut app = app();
+    let gb = 1u64 << 30;
+    app.memory_limit = Some(gb);
+    let id = app.sessions[0].id.clone();
+    let totals = |memory| crate::procs::Totals {
+        memory,
+        cpu: None,
+        processes: 3,
+        heaviest: ("cargo".into(), memory),
+    };
+    app.set_resources([(id.clone(), totals(2 * gb + gb / 2))].into());
+    let at = (app.entries.iter())
+        .position(|e| e.session().is_some_and(|s| s.id == id))
+        .unwrap();
+    app.selected = at;
+    let screen = render(&app, 140, 30);
+    // On its card, in its header, and in a line under the summary.
+    assert!(screen.matches("⚠ 2.5 GB").count() >= 2, "{screen}");
+    assert!(screen.contains("⚠ 1 session over 1.0 GB"), "{screen}");
+    // Back just under the limit: still marked, not flapping; well under it,
+    // not.
+    app.set_resources([(id.clone(), totals(gb - gb / 20))].into());
+    assert!(render(&app, 140, 30).contains("⚠ 1 session over"));
+    app.set_resources([(id.clone(), totals(gb / 2))].into());
+    assert!(!render(&app, 140, 30).contains('⚠'));
+    // The limit raised: what was marked under the old one isn't.
+    app.set_resources([(id.clone(), totals(2 * gb))].into());
+    app.set_memory_limit(Some(3 * gb));
+    assert!(!render(&app, 140, 30).contains('⚠'));
+    app.set_memory_limit(Some(gb));
+    // Two over; with no limit, none.
+    let other = app.sessions[1].id.clone();
+    app.set_resources([(id.clone(), totals(2 * gb)), (other, totals(3 * gb))].into());
+    assert!(render(&app, 140, 30).contains("⚠ 2 sessions over 1.0 GB"));
+    app.memory_limit = None;
+    assert!(!render(&app, 140, 30).contains('⚠'));
+}
+
+#[test]
+fn what_an_archived_session_left_using_too_much_memory_shows() {
+    let mut app = app();
+    let gb = 1u64 << 30;
+    app.memory_limit = Some(gb);
+    let mut sessions = app.sessions.clone();
+    sessions[0].state = State::Stopped;
+    sessions[0].deleted_at = Some(now_ms());
+    let id = sessions[0].id.clone();
+    app.set_data(app.projects.clone(), sessions);
+    let totals = crate::procs::Totals {
+        memory: 2 * gb,
+        cpu: None,
+        processes: 1,
+        heaviest: ("node".into(), 2 * gb),
+    };
+    app.set_resources([(id.clone(), totals)].into());
+    // Its shelf folded: marked on it.
+    let screen = render(&app, 140, 30);
+    let shelf = screen.lines().find(|l| l.contains("Archived (1)")).unwrap();
+    assert!(shelf.split('│').next().unwrap().contains("⚠"), "{screen}");
+    // Unfolded: on its row.
+    let s = app.sessions.iter().find(|s| s.id == id).unwrap();
+    let line: String = row(&app, s, 40, now_ms())
+        .iter()
+        .map(|span| span.content.to_string())
+        .collect();
+    assert!(line.contains("⚠ 2.0 GB"), "{line}");
+}
+
+#[test]
 fn cards_and_forms_show_the_model_claude_reports() {
     let mut app = app();
     let mut sessions = app.sessions.clone();
@@ -551,7 +621,7 @@ fn long_titles_are_cut_with_an_ellipsis() {
 fn long_project_names_keep_their_count_and_fold_mark() {
     let line = |noted| -> String {
         let name = "customer-portal-frontend-migration-2026";
-        let spans = heading(Group::Project(1), name, 3, true, noted, 34);
+        let spans = heading(Group::Project(1), name, 3, true, noted, false, 34);
         spans.iter().map(|s| s.content.to_string()).collect()
     };
     let (plain, noted) = (line(false), line(true));

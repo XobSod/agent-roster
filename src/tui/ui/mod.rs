@@ -192,7 +192,18 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
     match app.selected_entry() {
         Some(Entry::Card(s) | Entry::Row(s)) => {
             let left = [vec![badge(&s.project), Span::raw(" ")], whereabouts(s)].concat();
-            let mut right = agent_spans(s);
+            // Too much memory first, so it's the last cut.
+            let mut right = match app.over_memory(s) {
+                Some(memory) => vec![
+                    Span::styled(
+                        format!("⚠ {}", crate::procs::size(memory)),
+                        Style::new().fg(ERROR),
+                    ),
+                    sep(),
+                ],
+                None => Vec::new(),
+            };
+            right.extend(agent_spans(s));
             right.push(sep());
             if let Some(at) = s.deleted_at {
                 let archived = format!("archived {}", theme::ago(now - at));

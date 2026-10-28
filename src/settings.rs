@@ -463,6 +463,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         notes,
         group_by,
         card_subagents,
+        memory_warning,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
         prices: _,
@@ -538,6 +539,22 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 },
                 "a session's subagents at work on its card: how many, and a line each once unfolded (l), always, or how many only",
             ),
+            {
+                let quarter = crate::procs::total_memory()
+                    .map_or("off (the machine's memory unknown)".to_string(), |total| {
+                        format!("{} (a quarter of memory)", crate::procs::size(total / 4))
+                    });
+                let written = memory_warning.as_ref().map(|m| m.text.clone());
+                let mut s = text_setting(
+                    &["memory_warning"],
+                    written.as_deref(),
+                    &quarter,
+                    "a session whose processes use more memory is marked: its card, header, a folded group's heading and the summary (8G, 512M, or off)",
+                );
+                // Its default, a share of the machine's, isn't a value.
+                s.placeholder = Some("\"<size>\"".into());
+                s
+            },
             text_setting(
                 &["shell"],
                 shell.as_deref(),

@@ -12,6 +12,7 @@ mod model;
 mod note;
 mod paths;
 mod print;
+mod procs;
 mod report;
 mod search;
 mod settings;
@@ -133,6 +134,9 @@ enum Cmd {
         /// `project` (default) or `attention`: needs input, idle, stopped, working, like the TUI's shelves
         #[arg(long, default_value = "project", value_parser = ["project", "attention"])]
         sort: String,
+        /// What each live session's agent and all it started use: CPU (measured over a second) and memory
+        #[arg(long)]
+        resources: bool,
         #[arg(long)]
         json: bool,
     },
@@ -257,7 +261,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Check roster's tmux server and database against each other
+    /// Check roster's tmux server and database against each other, and show what each session's processes use
     Doctor {
         /// Kill orphaned tmux sessions
         #[arg(long)]
@@ -548,12 +552,33 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             archived,
             project,
             sort,
+            resources,
             json,
         } => {
             r.settle()?;
             let query = words.join(" ");
             let by_attention = sort == "attention";
-            list_sessions(r, &query, archived, project.as_deref(), by_attention, json)?;
+            // Read twice, a second apart, for the CPU used between.
+            let usage = match resources {
+                true => {
+                    let first = r.resources()?;
+                    if first.is_empty() {
+                        Some(first)
+                    } else {
+                        std::thread::sleep(Duration::from_secs(1));
+                        Some(r.resources()?)
+                    }
+                }
+                false => None,
+            };
+            let options = print::ListOptions {
+                archived,
+                project: project.as_deref(),
+                by_attention,
+                usage: usage.as_ref(),
+                json,
+            };
+            list_sessions(r, &query, &options)?;
         }
         Cmd::Show { session } => {
             r.refresh()?;

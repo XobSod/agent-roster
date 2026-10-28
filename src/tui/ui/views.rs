@@ -1,4 +1,5 @@
-//! The full-width views: projects, and the tmux server and database report.
+//! The full-width views: projects, and the tmux server, database and
+//! processes report.
 
 use super::*;
 
@@ -110,7 +111,7 @@ pub(super) fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// The tmux server and database report, full width.
+/// The tmux server, database and processes report, full width.
 pub(super) fn draw_server(f: &mut Frame, app: &App, area: Rect) {
     use crate::doctor::Level;
     let inner = Rect {
@@ -131,17 +132,29 @@ pub(super) fn draw_server(f: &mut Frame, app: &App, area: Rect) {
     };
     let title = vec![
         "roster".bold(),
-        Span::styled("  tmux server and database", Style::new().fg(MUTED)),
+        Span::styled(
+            "  tmux server, database and processes",
+            Style::new().fg(MUTED),
+        ),
     ];
     f.render_widget(
         Paragraph::new(Line::from(fit(head.width as usize, title, vec![state]))),
         head,
     );
-    let lines: Vec<Line> = app
-        .report
-        .iter()
-        .skip(app.report_scroll)
-        .map(|line| {
+    // The cursor's line in view.
+    let shown = app.report_lines();
+    let cursor = app.report_cursor.min(shown.len().saturating_sub(1));
+    let height = (body.height as usize).max(1);
+    let mut scroll = app.report_scroll.get().min(cursor);
+    if cursor >= scroll + height {
+        scroll = cursor + 1 - height;
+    }
+    app.report_scroll.set(scroll);
+    let selected = (!shown.is_empty()).then_some(cursor);
+    let lines: Vec<Line> = (shown.iter().enumerate())
+        .skip(scroll)
+        .take(height)
+        .map(|(i, line)| {
             let (mark, style) = match line.level {
                 Level::Heading => ("", Style::new().add_modifier(Modifier::BOLD)),
                 Level::Info => (" ", Style::new()),
@@ -149,13 +162,46 @@ pub(super) fn draw_server(f: &mut Frame, app: &App, area: Rect) {
                 Level::Note => ("·", Style::new().fg(MUTED)),
                 Level::Problem => ("✗", Style::new().fg(ERROR)),
             };
-            match line.level {
-                Level::Heading => Line::styled(line.text.clone(), style),
-                _ if line.text.is_empty() => Line::default(),
-                _ => Line::from(vec![
+            let line = match (line.level, &line.item) {
+                (Level::Heading, _) => Line::styled(line.text.clone(), style),
+                (_, None) if line.text.is_empty() => Line::default(),
+                (_, None) => Line::from(vec![
                     Span::styled(mark, style),
                     Span::styled(line.text[1..].to_string(), style),
                 ]),
+                // A session or a process: indented by how deep it is, marked
+                // folded or not if it has lines under it.
+                (_, Some(item)) => {
+                    let open = match &item.what {
+                        crate::doctor::What::Session(id) => app.report_open.contains(id),
+                        what => !app.report_folded.contains(what),
+                    };
+                    let fold = match (item.children, open) {
+                        (false, _) => "  ",
+                        (true, true) => "▾ ",
+                        (true, false) => "▸ ",
+                    };
+                    // A session's figures plain, whatever its state.
+                    let (head, figures, rest) = match &line.figures {
+                        Some((at, figures)) => {
+                            (&line.text[..*at], figures.as_str(), &line.text[*at..])
+                        }
+                        None => (line.text.as_str(), "", ""),
+                    };
+                    Line::from(vec![
+                        Span::styled(mark, style),
+                        Span::raw(format!(" {}", "  ".repeat(item.depth))),
+                        Span::styled(fold, Style::new().fg(MUTED)),
+                        Span::styled(head.to_string(), style),
+                        Span::raw(figures.to_string()),
+                        Span::styled(rest.to_string(), style),
+                    ])
+                }
+            };
+            if Some(i) == selected {
+                line.style(Style::new().bg(SELECTED_BG))
+            } else {
+                line
             }
         })
         .collect();

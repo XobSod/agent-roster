@@ -433,6 +433,8 @@ fn server_view_shows_the_report() {
     let line = |level, text: &str| Line {
         level,
         text: text.into(),
+        figures: None,
+        item: None,
     };
     app.set_report(Diagnosis {
         lines: vec![
@@ -443,12 +445,50 @@ fn server_view_shows_the_report() {
         problems: 1,
     });
     let screen = render(&app, 120, 12);
-    assert!(screen.contains("tmux server and database"), "{screen}");
+    assert!(
+        screen.contains("tmux server, database and processes"),
+        "{screen}"
+    );
     assert!(screen.contains("tmux sessions (1)"), "{screen}");
     assert!(screen.contains("✗ r-x"), "{screen}");
     assert!(screen.contains("Enter kill orphans"), "{screen}");
     assert!(screen.contains("Esc back"), "{screen}");
     assert!(!screen.contains("Needs input"), "{screen}");
+
+    // A session's line, folded, its figures between what names it and the
+    // rest; the cursor's line kept in view, far down a long report.
+    use crate::doctor::{Item, What};
+    let mut lines = vec![Line {
+        level: Level::Ok,
+        text: "r-1  demo/api  alive".into(),
+        figures: Some((15, "  312 MB  CPU  99%  ".into())),
+        item: Some(Item {
+            what: What::Session("s1".into()),
+            depth: 0,
+            children: true,
+        }),
+    }];
+    lines.extend((0..30).map(|i| line(Level::Info, &format!("  line {i}"))));
+    // Back in the view, the cursor at its top.
+    for c in [KeyCode::Esc, KeyCode::Char('v'), KeyCode::Char('t')] {
+        app.on_key(KeyEvent::new(c, KeyModifiers::NONE));
+    }
+    app.set_report(Diagnosis {
+        lines,
+        orphans: Vec::new(),
+        problems: 0,
+    });
+    let screen = render(&app, 120, 12);
+    assert!(
+        screen.contains("✓ ▸ r-1  demo/api    312 MB  CPU  99%  alive"),
+        "{screen}"
+    );
+    app.report_cursor = 28;
+    let screen = render(&app, 120, 12);
+    assert!(
+        screen.contains("line 27") && !screen.contains("r-1"),
+        "{screen}"
+    );
 }
 
 #[test]

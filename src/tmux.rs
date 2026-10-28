@@ -13,11 +13,13 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{Context, Result, bail};
 
 /// Variables never passed into roster's tmux: the ones that make tmux think it's
-/// nested, and the per-session ones of Claude Code and Codex, which leak in
-/// when roster itself is run from inside one of them.
+/// nested, and the per-session ones of Claude Code and Codex, and roster's own,
+/// which leak in when roster itself is run from inside one of them (a server
+/// carrying a session's id would have its every pane taken for that session's).
 pub(crate) const LEAKY_ENV: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
+    "ROSTER_SESSION",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",

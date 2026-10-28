@@ -100,7 +100,7 @@ fn tui_walkthrough() {
 
     // The view menu's server view shows tmux and the database; Esc goes back.
     term.keys(&["v", "t"]);
-    term.wait_for("the server view", "tmux server and database");
+    term.wait_for("the server view", "tmux server, database and processes");
     term.wait_for("the verdict", "problems (0)");
     term.keys(&["Escape"]);
     term.wait_for("the list again", "Enter attach");

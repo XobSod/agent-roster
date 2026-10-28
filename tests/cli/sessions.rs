@@ -511,6 +511,40 @@ fn doctor_finds_orphans_and_fixes_them() {
         "{report}"
     );
     assert!(report.contains("problems (0)"), "{report}");
+    // What the live one's agent and all it started use, its processes
+    // under it; CPU only between readings.
+    let api = report
+        .split("demo/api")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{report}"));
+    let mut lines = api.lines();
+    let line = lines.next().unwrap();
+    assert!(
+        line.contains(" MB  CPU     -  1 process      alive, pid "),
+        "{line}"
+    );
+    let agent = lines.next().unwrap();
+    assert!(
+        agent.starts_with("    ") && agent.contains(" MB  CPU     -  pid "),
+        "{agent}"
+    );
+    let list: serde_json::Value =
+        serde_json::from_str(&t.ok(&["ls", "--resources", "--json"])).unwrap();
+    let api = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "api")
+        .unwrap();
+    let resources = &api["resources"];
+    assert!(resources["memory"].as_u64().unwrap() > 0, "{resources}");
+    assert!(resources["processes"].as_u64().unwrap() >= 1, "{resources}");
+    assert!(resources["cpu"].as_f64().is_some(), "{resources}");
+    let table = t.ok(&["ls", "--resources"]);
+    assert!(
+        table.starts_with("PROJECT  SESSION  ") && table.contains("CPU  MEMORY"),
+        "{table}"
+    );
 
     // A tmux session no roster session owns.
     Command::new("tmux")

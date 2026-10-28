@@ -16,7 +16,7 @@ use crate::paths::{self, PROJECT_ENV, Paths};
 use crate::stats::AgentStats;
 use crate::tmux::{Pane, Tmux};
 use crate::util::{self, now_ms};
-use crate::{agent, launch};
+use crate::{agent, launch, procs};
 
 /// A note of `text`, its pin on a line it has (`note::tidy` may take lines
 /// off its end); None if there's nothing but blanks.
@@ -121,6 +121,8 @@ pub struct Roster {
     /// taking its config, on opening or as a start starts the server, and
     /// settings roster no longer has.
     pub(crate) notices: Vec<String>,
+    /// The processes as last read, for the CPU each took since.
+    sampler: procs::Sampler,
 }
 
 /// A first prompt `refresh` couldn't type into session `id`, and why;
@@ -231,6 +233,7 @@ impl Roster {
             panes: None,
             config_text,
             config_refused: None,
+            sampler: procs::Sampler::default(),
         })
     }
 
@@ -1236,6 +1239,31 @@ impl Roster {
         }
         self.db.save_changes(&before, &s)?;
         Ok(s)
+    }
+
+    /// The processes running now, with the CPU each took since this process
+    /// last read them; `agents`, the agents' pids, are where each one's
+    /// session is known from without reading their environment.
+    pub fn processes(&mut self, agents: &[i32]) -> Result<procs::Snapshot> {
+        let all = procs::processes(agents, &self.paths.db())?;
+        Ok(self.sampler.read(all, now_ms()))
+    }
+
+    /// What each session's processes use now, by session id: its agent and
+    /// all it started, those that left it or outlived it too (an archived
+    /// session's, still running).
+    pub fn resources(&mut self) -> Result<HashMap<String, procs::Totals>> {
+        let panes = self.tmux.panes()?;
+        let agent = |s: &Session| panes.get(&s.tmux_name()).filter(|p| !p.dead)?.pid;
+        let sessions = self.db.sessions(true)?;
+        let agents: Vec<i32> = sessions.iter().filter_map(agent).collect();
+        let snapshot = self.processes(&agents)?;
+        Ok((sessions.iter())
+            .filter_map(|s| {
+                let tree = snapshot.of_session(&s.id, agent(s));
+                Some((s.id.clone(), snapshot.totals(&tree)?))
+            })
+            .collect())
     }
 
     /// A session's or a project's note as saved now.

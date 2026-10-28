@@ -31,10 +31,24 @@ impl App {
                 self.labelled(actions)
             }
             Mode::Projects => self.projects_view_hints(),
-            Mode::Server if self.orphans > 0 => {
-                self.labelled([(Action::Confirm, "kill orphans"), (Action::Down, "scroll")])
+            Mode::Server => {
+                let mut actions = Vec::new();
+                if self.orphans > 0 {
+                    actions.push((Action::Confirm, "kill orphans"));
+                }
+                let items = self.report.iter().any(|l| l.item.is_some());
+                actions.push((Action::Down, "move"));
+                let mut hints = self.labelled(actions);
+                if items
+                    && let (Some(left), Some(right)) = (
+                        self.keymap.label(Action::Collapse),
+                        self.keymap.label(Action::Expand),
+                    )
+                {
+                    hints.push((format!("{left}/{right}"), "fold/unfold"));
+                }
+                hints
             }
-            Mode::Server => self.labelled([(Action::Down, "scroll")]),
             Mode::Settings => self.settings_view_hints(),
             Mode::Usage => {
                 // Nothing to ask again with account_limits off.

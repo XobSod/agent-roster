@@ -58,7 +58,13 @@ Everything else is in three menus, which pop up their keys:
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
-| `v` view | `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
+| `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage |
+
+The server view (`v t`) lists each session's tmux session with what its processes
+use together: memory, CPU lately, how many. `j`/`k` move the cursor; on a session, `l`
+unfolds it to its process tree (`h` folds), each process with its own memory, CPU and
+pid: the agent and all it started, and anything started in the session that left the
+agent or outlived it (an archived or deleted session's, in a section of their own).
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
@@ -219,6 +225,7 @@ roster adopt 3f2a --name api            # continue one here; --fork adopts a cop
 roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen, ✎ those with a note
 roster ls --project myproj --sort attention   # like the TUI's shelves
+roster ls --resources                   # CPU and memory of each agent and all it started (builds, tests, …)
 roster ls auth rework                   # only those matching (fuzzy, like / in the TUI)
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
@@ -228,7 +235,7 @@ roster rm api                           # delete one for good, archived or not (
 roster events --follow                  # what the agents' hooks report
 roster usage                            # what your Claude and Codex accounts have used of their limits
 roster tokens --days 7                  # what the agents spent: tokens by kind, and their cost at API prices
-roster doctor                           # roster's tmux server and database, checked; --fix removes orphans
+roster doctor                           # roster's tmux server and database, checked, and each session's processes; --fix removes orphans
 roster config                           # every setting (but prices): its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
 roster config unset fit_preview         # back to its default

@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::engine::Roster;
 use crate::model::{Session, State};
+use crate::procs::{self, Totals};
 use crate::{doctor, search, stats, util};
 
 pub fn list_adoptable(r: &Roster, all: bool) -> Result<()> {
@@ -155,15 +156,27 @@ pub fn doctor_line(line: &doctor::Line, tty: bool) -> String {
         Level::Note => ("2", "·"),
         Level::Problem => ("31", "✗"),
     };
-    let text = if line.level == Level::Heading || line.text.is_empty() {
-        line.text.clone()
-    } else {
-        format!("{mark}{}", &line.text[1..])
+    let colored = |text: &str| match tty && !color.is_empty() && !text.is_empty() {
+        true => format!("\x1b[{color}m{text}\x1b[0m"),
+        false => text.to_string(),
     };
-    if tty && !color.is_empty() {
-        format!("\x1b[{color}m{text}\x1b[0m")
-    } else {
-        text
+    match &line.item {
+        _ if line.level == Level::Heading || line.text.is_empty() => colored(&line.text),
+        // A session or a process: indented by how deep it is, all unfolded;
+        // a session's figures plain.
+        Some(item) => {
+            let (head, figures, rest) = match &line.figures {
+                Some((at, figures)) => (&line.text[..*at], figures.as_str(), &line.text[*at..]),
+                None => (line.text.as_str(), "", ""),
+            };
+            let indent = "  ".repeat(item.depth);
+            format!(
+                "{}{figures}{}",
+                colored(&format!("{mark} {indent}{head}")),
+                colored(rest)
+            )
+        }
+        None => colored(&format!("{mark}{}", &line.text[1..])),
     }
 }
 
@@ -383,14 +396,25 @@ pub fn print_tokens(r: &Roster, days: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn list_sessions(
-    r: &Roster,
-    query: &str,
-    archived: bool,
-    project: Option<&str>,
-    by_attention: bool,
-    json: bool,
-) -> Result<()> {
+/// How `roster ls` lists: archived sessions or live ones, of one project or
+/// all, in the shelves' order, with what their processes use (`usage`, by
+/// session id), as JSON.
+pub struct ListOptions<'a> {
+    pub archived: bool,
+    pub project: Option<&'a str>,
+    pub by_attention: bool,
+    pub usage: Option<&'a HashMap<String, Totals>>,
+    pub json: bool,
+}
+
+pub fn list_sessions(r: &Roster, query: &str, options: &ListOptions) -> Result<()> {
+    let ListOptions {
+        archived,
+        project,
+        by_attention,
+        usage,
+        json,
+    } = *options;
     if let Some(name) = project
         && !r.projects()?.iter().any(|p| p.name == name)
     {
@@ -411,7 +435,7 @@ pub fn list_sessions(
         let items: Vec<_> = sessions
             .iter()
             .map(|s| {
-                json!({
+                let mut item = json!({
                     "id": s.id, "project": s.project, "name": s.name, "agent": s.agent,
                     "state": s.state.as_str(), "unread": s.unread, "exit_status": s.exit_status,
                     "conversation_id": s.conversation_id, "transcript_path": s.transcript_path, "workdir": s.workdir, "archived_at": s.deleted_at,
@@ -424,7 +448,15 @@ pub fn list_sessions(
                     "subagents": s.subagents_running(util::now_ms()),
                     "note": s.note.as_ref().map(|n| &n.text),
                     "note_pin": s.note.as_ref().and_then(|n| n.pin),
-                })
+                });
+                // Asked for: null for a session with no processes.
+                if let Some(usage) = usage {
+                    item["resources"] = json!(usage.get(&s.id).map(|t| json!({
+                        "memory": t.memory, "cpu": t.cpu, "processes": t.processes,
+                        "heaviest": {"command": t.heaviest.0, "memory": t.heaviest.1},
+                    })));
+                }
+                item
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -468,20 +500,29 @@ pub fn list_sessions(
             let agent = [Some(s.agent.clone()), s.model_label(), s.effort_label()]
                 .into_iter()
                 .flatten();
-            vec![
+            let mut row = vec![
                 s.project.clone(),
                 s.name.clone(),
                 format!("{marker} {state}"),
                 cut(&title, 40),
                 agent.collect::<Vec<_>>().join(" · "),
                 s.id.clone(),
-            ]
+            ];
+            if let Some(usage) = usage {
+                let totals = usage.get(&s.id);
+                let cpu = totals.and_then(|t| t.cpu).map(|cpu| format!("{cpu:.0}%"));
+                let memory = totals.map(|t| procs::size(t.memory));
+                row.insert(3, cpu.unwrap_or_else(|| "-".into()));
+                row.insert(4, memory.unwrap_or_else(|| "-".into()));
+            }
+            row
         })
         .collect();
-    print_table(
-        &["PROJECT", "SESSION", "  STATE", "TITLE", "AGENT", "ID"],
-        &rows,
-    );
+    let mut header = vec!["PROJECT", "SESSION", "  STATE", "TITLE", "AGENT", "ID"];
+    if usage.is_some() {
+        header.splice(3..3, ["CPU", "MEMORY"]);
+    }
+    print_table(&header, &rows);
     Ok(())
 }
 

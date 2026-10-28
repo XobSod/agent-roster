@@ -115,14 +115,12 @@ impl App {
         None
     }
 
-    /// In the server view: scroll, kill orphans, or leave.
+    /// In the server view: move the cursor over its lines, fold and unfold
+    /// the session or process it's on, kill orphans, or leave.
     fn act_in_server_view(&mut self, action: Action) -> Option<Op> {
         match action {
-            Action::Up => self.report_scroll = self.report_scroll.saturating_sub(1),
-            Action::Down => {
-                self.report_scroll =
-                    (self.report_scroll + 1).min(self.report.len().saturating_sub(1))
-            }
+            Action::Up | Action::Down => self.move_in_report(action == Action::Down),
+            Action::Collapse | Action::Expand => self.fold_in_report(action == Action::Collapse),
             Action::Confirm if self.orphans > 0 => {
                 let question = format!(
                     "Kill {} orphaned tmux session(s)? Their programs end.",
@@ -173,6 +171,63 @@ impl App {
             _ => self.fail("This is the usage view: Esc goes back to the sessions"),
         }
         None
+    }
+
+    /// The server view's cursor on the next line down, or up, with
+    /// something on it, as far as there are.
+    fn move_in_report(&mut self, down: bool) {
+        let lines = self.report_lines();
+        let mut at = self.report_cursor;
+        loop {
+            at = match down {
+                true if at + 1 < lines.len() => at + 1,
+                false if at > 0 => at - 1,
+                _ => return,
+            };
+            if !lines[at].text.is_empty() {
+                break;
+            }
+        }
+        (self.report_cursor, self.report_selected, self.report_anchor) = (at, None, None);
+        self.place_report_cursor();
+    }
+
+    /// Unfolds the selected session or process in the server view, or folds
+    /// it; on one with nothing under it, or folded already, folding selects
+    /// what it's under, as vim's tree views do.
+    fn fold_in_report(&mut self, fold: bool) {
+        use crate::doctor::What;
+        let Some(what) = self.report_selected.clone() else {
+            return;
+        };
+        let lines = self.report_lines();
+        let Some(at) = lines
+            .iter()
+            .position(|l| l.item.as_ref().is_some_and(|i| i.what == what))
+        else {
+            return;
+        };
+        let item = lines[at].item.clone().expect("found by its item");
+        let parent = (lines[..at].iter().rev())
+            .filter_map(|l| l.item.as_ref())
+            .find(|i| i.depth < item.depth)
+            .map(|i| i.what.clone());
+        match (&what, fold) {
+            (What::Session(id), false) => {
+                self.report_open.insert(id.clone());
+            }
+            (What::Session(id), true) => {
+                self.report_open.remove(id);
+            }
+            (_, false) => {
+                self.report_folded.remove(&what);
+            }
+            (_, true) if item.children && !self.report_folded.contains(&what) => {
+                self.report_folded.insert(what);
+            }
+            (_, true) => self.report_selected = parent,
+        }
+        self.place_report_cursor();
     }
 
     /// Folds (or unfolds) the selected group; from a session, its group.

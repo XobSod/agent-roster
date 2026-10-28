@@ -106,7 +106,7 @@ impl Action {
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
             Action::ShowProjects => "projects",
-            Action::ShowServer => "tmux server",
+            Action::ShowServer => "tmux server and processes",
             Action::ShowSettings => "settings",
             Action::ShowUsage => "usage",
         }

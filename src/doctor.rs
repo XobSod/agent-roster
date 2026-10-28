@@ -1,12 +1,15 @@
 //! What's underneath: roster's tmux server and database, checked against each
-//! other. `roster doctor` prints it; the TUI's server view (`v t`) shows it.
+//! other, and what each session's processes use. `roster doctor` prints it;
+//! the TUI's server view (`v t`) shows it, its sessions folding to their
+//! processes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use crate::engine::Roster;
 use crate::model::{Session, State};
+use crate::procs;
 use crate::util::{self, now_ms};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +25,36 @@ pub enum Level {
 #[derive(Clone, Debug)]
 pub struct Line {
     pub level: Level,
+    /// For a line of an `item`, without its indent.
     pub text: String,
+    /// What a session's processes use, shown plainly whatever the level,
+    /// after the first so many bytes of `text` (what names the session).
+    pub figures: Option<(usize, String)>,
+    pub item: Option<Item>,
+}
+
+/// What a line is about, for the server view to select, fold and act on:
+/// a session, or one of its processes, the tree under it in the lines after.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item {
+    pub what: What,
+    /// 0 for a session, 1 for its agent (or a process that left it), and
+    /// one more for each level under.
+    pub depth: usize,
+    /// Lines of its own under it.
+    pub children: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum What {
+    /// A roster session (its id).
+    Session(String),
+    /// A process of the session, by pid and when it started.
+    Process {
+        session: String,
+        pid: i32,
+        started: u64,
+    },
 }
 
 pub struct Diagnosis {
@@ -46,7 +78,63 @@ impl Report {
         self.lines.push(Line {
             level,
             text: text.into(),
+            figures: None,
+            item: None,
         });
+    }
+
+    /// A session's line, `head` (what names it), what its processes use
+    /// together, then `rest`; and its processes' lines after it.
+    fn session(
+        &mut self,
+        level: Level,
+        head: String,
+        rest: String,
+        id: &str,
+        snapshot: Option<&procs::Snapshot>,
+        tree: &[(&procs::Process, usize)],
+    ) {
+        let figures = (snapshot.and_then(|s| s.totals(tree))).map(|t| (head.len(), totals(&t)));
+        self.lines.push(Line {
+            level,
+            text: head + &rest,
+            figures,
+            item: Some(Item {
+                what: What::Session(id.to_string()),
+                depth: 0,
+                children: !tree.is_empty(),
+            }),
+        });
+        // Each process's figures lined up, however deep it is (each level
+        // indented two more).
+        let width = (tree.iter())
+            .map(|(p, depth)| 2 * depth + p.command.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (i, (p, depth)) in tree.iter().enumerate() {
+            let cpu = snapshot.and_then(|s| s.cpu(p));
+            let width = width - 2 * depth;
+            self.push(
+                Level::Info,
+                format!(
+                    "{:<width$}  {:>8}  CPU {:>5}  pid {}",
+                    p.command,
+                    procs::size(p.rss),
+                    percent(cpu),
+                    p.pid
+                ),
+            );
+            let line = self.lines.last_mut().expect("just pushed");
+            line.item = Some(Item {
+                what: What::Process {
+                    session: id.to_string(),
+                    pid: p.pid,
+                    started: p.started,
+                },
+                depth: depth + 1,
+                children: tree.get(i + 1).is_some_and(|(_, next)| next > depth),
+            });
+        }
     }
 
     fn heading(&mut self, text: &str) {
@@ -66,6 +154,25 @@ impl Report {
 }
 
 use util::short_path as short;
+
+/// A CPU share as a percentage; `-` until known (between two readings).
+fn percent(cpu: Option<f64>) -> String {
+    cpu.map_or("-".to_string(), |cpu| format!("{cpu:.0}%"))
+}
+
+/// What a session's processes use together, for its line: memory, CPU,
+/// how many, in columns.
+fn totals(t: &procs::Totals) -> String {
+    let count = match t.processes {
+        1 => "1 process".to_string(),
+        n => format!("{n} processes"),
+    };
+    format!(
+        "{:>8}  CPU {:>5}  {count:<13}  ",
+        procs::size(t.memory),
+        percent(t.cpu)
+    )
+}
 
 impl Roster {
     pub fn diagnose(&mut self) -> Result<Diagnosis> {
@@ -159,23 +266,37 @@ impl Roster {
         let by_tmux: HashMap<String, &Session> =
             sessions.iter().map(|s| (s.tmux_name(), s)).collect();
         let mut orphans = Vec::new();
+        // What each session's processes use; CPU only between readings (the
+        // server view's), not in one.
+        let agents: Vec<i32> = (panes.iter())
+            .filter(|p| !p.dead)
+            .filter_map(|p| p.pid)
+            .collect();
+        let snapshot = self.processes(&agents);
+        let snap = snapshot.as_ref().ok();
+        let tree = |id: &str, root: Option<i32>| match snap {
+            Some(snapshot) => snapshot.of_session(id, root),
+            None => Vec::new(),
+        };
+        // The sessions shown with their processes.
+        let mut shown = HashSet::new();
         r.heading(&format!("tmux sessions ({})", panes.len()));
         if panes.is_empty() {
             r.push(Level::Info, "  none");
         }
-        let label_width = sessions
-            .iter()
-            .map(|s| s.label().chars().count())
-            .max()
-            .unwrap_or(0)
-            .max(7);
+        let pane_label = |name: &str| match by_tmux.get(name) {
+            Some(s) if s.deleted_at.is_none() => s.label(),
+            Some(s) => format!("{} (archived)", s.label()),
+            None => "-".to_string(),
+        };
+        // Each section's labels lined up, their figures with them.
+        let width = |labels: &mut dyn Iterator<Item = String>| {
+            labels.map(|l| l.chars().count()).max().unwrap_or(0).max(7)
+        };
+        let label_width = width(&mut panes.iter().map(|p| pane_label(&p.session)));
         for p in &panes {
             let owner = by_tmux.get(&p.session).filter(|s| s.deleted_at.is_none());
-            let label = match (owner, by_tmux.get(&p.session)) {
-                (Some(s), _) => s.label(),
-                (None, Some(s)) => format!("{} (archived)", s.label()),
-                (None, None) => "-".to_string(),
-            };
+            let label = pane_label(&p.session);
             let pane = if p.dead {
                 match (p.dead_status, p.dead_signal) {
                     (Some(code), _) => format!("dead (exit {code})"),
@@ -194,20 +315,41 @@ impl Roster {
                 1 => ", 1 client".to_string(),
                 n => format!(", {n} clients"),
             };
-            let text = format!(
-                "  {:<12}{label:<label_width$}  {pane}, {}x{}, {} lines{clients}",
-                p.session, p.width, p.height, p.history
+            let head = format!("{:<12}{label:<label_width$}  ", p.session);
+            let rest = format!(
+                "{pane}, {}x{}, {} lines{clients}",
+                p.width, p.height, p.history
             );
-            match owner {
-                Some(_) if p.dead => {
-                    r.push(Level::Note, format!("{text}  (stopped; last screen kept)"))
+            match (owner, by_tmux.get(&p.session)) {
+                (Some(s), _) if p.dead => {
+                    let rest = format!("{rest}  (stopped; last screen kept)");
+                    r.session(Level::Note, head, rest, &s.id, snap, &tree(&s.id, None));
+                    shown.insert(s.id.clone());
                 }
-                Some(_) => r.push(Level::Ok, text),
-                None => {
-                    r.push(Level::Problem, format!("{text}  ← orphan"));
+                (Some(s), _) => {
+                    let processes = tree(&s.id, p.pid);
+                    r.session(Level::Ok, head, rest, &s.id, snap, &processes);
+                    shown.insert(s.id.clone());
+                }
+                // An archived session's, with what may still run in it.
+                (None, Some(s)) => {
+                    let rest = format!("{rest}  ← orphan");
+                    let processes = tree(&s.id, p.pid.filter(|_| !p.dead));
+                    r.session(Level::Problem, head, rest, &s.id, snap, &processes);
+                    shown.insert(s.id.clone());
+                    orphans.push(p.session.clone());
+                }
+                (None, None) => {
+                    r.push(Level::Problem, format!("  {head}{rest}  ← orphan"));
                     orphans.push(p.session.clone());
                 }
             }
+        }
+        if let Err(e) = &snapshot {
+            r.push(
+                Level::Note,
+                format!("  processes: couldn't read them: {e:#}"),
+            );
         }
         for name in &orphans {
             let why = match by_tmux.get(name) {
@@ -227,23 +369,56 @@ impl Roster {
                 "roster sessions without a tmux session ({})",
                 missing.len()
             ));
+            let label_width = width(&mut missing.iter().map(|s| s.label()));
             for s in missing {
+                // What outlived its agent, if anything.
+                let processes = tree(&s.id, None);
+                let head = format!("{:<label_width$}  ", s.label());
+                shown.insert(s.id.clone());
                 if s.state == State::Stopped {
-                    r.push(
-                        Level::Note,
-                        format!("  {}  stopped (starting it creates one)", s.label()),
-                    );
+                    let rest = "stopped (starting it creates one)".to_string();
+                    r.session(Level::Note, head, rest, &s.id, snap, &processes);
                 } else {
-                    r.push(
-                        Level::Problem,
-                        format!("  {}  recorded as {}", s.label(), s.state.as_str()),
-                    );
+                    let rest = format!("recorded as {}", s.state.as_str());
+                    r.session(Level::Problem, head, rest, &s.id, snap, &processes);
                     r.problem(format!(
                         "{} is recorded as {} but has no tmux session",
                         s.label(),
                         s.state.as_str()
                     ));
                 }
+            }
+        }
+
+        // What archived or deleted sessions left running: started in them,
+        // outliving their tmux session.
+        let mut left: Vec<String> = (snap.into_iter())
+            .flat_map(|snap| snap.processes.iter())
+            .filter_map(|p| p.session.clone())
+            .filter(|id| !shown.contains(id))
+            .collect();
+        left.sort();
+        left.dedup();
+        if !left.is_empty() {
+            r.heading(&format!(
+                "left running by archived or deleted sessions ({})",
+                left.len()
+            ));
+            let label = |id: &str| match sessions.iter().find(|s| s.id == id) {
+                Some(s) => format!("{} (archived)", s.label()),
+                None => format!("{id} (deleted)"),
+            };
+            let label_width = width(&mut left.iter().map(|id| label(id)));
+            for id in left {
+                let head = format!("{:<label_width$}  ", label(&id));
+                r.session(
+                    Level::Note,
+                    head,
+                    String::new(),
+                    &id,
+                    snap,
+                    &tree(&id, None),
+                );
             }
         }
 

@@ -584,6 +584,125 @@ fn a_kept_first_prompt_is_asked_about_as_it_starts() {
 }
 
 #[test]
+fn server_view_unfolds_a_session_to_its_processes() {
+    use crate::doctor::{Diagnosis, Item, Level, Line, What};
+    let mut app = app();
+    keys(&mut app, "vt");
+    let process = |pid: i32, depth: usize, children: bool| Line {
+        level: Level::Info,
+        text: format!("p{pid}"),
+        figures: None,
+        item: Some(Item {
+            what: What::Process {
+                session: "s1".into(),
+                pid,
+                started: 0,
+            },
+            depth,
+            children,
+        }),
+    };
+    let session = |id: &str, children: bool| Line {
+        level: Level::Ok,
+        text: id.into(),
+        figures: None,
+        item: Some(Item {
+            what: What::Session(id.into()),
+            depth: 0,
+            children,
+        }),
+    };
+    let report = || Diagnosis {
+        lines: vec![
+            session("s1", true),
+            process(10, 1, true),
+            process(11, 2, false),
+            process(20, 1, false),
+            session("s2", false),
+            Line {
+                level: Level::Info,
+                text: String::new(),
+                figures: None,
+                item: None,
+            },
+            Line {
+                level: Level::Heading,
+                text: "database".into(),
+                figures: None,
+                item: None,
+            },
+        ],
+        orphans: Vec::new(),
+        problems: 0,
+    };
+    app.set_report(report());
+    let shown =
+        |app: &App| -> Vec<String> { app.report_lines().iter().map(|l| l.text.clone()).collect() };
+    // Folded at first: the sessions alone, the cursor on the first.
+    assert_eq!(shown(&app), ["s1", "s2", "", "database"]);
+    assert_eq!(app.report_selected, Some(What::Session("s1".into())));
+    keys(&mut app, "l");
+    assert_eq!(
+        shown(&app),
+        ["s1", "p10", "p11", "p20", "s2", "", "database"]
+    );
+    // A process folded hides those under it; h again on it, or on one
+    // with none under it, selects what it's under.
+    keys(&mut app, "jh");
+    assert_eq!(shown(&app), ["s1", "p10", "p20", "s2", "", "database"]);
+    keys(&mut app, "h");
+    assert_eq!(app.report_selected, Some(What::Session("s1".into())));
+    keys(&mut app, "jjhh");
+    assert_eq!(app.report_selected, Some(What::Session("s1".into())));
+    // Read again with p10 gone: what was under it went too, and the
+    // selection, on it, goes to its session.
+    keys(&mut app, "lj");
+    assert_eq!(
+        app.report_selected,
+        report().lines[1].item.clone().map(|i| i.what)
+    );
+    let mut gone = report();
+    gone.lines.remove(1);
+    gone.lines.remove(1);
+    app.set_report(gone);
+    assert_eq!(app.report_selected, Some(What::Session("s1".into())));
+    assert_eq!(shown(&app), ["s1", "p20", "s2", "", "database"]);
+    // Folded again.
+    keys(&mut app, "h");
+    assert_eq!(shown(&app), ["s1", "s2", "", "database"]);
+    // Every line within reach, not only theirs (blank ones skipped): past
+    // the last session, the cursor on none, and stopping at the end.
+    keys(&mut app, "jjjj");
+    assert_eq!((app.report_cursor, app.report_selected.clone()), (3, None));
+    keys(&mut app, "l");
+    assert_eq!(shown(&app), ["s1", "s2", "", "database"]);
+    keys(&mut app, "k");
+    assert_eq!(app.report_selected, Some(What::Session("s2".into())));
+    // On a line of neither, it stays on it as lines come above it.
+    keys(&mut app, "j");
+    app.report_open.insert("s1".into());
+    app.set_report(report());
+    assert_eq!(app.report_lines()[app.report_cursor].text, "database");
+    // That line gone (its count changed, one fewer under it), it's as far
+    // from the end, but never on a blank line.
+    let under = |text: &str| Line {
+        level: Level::Info,
+        text: text.into(),
+        figures: None,
+        item: None,
+    };
+    let mut two = report();
+    two.lines.extend([under("  a"), under("  b")]);
+    app.set_report(two);
+    assert_eq!(app.report_lines()[app.report_cursor].text, "database");
+    let mut one = report();
+    one.lines.last_mut().unwrap().text = "database (1)".into();
+    one.lines.push(under("  a"));
+    app.set_report(one);
+    assert_eq!(app.report_lines()[app.report_cursor].text, "database (1)");
+}
+
+#[test]
 fn server_view_scrolls_kills_orphans_and_goes_back() {
     use crate::doctor::{Diagnosis, Level, Line};
     let mut app = app();
@@ -593,14 +712,17 @@ fn server_view_scrolls_kills_orphans_and_goes_back() {
     let line = |text: &str| Line {
         level: Level::Info,
         text: text.into(),
+        figures: None,
+        item: None,
     };
     app.set_report(Diagnosis {
         lines: vec![line("a"), line("b")],
         orphans: vec!["r-x".into()],
         problems: 1,
     });
+    // The cursor over the lines, stopping at the last.
     keys(&mut app, "jjj");
-    assert_eq!(app.report_scroll, 1);
+    assert_eq!(app.report_cursor, 1);
     assert_eq!(app.on_key(key(KeyCode::Enter)), None);
     assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
     assert_eq!(keys(&mut app, "y"), Some(Op::KillOrphans));

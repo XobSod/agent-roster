@@ -873,7 +873,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         settings: vec![
             v("menu", menu, "opens the menu; the keys below act in it"),
             v("projects", projects, "the projects view"),
-            v("server", server, "the tmux server and the database"),
+            v(
+                "server",
+                server,
+                "the tmux server, the database and the sessions' processes",
+            ),
             v("settings", settings, "every setting, to see and change"),
             v(
                 "usage",

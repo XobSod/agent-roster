@@ -38,7 +38,7 @@ pub enum Mode {
     Sessions,
     /// Every project, to add, edit, remove, or pick one.
     Projects,
-    /// The tmux server and database report.
+    /// The tmux server, database and processes report.
     Server,
     /// Every setting, to see and change.
     Settings,
@@ -128,11 +128,21 @@ pub struct App {
     pub dialog: Option<Dialog>,
     /// What the right of the list shows of the selection.
     pub preview: Preview,
-    /// The server view's report, its orphan count, and how far it's scrolled.
+    /// The server view's report, its orphan count, and how far it's scrolled
+    /// (the drawing keeps the cursor's line in view).
     pub report: Vec<crate::doctor::Line>,
     pub orphans: usize,
     pub problems: usize,
-    pub report_scroll: usize,
+    pub report_scroll: Cell<usize>,
+    /// Its sessions unfolded to their processes, and the processes folded.
+    pub report_open: HashSet<String>,
+    pub report_folded: HashSet<crate::doctor::What>,
+    /// The cursor's line, of those shown, and the session or process it's
+    /// on, or else its text and how far from the end it is (followed when
+    /// the report is read again).
+    pub report_cursor: usize,
+    pub report_selected: Option<crate::doctor::What>,
+    report_anchor: Option<(String, usize)>,
     /// The selected row of the projects view.
     pub project_row: usize,
     /// A project to select there once it shows up (after adding or renaming it).
@@ -219,7 +229,12 @@ impl App {
             report: Vec::new(),
             orphans: 0,
             problems: 0,
-            report_scroll: 0,
+            report_scroll: Cell::new(0),
+            report_open: HashSet::new(),
+            report_folded: HashSet::new(),
+            report_cursor: 0,
+            report_selected: None,
+            report_anchor: None,
             project_row: 0,
             select_project: None,
             chat_project: None,
@@ -467,7 +482,8 @@ impl App {
                 self.usage_scroll = 0;
             }
             self.mode = mode;
-            self.report_scroll = 0;
+            self.report_scroll.set(0);
+            (self.report_cursor, self.report_selected, self.report_anchor) = (0, None, None);
             if self.select_next.is_none() {
                 // Back from another view: where we were.
                 self.select_next = keep;
@@ -477,9 +493,89 @@ impl App {
     }
 
     pub fn set_report(&mut self, diagnosis: crate::doctor::Diagnosis) {
+        use crate::doctor::What;
         self.report = diagnosis.lines;
         self.orphans = diagnosis.orphans.len();
         self.problems = diagnosis.problems;
+        let there: HashSet<What> = (self.report.iter())
+            .filter_map(|l| Some(l.item.as_ref()?.what.clone()))
+            .collect();
+        self.report_open
+            .retain(|id| there.contains(&What::Session(id.clone())));
+        self.report_folded.retain(|what| there.contains(what));
+        // A process that ended: its session selected instead.
+        self.report_selected = match self.report_selected.take() {
+            Some(what) if there.contains(&what) => Some(what),
+            Some(What::Process { session, .. }) => {
+                Some(What::Session(session)).filter(|s| there.contains(s))
+            }
+            _ => None,
+        };
+        self.place_report_cursor();
+    }
+
+    /// The cursor on the selected session or process, wherever its line is
+    /// now; on another line, on one with its text, else as far from the end
+    /// as it was (the lines above change as processes come and go).
+    pub(super) fn place_report_cursor(&mut self) {
+        let lines = self.report_lines();
+        let last = lines.len().saturating_sub(1);
+        let near = |i: &usize| i.abs_diff(self.report_cursor);
+        let at = match (&self.report_selected, &self.report_anchor) {
+            (Some(what), _) => {
+                (lines.iter()).position(|l| l.item.as_ref().is_some_and(|i| i.what == *what))
+            }
+            // Its text where it's nearest; gone, as far from the end.
+            (None, Some((text, from_end))) => ((0..lines.len())
+                .filter(|&i| lines[i].text == *text))
+            .min_by_key(near)
+            .or(Some(last.saturating_sub(*from_end))),
+            (None, None) => None,
+        };
+        let mut at = at.unwrap_or(self.report_cursor).min(last);
+        // Never on a blank line: the next with something on it, else the
+        // one before.
+        if lines.get(at).is_some_and(|l| l.text.is_empty()) {
+            let below = (at..lines.len()).find(|&i| !lines[i].text.is_empty());
+            at = below
+                .or((0..at).rev().find(|&i| !lines[i].text.is_empty()))
+                .unwrap_or(at);
+        }
+        let what = lines
+            .get(at)
+            .and_then(|l| Some(l.item.as_ref()?.what.clone()));
+        let anchor = match what {
+            Some(_) => None,
+            None => lines.get(at).map(|l| (l.text.clone(), last - at)),
+        };
+        (self.report_cursor, self.report_selected, self.report_anchor) = (at, what, anchor);
+    }
+
+    /// The report's lines as the server view shows them: a session's
+    /// processes only while it's unfolded, a process's below it only while
+    /// it isn't folded.
+    pub fn report_lines(&self) -> Vec<&crate::doctor::Line> {
+        use crate::doctor::What;
+        let mut shown = Vec::new();
+        // Lines of items deeper than this are folded away.
+        let mut folded_below = None;
+        for line in &self.report {
+            let Some(item) = &line.item else {
+                folded_below = None;
+                shown.push(line);
+                continue;
+            };
+            if folded_below.is_some_and(|depth| item.depth > depth) {
+                continue;
+            }
+            let folded = match &item.what {
+                What::Session(id) => !self.report_open.contains(id),
+                process => self.report_folded.contains(process),
+            };
+            folded_below = (item.children && folded).then_some(item.depth);
+            shown.push(line);
+        }
+        shown
     }
 
     /// `fail`, after an error you haven't seen yet if one is showing, rather

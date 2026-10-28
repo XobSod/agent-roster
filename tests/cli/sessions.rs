@@ -1079,6 +1079,37 @@ fn a_projects_note_is_its_own() {
 }
 
 #[test]
+fn an_agent_that_died_unseen_stopped_when_it_died() {
+    let Some(t) = TestEnv::new("unseen") else {
+        return;
+    };
+    fs::write(
+        t.config_dir().join("config.toml"),
+        "[agents.brief]\ncommand = \"sh\"\nargs = [\"-c\", \"exit 2\"]\n",
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "brief", "--agent", "brief"]);
+    // Nothing of roster's runs meanwhile (you attached elsewhere, say).
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    let seen = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let s = t.session("brief", false).unwrap();
+    assert_eq!(
+        (s["state"].as_str(), s["exit_status"].as_i64()),
+        (Some("stopped"), Some(2))
+    );
+    let since = s["state_since"].as_i64().unwrap();
+    assert!(
+        seen - since >= 2_000,
+        "stopped {}ms before it was seen",
+        seen - since
+    );
+}
+
+#[test]
 fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
     let Some(t) = TestEnv::new("signal") else {
         return;

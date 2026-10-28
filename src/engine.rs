@@ -264,7 +264,14 @@ impl Roster {
                     // `stop` can clear it; killed by a signal, 128 + it, as a
                     // shell says.
                     if s.state != State::Stopped {
-                        s.set_state(State::Stopped, now);
+                        // When it died, not when it was seen to have (nothing
+                        // is seen while you're attached, or roster's closed),
+                        // though not before the state it ended.
+                        let at = match pane.dead_at.filter(|&at| at > 0) {
+                            Some(at) => at.min(now).max(s.state_since.unwrap_or(at)),
+                            None => now,
+                        };
+                        s.set_state(State::Stopped, at);
                         s.exit_status = pane
                             .dead_status
                             .or(pane.dead_signal.map(|signal| 128 + signal));

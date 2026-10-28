@@ -194,8 +194,9 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
             let left = [vec![badge(&s.project), Span::raw(" ")], whereabouts(s)].concat();
             let mut right = agent_spans(s);
             right.push(sep());
-            if s.deleted_at.is_some() {
-                right.push(Span::styled("archived", Style::new().fg(MUTED)));
+            if let Some(at) = s.deleted_at {
+                let archived = format!("archived {}", theme::ago(now - at));
+                right.push(Span::styled(archived, Style::new().fg(MUTED)));
             } else {
                 right.push(state_words(s, now));
             }

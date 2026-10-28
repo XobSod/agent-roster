@@ -445,7 +445,10 @@ pub fn list_sessions(
         .iter()
         .map(|s| {
             let state = match (s.state, s.exit_status) {
-                (State::Stopped, Some(code)) if code != 0 => format!("stopped (exit {code})"),
+                (State::Stopped, Some(code)) if code != 0 => format!(
+                    "stopped {} (exit {code})",
+                    util::ago(now - s.state_since.unwrap_or(s.created_at))
+                ),
                 (State::Working, _) => format!(
                     "working {}",
                     util::clock(now - s.state_since.unwrap_or(s.created_at))

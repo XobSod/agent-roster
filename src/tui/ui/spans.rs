@@ -77,7 +77,8 @@ pub(super) fn details(s: &Session, name_marks: &[usize], style: Style) -> Vec<Sp
     spans
 }
 
-/// The state at the right of a card: a word, a spinner with a clock, or an age.
+/// The state at the right of a card: a word, a spinner with a clock, or an
+/// age; a stopped one's with how long ago it stopped.
 pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
     let since = now - s.state_since.unwrap_or(s.created_at);
     let span = match (s.state, s.unread) {
@@ -93,8 +94,14 @@ pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
         }
         (State::Idle, false) => Span::styled(theme::ago(since), Style::new().fg(MUTED)),
         (State::Stopped, _) => match s.exit_status {
-            Some(code) if code != 0 => Span::styled(format!("exit {code}"), Style::new().fg(ERROR)),
-            _ => Span::styled("stopped", Style::new().fg(FAINT)),
+            Some(code) if code != 0 => Span::styled(
+                format!("exit {code} · {}", theme::ago(since)),
+                Style::new().fg(ERROR),
+            ),
+            _ => Span::styled(
+                format!("stopped {}", theme::ago(since)),
+                Style::new().fg(FAINT),
+            ),
         },
     };
     vec![span]
@@ -139,10 +146,14 @@ pub(super) fn state_words(s: &Session, now: i64) -> Span<'static> {
             Style::new().fg(MUTED),
         ),
         (State::Stopped, _) => match s.exit_status {
-            Some(code) if code != 0 => {
-                Span::styled(format!("exited {code}"), Style::new().fg(ERROR))
-            }
-            _ => Span::styled("stopped", Style::new().fg(MUTED)),
+            Some(code) if code != 0 => Span::styled(
+                format!("exited {code} · {}", theme::ago(since)),
+                Style::new().fg(ERROR),
+            ),
+            _ => Span::styled(
+                format!("stopped {}", theme::ago(since)),
+                Style::new().fg(MUTED),
+            ),
         },
     }
 }

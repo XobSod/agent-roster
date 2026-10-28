@@ -213,9 +213,14 @@ fn rows_keep_their_projects_note_mark_with_a_long_name() {
     }
     sessions[1].deleted_at = Some(now_ms());
     app.set_data(projects, sessions);
-    let now = now_ms();
     // As wide as a sidebar's: the name is cut, its mark and the state stay.
-    for (s, state) in app.sessions.iter().zip(["stopped", "archived"]) {
+    // Each with how long ago: stopped, or archived.
+    let mut sessions = app.sessions.clone();
+    sessions[0].state_since = Some(now_ms() - 3 * 3_600_000);
+    sessions[1].deleted_at = Some(now_ms() - 2 * 86_400_000);
+    app.set_data(app.projects.clone(), sessions);
+    let now = now_ms();
+    for (s, state) in app.sessions.iter().zip(["stopped 3h", "archived 2d"]) {
         let line: String = row(&app, s, 33, now)
             .iter()
             .map(|span| span.content.to_string())
@@ -224,6 +229,19 @@ fn rows_keep_their_projects_note_mark_with_a_long_name() {
         assert!(line.contains(state), "{line}");
         assert!(line.width() <= 33, "{line}");
     }
+    // One whose agent exited with an error says so, and when, its note
+    // marked; the header too.
+    let mut failed = app.sessions[0].clone();
+    failed.exit_status = Some(137);
+    failed.note = app.projects[0].note.clone();
+    let line: String = row(&app, &failed, 33, now)
+        .iter()
+        .map(|span| span.content.to_string())
+        .collect();
+    assert!(line.contains("✎ exit 137 · 3h"), "{line}");
+    assert!(line.width() <= 33, "{line}");
+    assert_eq!(state_words(&failed, now).content, "exited 137 · 3h");
+    assert_eq!(state_words(&app.sessions[0], now).content, "stopped 3h");
 }
 
 #[test]

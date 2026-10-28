@@ -109,6 +109,8 @@ pub struct Pane {
     pub dead_status: Option<i32>,
     /// The signal that ended it (tmux gives no status then).
     pub dead_signal: Option<i32>,
+    /// When it ended (ms).
+    pub dead_at: Option<i64>,
     pub pid: Option<i32>,
     /// The window's size.
     pub size: (u16, u16),
@@ -273,8 +275,8 @@ impl Tmux {
             "-F".into(),
             Arg::Format(
                 "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t\
-                 #{pane_pid}\t#{window_width}\t#{window_height}\t#{session_attached}\t\
-                 #{alternate_on}\t#{pane_title}",
+                 #{pane_dead_time}\t#{pane_pid}\t#{window_width}\t#{window_height}\t\
+                 #{session_attached}\t#{alternate_on}\t#{pane_title}",
             ),
         ])?
         else {
@@ -283,12 +285,13 @@ impl Tmux {
         let mut panes = HashMap::new();
         for line in out.lines() {
             // The title comes last and may itself contain tabs.
-            let fields: Vec<&str> = line.splitn(10, '\t').collect();
+            let fields: Vec<&str> = line.splitn(11, '\t').collect();
             if let [
                 name,
                 dead,
                 status,
                 signal,
+                dead_time,
                 pid,
                 width,
                 height,
@@ -301,6 +304,7 @@ impl Tmux {
                     dead: dead == "1",
                     dead_status: status.parse().ok(),
                     dead_signal: signal.parse().ok(),
+                    dead_at: dead_time.parse::<i64>().ok().map(|secs| secs * 1000),
                     pid: pid.parse().ok(),
                     size: (width.parse().unwrap_or(0), height.parse().unwrap_or(0)),
                     clients: clients.parse().unwrap_or(0),

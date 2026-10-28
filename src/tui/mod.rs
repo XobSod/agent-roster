@@ -33,7 +33,7 @@ use ratatui::text::Text;
 
 use crate::adopt::Adopt;
 use crate::agent;
-use crate::engine::{Defaults, NewSession, Roster};
+use crate::engine::{Defaults, NewSession, NoteSaved, Roster};
 use crate::keys::Keymap;
 use crate::note::Whose;
 use crate::settings::Reloaded;
@@ -248,7 +248,9 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             && key.kind == KeyEventKind::Press
         {
             let editing = |app: &App| app.note.as_ref().map(|n| n.shown().whose.clone());
+            let opened = |app: &App| app.note.as_ref().map_or(0, |n| n.opened());
             let (selected, mode, was_editing) = (app.selected_key(), app.mode, editing(app));
+            let was_opened = opened(app);
             let unfolded = app.unfolded.len();
             match app.on_key(key) {
                 Some(Op::Quit) => return Ok(()),
@@ -262,6 +264,11 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
                 None if app.unfolded.len() != unfolded => read_subagents(app),
                 // A stopped session's panel shows its note unless it's open.
                 None if app.selected_key() != selected || editing(app) != was_editing => {
+                    // A note just opened is as saved now, not as last read.
+                    if opened(app) > was_opened {
+                        reload(roster, app);
+                        last_reload = Instant::now();
+                    }
                     update_preview(roster, app)
                 }
                 None => {}
@@ -885,6 +892,16 @@ fn perform(
             unsaved,
         } => save_notes(roster, app, saves, close, unsaved),
         Op::EditNote(whose) => edit_note(terminal, roster, app, &whose)?,
+        Op::ReloadNote(whose) => roster.note(&whose).map(|note| {
+            let editor = app.note.as_mut().and_then(|open| open.of(&whose));
+            match editor {
+                Some(editor) => {
+                    editor.reload(note.as_ref());
+                    format!("Reloaded the note of {}", editor.label)
+                }
+                None => String::new(),
+            }
+        }),
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);
             app.open_chat_form(&roster.projects()?, &chats);
@@ -968,20 +985,49 @@ fn save_notes(
     unsaved: Option<String>,
 ) -> Result<String> {
     let mut said = Vec::new();
+    // What was saved before one that couldn't be is, and says so.
+    let failed = |e: anyhow::Error, said: &[String]| match said.is_empty() {
+        true => e,
+        false => e.context(said.join("; ")),
+    };
     for s in saves {
         let saved = roster.save_note(&s.whose, &s.text, s.pin, s.base.as_ref(), s.force);
-        let note = match saved {
-            Ok(note) => note,
-            // What was saved before is, and says so.
-            Err(e) if said.is_empty() => return Err(e),
-            Err(e) => return Err(e.context(said.join("; "))),
+        let (note, merged) = match saved {
+            Ok(NoteSaved::Saved { note, merged }) => (note, merged),
+            Ok(NoteSaved::Conflicts {
+                merged,
+                pin,
+                current,
+            }) => {
+                let n = merged.conflicts;
+                if let Some(open) = app.note.as_mut() {
+                    if let Some(side) = open.side_of(&s.whose) {
+                        open.show_open(side);
+                    }
+                    if let Some(editor) = open.of(&s.whose) {
+                        editor.conflicted(&merged, pin, current.as_ref());
+                    }
+                }
+                let s = if n == 1 { "" } else { "s" };
+                let why = format!("{n} conflict{s} with the external change, marked in the note");
+                return Err(failed(anyhow::anyhow!(why), &said));
+            }
+            Err(e) => return Err(failed(e, &said)),
         };
         if let Some(editor) = app.note.as_mut().and_then(|n| n.of(&s.whose)) {
-            editor.saved(note.as_ref());
+            match merged {
+                true => editor.reload(note.as_ref()),
+                false => editor.saved(note.as_ref()),
+            }
         }
+        let with = if merged {
+            ", merged with the external change"
+        } else {
+            ""
+        };
         said.push(match note {
-            Some(_) => format!("Saved the note of {}", s.label),
-            None => format!("{} has no note now", s.label),
+            Some(_) => format!("Saved the note of {}{with}", s.label),
+            None => format!("{} has no note now{with}", s.label),
         });
     }
     if close {

@@ -26,6 +26,7 @@ use super::op::{self, Op};
 use super::picker::{Picked, Picker};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
+use crate::note::Whose;
 use crate::paths::PROJECT_ENV;
 use crate::search::Hit;
 
@@ -311,7 +312,30 @@ impl App {
         {
             self.filter = None;
         }
+        self.note_changes();
         self.rebuild();
+    }
+
+    /// Takes each open note saved by another since it was opened or saved
+    /// as it is now if it's untouched, else marks it so.
+    fn note_changes(&mut self) {
+        let Some(open) = self.note.as_mut() else {
+            return;
+        };
+        for editor in open.editors_mut() {
+            let current = match &editor.whose {
+                Whose::Session(id) => self.sessions.iter().find(|s| s.id == *id).map(|s| &s.note),
+                Whose::Project(id) => self.projects.iter().find(|p| p.id == *id).map(|p| &p.note),
+            };
+            match current {
+                Some(current) if current.as_ref() == editor.base.as_ref() => {
+                    editor.external = false
+                }
+                Some(current) if editor.untouched() => editor.reload(current.as_ref()),
+                Some(_) => editor.external = true,
+                None => {}
+            }
+        }
     }
 
     fn rebuild(&mut self) {
@@ -575,8 +599,29 @@ impl App {
             )
         };
         let other_dirty = open.other().is_some_and(|e| e.dirty());
+        // Markers left in are saved only on purpose.
+        let conflicts = |editors: &[&NoteEditor]| {
+            editors.iter().find(|e| e.conflicts() > 0).map(|e| {
+                let n = e.conflicts();
+                let s = if n == 1 { "" } else { "s" };
+                format!(
+                    "The note of {} has {n} conflict{s}: remove the markers, or :w! saves it as it is",
+                    e.label
+                )
+            })
+        };
         match open.shown_mut().on_key(e) {
             note::Outcome::None => None,
+            note::Outcome::Save { all, force, .. }
+                if !force
+                    && let Some(why) = conflicts(&match all {
+                        false => vec![open.shown()],
+                        true => open.dirty(),
+                    }) =>
+            {
+                self.fail(why);
+                None
+            }
             note::Outcome::Save {
                 all: false,
                 close,
@@ -626,6 +671,7 @@ impl App {
                 None
             }
             note::Outcome::External => Some(Op::EditNote(open.shown().whose.clone())),
+            note::Outcome::Reload => Some(Op::ReloadNote(open.shown().whose.clone())),
             note::Outcome::Fail(why) => {
                 self.fail(why);
                 None

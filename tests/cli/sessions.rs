@@ -902,9 +902,27 @@ fn notes_are_kept_with_their_session() {
     assert_eq!(fs::read(&kept).unwrap(), b"x\xff");
     fs::remove_file(&kept).unwrap();
 
-    // Saved by another meanwhile (an agent, say): yours isn't saved over it,
-    // and is kept.
+    // Saved by another meanwhile (an agent, say): merged with yours, each
+    // having changed other lines.
     let roster = env!("CARGO_BIN_EXE_roster");
+    fs::write(
+        &editor,
+        format!("#!/bin/sh\n'{roster}' note one --append 'theirs'\nsed -i '1s/^/mine: /' \"$1\"\n"),
+    )
+    .unwrap();
+    let out = edit(editor.to_str().unwrap());
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success() && stdout.contains("merged with the external change"),
+        "{stdout}"
+    );
+    let note = t.ok(&["note", "one"]);
+    assert!(
+        note.starts_with("mine: ") && note.ends_with("theirs\n"),
+        "{note}"
+    );
+    // Both added a line at its end: yours isn't saved over theirs, and is
+    // kept.
     fs::write(
         &editor,
         format!("#!/bin/sh\n'{roster}' note one --append 'meanwhile'\necho mine >> \"$1\"\n"),

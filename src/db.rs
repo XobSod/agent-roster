@@ -740,6 +740,16 @@ impl Db {
         Ok(())
     }
 
+    /// A session's or a project's note as saved now.
+    pub fn note(&self, whose: &Whose) -> Result<Option<Note>> {
+        let (table, id) = note_row(whose);
+        let sql = format!("SELECT note, note_pin, note_at FROM {table} WHERE id = ?1");
+        match self.conn.query_row(&sql, [&id], note_from_row).optional()? {
+            Some(note) => Ok(note),
+            None => bail!("{}", no_such(whose)),
+        }
+    }
+
     /// Saves a session's or a project's note (None removes it), and only
     /// that.
     pub fn set_note(&self, whose: &Whose, note: Option<&Note>) -> Result<()> {

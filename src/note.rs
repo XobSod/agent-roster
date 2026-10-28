@@ -114,6 +114,160 @@ pub fn follow_pin(old: &[&str], new: &[&str], pin: Option<usize>) -> Option<usiz
     Some(at.min(last))
 }
 
+/// Where a part both changed starts in a merged note, with yours below it.
+pub const CONFLICT_START: &str = "<<<<<<< yours";
+/// Between yours and the external change, below it.
+pub const CONFLICT_MIDDLE: &str = "======= external change";
+pub const CONFLICT_END: &str = ">>>>>>>";
+
+/// Your text merged with an external change, both made from `base`.
+#[derive(Debug, PartialEq)]
+pub struct Merged {
+    /// Each part changed on one side as that side has it; a part both
+    /// changed differently as both have it, between the conflict markers.
+    pub text: String,
+    pub conflicts: usize,
+    /// The first conflict's line.
+    pub first: Option<usize>,
+}
+
+/// Merges `yours` with `theirs`, both edited from `base`, by lines. Changes to
+/// different lines are both kept, a line changed on both sides alike once;
+/// lines changed differently on both sides are a conflict. Where both changed
+/// lines in place, none moved (a box ticked beside a line edited), each line
+/// is told apart.
+pub fn merge(base: &str, yours: &str, theirs: &str) -> Merged {
+    let (base, yours, theirs): (Vec<&str>, Vec<&str>, Vec<&str>) = (
+        base.lines().collect(),
+        yours.lines().collect(),
+        theirs.lines().collect(),
+    );
+    let (in_yours, in_theirs) = (matches(&base, &yours), matches(&base, &theirs));
+    let mut merged = Merging::default();
+    let (mut b, mut y, mut t) = (0, 0, 0);
+    // Lines kept as they were on both sides split the notes into parts.
+    for i in 0..=base.len() {
+        let (ye, te) = if i == base.len() {
+            (yours.len(), theirs.len())
+        } else if let (Some(ye), Some(te)) = (in_yours[i], in_theirs[i]) {
+            (ye, te)
+        } else {
+            continue;
+        };
+        // A line kept on one side is where it was on both.
+        let in_place = (b..i).all(|k| {
+            in_yours[k].is_none_or(|m| m - y == k - b)
+                && in_theirs[k].is_none_or(|m| m - t == k - b)
+        });
+        merged.part(&base[b..i], &yours[y..ye], &theirs[t..te], in_place);
+        if let Some(line) = base.get(i) {
+            merged.lines.push(line);
+        }
+        (b, y, t) = (i + 1, ye + 1, te + 1);
+    }
+    Merged {
+        text: merged.lines.join("\n"),
+        conflicts: merged.conflicts,
+        first: merged.first,
+    }
+}
+
+#[derive(Default)]
+struct Merging<'a> {
+    lines: Vec<&'a str>,
+    conflicts: usize,
+    first: Option<usize>,
+}
+
+impl<'a> Merging<'a> {
+    /// A part between lines kept on both sides, as each side has it; each
+    /// side's lines `in_place` if none moved.
+    fn part(&mut self, base: &[&str], yours: &[&'a str], theirs: &[&'a str], in_place: bool) {
+        if yours == base || yours == theirs {
+            self.lines.extend(theirs);
+        } else if theirs == base {
+            self.lines.extend(yours);
+        } else if in_place && yours.len() == base.len() && theirs.len() == base.len() {
+            let mut clash = 0;
+            for i in 0..=base.len() {
+                let different = i < base.len() && yours[i] != base[i] && theirs[i] != base[i];
+                if different && yours[i] != theirs[i] {
+                    continue;
+                }
+                if clash < i {
+                    self.conflict(&yours[clash..i], &theirs[clash..i]);
+                }
+                if let Some(&b) = base.get(i) {
+                    self.lines
+                        .push(if yours[i] == b { theirs[i] } else { yours[i] });
+                }
+                clash = i + 1;
+            }
+        } else {
+            self.conflict(yours, theirs);
+        }
+    }
+
+    fn conflict(&mut self, yours: &[&'a str], theirs: &[&'a str]) {
+        self.conflicts += 1;
+        self.first.get_or_insert(self.lines.len());
+        self.lines.push(CONFLICT_START);
+        self.lines.extend(yours);
+        self.lines.push(CONFLICT_MIDDLE);
+        self.lines.extend(theirs);
+        self.lines.push(CONFLICT_END);
+    }
+}
+
+/// Which line of `new` each line of `old` is kept as, by their longest common
+/// run of lines. A note is a few hundred lines at most; beyond what's alike
+/// at the start and the end, a middle too big to compare is taken as changed
+/// whole.
+fn matches(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
+    let mut kept = vec![None; old.len()];
+    let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let end = old[start..]
+        .iter()
+        .rev()
+        .zip(new[start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    for (i, k) in kept.iter_mut().enumerate().take(start) {
+        *k = Some(i);
+    }
+    for (i, k) in kept.iter_mut().rev().enumerate().take(end) {
+        *k = Some(new.len() - 1 - i);
+    }
+    let (a, b) = (&old[start..old.len() - end], &new[start..new.len() - end]);
+    if a.is_empty() || b.is_empty() || a.len() * b.len() > 1 << 22 {
+        return kept;
+    }
+    // How many lines from a[i..] and b[j..] can be kept, at most.
+    let width = b.len() + 1;
+    let mut most = vec![0u32; (a.len() + 1) * width];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            most[i * width + j] = if a[i] == b[j] {
+                most[(i + 1) * width + j + 1] + 1
+            } else {
+                most[(i + 1) * width + j].max(most[i * width + j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            kept[start + i] = Some(start + j);
+            (i, j) = (i + 1, j + 1);
+        } else if most[(i + 1) * width + j] >= most[i * width + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    kept
+}
+
 /// Has `$VISUAL` or `$EDITOR` edit `text` in a file of its own next to
 /// `base` (`base` with this process's id, so no other editor of it or of
 /// another note shares it), then `keep` what it saved; None if the editor
@@ -264,5 +418,105 @@ mod tests {
         // Nothing left: no pin.
         assert_eq!(follow(todo, "", 2), None);
         assert_eq!(follow_pin(&["a"], &["b"], None), None);
+    }
+
+    #[test]
+    fn an_external_change_is_merged_with_yours() {
+        let base = "TODO\n- [ ] first\n- [ ] second\n- [ ] third";
+        let clean = |text: &str| Merged {
+            text: text.into(),
+            conflicts: 0,
+            first: None,
+        };
+        // A box ticked while you added a line further down: both kept.
+        let ticked = "TODO\n- [x] first\n- [ ] second\n- [ ] third";
+        let added = "TODO\n- [ ] first\n- [ ] second\n- [ ] third\n- [ ] fourth";
+        let both = "TODO\n- [x] first\n- [ ] second\n- [ ] third\n- [ ] fourth";
+        assert_eq!(merge(base, added, ticked), clean(both));
+        assert_eq!(merge(base, ticked, added), clean(both));
+        // Beside each other, edited in place: each line told apart.
+        let edited = "TODO\n- [ ] first\n- [ ] second, with the retry\n- [ ] third";
+        let next = "TODO\n- [x] first\n- [ ] second, with the retry\n- [ ] third";
+        assert_eq!(merge(base, edited, ticked), clean(next));
+        // A line removed on one side, another edited on the other.
+        let removed = "TODO\n- [ ] first\n- [ ] second";
+        let third = "TODO\n- [x] first\n- [ ] second";
+        assert_eq!(merge(base, removed, ticked), clean(third));
+        // The same change on both sides, once; one side unchanged, the other's.
+        assert_eq!(merge(base, ticked, ticked), clean(ticked));
+        assert_eq!(merge(base, base, ticked), clean(ticked));
+        assert_eq!(merge(base, ticked, base), clean(ticked));
+        // From no note at all, the same text written on both sides.
+        assert_eq!(merge("", "a", "a"), clean("a"));
+    }
+
+    #[test]
+    fn lines_both_changed_differently_are_marked() {
+        let base = "TODO\n- [ ] first\n- [ ] second\n- [ ] third";
+        let yours = "TODO\n- [ ] first\n- [ ] second, with the retry\n- [ ] third";
+        let theirs = "TODO\n- [x] first\n- [x] second\n- [ ] third";
+        let merged = merge(base, yours, theirs);
+        assert_eq!(
+            merged.text,
+            "TODO\n- [x] first\n<<<<<<< yours\n- [ ] second, with the retry\n\
+             ======= external change\n- [x] second\n>>>>>>>\n- [ ] third"
+        );
+        assert_eq!((merged.conflicts, merged.first), (1, Some(2)));
+        // A line removed on one side and edited on the other; lines added at
+        // the same place on both; each a conflict.
+        let merged = merge("a\nb\nc", "a\nc\nyours", "a\nB\nc\ntheirs");
+        assert_eq!(
+            merged.text,
+            "a\n<<<<<<< yours\n======= external change\nB\n>>>>>>>\nc\n\
+             <<<<<<< yours\nyours\n======= external change\ntheirs\n>>>>>>>"
+        );
+        assert_eq!((merged.conflicts, merged.first), (2, Some(1)));
+        // Lines moved on one side aren't compared line by line: a line one
+        // side removed isn't put back, nor one taken twice.
+        for (base, yours, theirs) in [
+            ("x\ny", "\nx", "\ny"),
+            (
+                "TODO\n- [ ] a\n- [ ] b",
+                "TODO\n\n- [ ] a",
+                "TODO\n\n- [ ] b",
+            ),
+            ("a\nb\nc", "d\na\nc", "d\nb\na"),
+        ] {
+            assert_eq!(
+                merge(base, yours, theirs).conflicts,
+                1,
+                "{yours:?} {theirs:?}"
+            );
+            assert_eq!(
+                merge(base, theirs, yours).conflicts,
+                1,
+                "{theirs:?} {yours:?}"
+            );
+        }
+        // Written from nothing on both sides, differently.
+        assert_eq!(merge("", "a", "b").conflicts, 1);
+    }
+
+    #[test]
+    fn a_middle_too_big_to_compare_is_changed_whole() {
+        let note = |n: usize| {
+            let mut lines: Vec<String> = (0..n).map(|i| format!("b{i}")).collect();
+            lines.insert(0, "start".into());
+            lines.push("end".into());
+            lines
+        };
+        // A line added at the top and the last removed on your side, one
+        // edited on theirs: merged in a note of a few hundred lines, a
+        // conflict in one of thousands.
+        for (n, conflicts) in [(300, 0), (2100, 1)] {
+            let base = note(n);
+            let mut yours = base.clone();
+            yours.insert(1, "new".into());
+            yours.remove(n + 1);
+            let mut theirs = base.clone();
+            theirs[n / 2] = "edited".into();
+            let merged = merge(&base.join("\n"), &yours.join("\n"), &theirs.join("\n"));
+            assert_eq!(merged.conflicts, conflicts, "{n} lines");
+        }
     }
 }

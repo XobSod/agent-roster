@@ -59,6 +59,8 @@ pub enum Op {
     },
     /// A note in `$EDITOR`: the open editor's text, or the saved note.
     EditNote(crate::note::Whose),
+    /// The open note taken as saved now, its changes left.
+    ReloadNote(crate::note::Whose),
     /// Make sure the chats project exists, then open the new-chat form.
     NewChat,
     /// Look for conversations to adopt, then pick one.

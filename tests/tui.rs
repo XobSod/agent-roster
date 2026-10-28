@@ -355,21 +355,81 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
     assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
 
-    // Saved by another meanwhile (an agent, through `roster note`): :w says
-    // so and saves nothing; :w! saves yours over it.
+    // Saved by another meanwhile (an agent, through `roster note`): taken
+    // as it is while you've changed nothing; with changes of yours, said as
+    // it happens, and merged with them by :w.
     term.keys(&["s", "o"]);
     term.wait_for("the editor again", "╭ ✎ demo/one ");
     t.ok(&["note", "one", "--append", "from an agent"]);
-    term.keys(&["m", "m", ":", "w", "Enter"]);
-    term.wait_for("the refusal", "changed since you opened it");
-    assert!(t.ok(&["note", "one"]).contains("from an agent"));
+    term.wait_for("the agent's line in the editor", "│  from an agent");
+    term.keys(&["A"]);
+    term.text(" now");
+    term.keys(&["Escape"]);
+    t.ok(&["note", "one", "--append", "and another"]);
+    term.wait_for("the change said", "✎ demo/one [+] external change");
+    term.wait_for("and what takes it", ":e! take it as saved");
+    term.keys(&[":", "w", "Enter"]);
+    term.wait_for(
+        "the merge",
+        "Saved the note of demo/one, merged with the external change",
+    );
+    term.wait_for("the other line in the editor", "│  and another");
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first now\n- [ ] second\nfrom an agent\nand another\n"
+    );
+    // Both changed the same line: nothing saved, both marked in the text,
+    // which :w then saves only with the markers gone, or by :w!.
+    term.keys(&["A"]);
+    term.text("!");
+    term.keys(&["Escape"]);
+    t.ok(&[
+        "note",
+        "one",
+        "--set",
+        "TODO\n- [x] first now\n- [ ] second\nfrom an agent\nand another",
+    ]);
+    term.wait_for("the change said", "✎ demo/one [+] external change");
+    term.keys(&[":", "w", "Enter"]);
+    term.wait_for("the conflict", "1 conflict with the external change");
+    term.wait_for("the markers", "│  <<<<<<< yours");
+    term.wait_for("in the title", "✎ demo/one [+] 1 conflict");
+    assert!(t.ok(&["note", "one"]).contains("- [x] first now"));
+    term.keys(&[":", "w", "Enter"]);
+    term.wait_for("the markers left", "has 1 conflict: remove the markers");
+    // Yours kept, theirs dropped, by hand.
+    term.keys(&[
+        "d", "d", "j", "d", "d", "d", "d", "d", "d", ":", "w", "Enter",
+    ]);
+    term.wait_for("the save", "Saved the note of demo/one");
+    assert_eq!(
+        t.ok(&["note", "one"]),
+        "TODO\n- [ ] first now!\n- [ ] second\nfrom an agent\nand another\n"
+    );
+    // :e! takes it as saved, leaving yours.
+    term.keys(&["A"]);
+    term.text(" mine");
+    term.keys(&["Escape"]);
+    t.ok(&["note", "one", "--append", "again"]);
+    term.wait_for("the change said", "external change");
+    term.keys(&[":", "e", "!", "Enter"]);
+    term.wait_for("taken as saved", "Reloaded the note of demo/one");
+    term.wait_for("its last line", "│  again");
+    term.wait_for_gone("nothing unsaved", "✎ demo/one [+]");
+    // :w! saves yours over it.
+    term.keys(&["A"]);
+    term.text(" mine");
+    term.keys(&["Escape"]);
+    t.ok(&["note", "one", "--append", "overwritten"]);
+    term.wait_for("the change said", "external change");
     term.keys(&[":", "w", "!", "Enter"]);
     term.wait_for("the forced save", "Saved the note of demo/one");
-    assert!(!t.ok(&["note", "one"]).contains("from an agent"));
-    // Saved now, it's what the next save replaces: no refusal.
-    term.keys(&["m", "m", ":", "w", "q", "Enter"]);
+    assert!(!t.ok(&["note", "one"]).contains("overwritten"));
+    term.keys(&[":", "q", "Enter"]);
     term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
     assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+    t.ok(&["note", "one", "--set", "TODO\n- [ ] first\n- [ ] second"]);
+    t.ok(&["note", "one", "--pin", "2"]);
 
     // Ctrl+G: to $EDITOR and back into the editor, unsaved until :w.
     term.keys(&["s", "o", "C-g"]);

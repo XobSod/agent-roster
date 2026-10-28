@@ -1,11 +1,11 @@
 //! The note editor: a session's note and its project's, under the preview's
 //! header, with vim's keys (edtui's, patched in roster's copy), and
 //! roster's on top: `:w`, `:wq`, `:q`, `:q!`, `ZZ` and `ZQ` save and
-//! close as in vim, `[` and `]` show the project's note and the session's,
-//! kept as vim keeps buffers (`:wa`, `:qa`, `:wqa` for both), `mm` pins a
-//! line, Ctrl+G hands the note to `$EDITOR`, and keys typed quickly (`jk`,
-//! `notes.escape`) can leave insert mode. Esc never closes it: it's pressed
-//! out of habit, often twice.
+//! close as in vim, `:e!` takes the note as saved, `[` and `]` show the
+//! project's note and the session's, kept as vim keeps buffers (`:wa`,
+//! `:qa`, `:wqa` for both), `mm` pins a line, Ctrl+G hands the note to
+//! `$EDITOR`, and keys typed quickly (`jk`, `notes.escape`) can leave insert
+//! mode. Esc never closes it: it's pressed out of habit, often twice.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -55,8 +55,11 @@ pub struct NoteEditor {
     /// The text (tidied) and pin as last saved.
     saved: (String, Option<usize>),
     /// The note as it was opened, or last saved: what a save expects to
-    /// replace (one saved by another meanwhile isn't, without `:w!`).
+    /// replace (one saved by another meanwhile is merged with yours, unless
+    /// `:w!`).
     pub base: Option<Note>,
+    /// Saved by another since `base`, as roster last read it.
+    pub external: bool,
     /// The lines before the last key, for the pin to follow its line.
     lines: Vec<String>,
     /// `Z` or `m`, waiting for its second key.
@@ -97,6 +100,8 @@ pub enum Outcome {
     Show(Side),
     /// Hand the text to `$EDITOR`.
     External,
+    /// Take the note as saved now, leaving changes.
+    Reload,
     /// Say why not.
     Fail(String),
     /// Say this (not an error).
@@ -167,12 +172,36 @@ impl OpenNotes {
     /// Shows the note on `side`, opened with `open` if it wasn't, taking
     /// what was yanked and what `.` repeats, as vim's buffers share them.
     pub fn show(&mut self, side: Side, open: impl FnOnce() -> NoteEditor) {
+        self.editors[side as usize].get_or_insert_with(open);
+        self.show_open(side);
+    }
+
+    /// Shows the note on `side`, if it's open (as `show`).
+    pub fn show_open(&mut self, side: Side) {
         let clip = self.shown().clip.clone();
         let change = self.shown().state.borrow().last_change();
-        let editor = self.editors[side as usize].get_or_insert_with(open);
+        let Some(editor) = self.editors[side as usize].as_mut() else {
+            return;
+        };
         editor.set_clip(clip);
         editor.state.borrow_mut().set_last_change(change);
         self.shown = side;
+    }
+
+    /// Which side the open note `whose` is on.
+    pub fn side_of(&self, whose: &Whose) -> Option<Side> {
+        [Side::Session, Side::Project]
+            .into_iter()
+            .find(|&side| self.get(side).is_some_and(|e| e.whose == *whose))
+    }
+
+    /// How many of the two are open.
+    pub fn opened(&self) -> usize {
+        self.editors.iter().flatten().count()
+    }
+
+    pub fn editors_mut(&mut self) -> impl Iterator<Item = &mut NoteEditor> {
+        self.editors.iter_mut().flatten()
     }
 
     /// Those with changes not saved, the shown first.
@@ -235,6 +264,7 @@ impl NoteEditor {
             pin,
             saved: (text, pin),
             base: n.note.clone(),
+            external: false,
             lines,
             pending: None,
             command: None,
@@ -342,6 +372,63 @@ impl NoteEditor {
         self.saved = note.map_or((String::new(), None), |n| (n.text.clone(), n.pin));
         self.pin = self.saved.1;
         self.base = note.cloned();
+        self.external = false;
+    }
+
+    /// Takes `note` as saved now, leaving changes; the cursor stays where it
+    /// was, as far as the text allows.
+    pub fn reload(&mut self, note: Option<&Note>) {
+        let col = self.state.borrow().cursor.col;
+        self.replace(note.map_or("", |n| n.text.as_str()));
+        self.saved(note);
+        let mut state = self.state.borrow_mut();
+        let len = state.lines.len_col(state.cursor.row).unwrap_or(0);
+        state.cursor.col = col.min(len.saturating_sub(1));
+    }
+
+    /// As saved, in normal mode with no key waiting on another: what an
+    /// external change may replace (blanks at the end, which a save leaves
+    /// out, at most going with it).
+    pub fn untouched(&self) -> bool {
+        self.mode() == EditorMode::Normal
+            && self.command.is_none()
+            && self.pending.is_none()
+            && self.held.is_none()
+            && !self.keys.key_handler.pending()
+            && !self.dirty()
+    }
+
+    /// An external change to the same lines as yours, saved as `current`:
+    /// your text becomes `merged`, both marked, pinned at `pin`, the cursor
+    /// on the first conflict; a save now replaces `current`.
+    pub fn conflicted(
+        &mut self,
+        merged: &note::Merged,
+        pin: Option<usize>,
+        current: Option<&Note>,
+    ) {
+        self.replace(&merged.text);
+        self.pin = pin;
+        self.saved = current.map_or((String::new(), None), |n| (n.text.clone(), n.pin));
+        self.base = current.cloned();
+        self.external = false;
+        let mut state = self.state.borrow_mut();
+        state.mode = EditorMode::Normal;
+        state.cursor = Index2::new(merged.first.unwrap_or(0), 0);
+    }
+
+    /// The conflicts marked in it, still to settle: one while any of its
+    /// markers is left.
+    pub fn conflicts(&self) -> usize {
+        [
+            note::CONFLICT_START,
+            note::CONFLICT_MIDDLE,
+            note::CONFLICT_END,
+        ]
+        .map(|marker| self.lines.iter().filter(|l| l.as_str() == marker).count())
+        .into_iter()
+        .max()
+        .unwrap_or(0)
     }
 
     /// Yanks into `clip`, and puts what's in it.
@@ -508,9 +595,13 @@ impl NoteEditor {
             }
             "q" | "quit" => Outcome::Close { all: false },
             "qa" | "qall" => Outcome::Close { all: force },
+            "e" | "edit" if !force && self.dirty() => Outcome::Fail(
+                "The note has unsaved changes: :e! leaves them and takes it as saved".into(),
+            ),
+            "e" | "edit" => Outcome::Reload,
             _ => Outcome::Fail(format!(
                 "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
-                 changes; :wa, :wqa and :qa! act on both notes)"
+                 changes, :e! takes the note as saved; :wa, :wqa and :qa! act on both notes)"
             )),
         }
     }
@@ -597,10 +688,14 @@ impl NoteEditor {
                 EditorMode::Search => &[("Enter", "find"), ("Esc", "cancel")],
             }
         };
-        hints
+        let mut hints: Vec<(String, &'static str)> = hints
             .iter()
             .map(|(k, what)| (k.to_string(), *what))
-            .collect()
+            .collect();
+        if self.external && self.command.is_none() && self.mode() == EditorMode::Normal {
+            hints.insert(4, (":e!".into(), "take it as saved"));
+        }
+        hints
     }
 }
 
@@ -715,6 +810,72 @@ mod tests {
             at: 0,
         }));
         assert!(!e.dirty());
+    }
+
+    #[test]
+    fn an_external_change_is_taken_as_saved_or_its_conflicts_marked() {
+        let mut e = editor(Some("a\nb\nc"), None);
+        // Unchanged, :e takes the note as saved; with changes, only :e!.
+        assert_eq!(keys(&mut e, ":e\n"), [Outcome::Reload]);
+        keys(&mut e, "Ax\x1b");
+        assert!(matches!(keys(&mut e, ":e\n")[..], [Outcome::Fail(_)]));
+        assert_eq!(keys(&mut e, ":e!\n"), [Outcome::Reload]);
+        // Changed meanwhile: said in the footer too.
+        e.external = true;
+        assert!(e.hints().iter().any(|(key, _)| key == ":e!"));
+        let saved = Note {
+            text: "a\nB\nc".into(),
+            pin: None,
+            at: 5,
+        };
+        e.reload(Some(&saved));
+        assert_eq!(
+            (e.text().as_str(), e.dirty(), e.external),
+            ("a\nB\nc", false, false)
+        );
+        assert_eq!(e.base.as_ref(), Some(&saved));
+        // Yours and another's change to the same line: both in your text,
+        // marked, the cursor on them; what's saved now is what a save
+        // replaces.
+        let current = Note {
+            text: "a\nB, theirs\nc".into(),
+            pin: None,
+            at: 6,
+        };
+        let merged = note::merge(&saved.text, "a\nB, yours\nc", &current.text);
+        e.conflicted(&merged, None, Some(&current));
+        assert_eq!(e.conflicts(), 1);
+        assert_eq!(e.state.borrow().cursor.row, 1);
+        assert_eq!(e.base.as_ref(), Some(&current));
+        assert!(e.dirty());
+        // Settled by hand: none left.
+        keys(&mut e, "ddjdddddd");
+        assert_eq!((e.text().as_str(), e.conflicts()), ("a\nB, yours\nc", 0));
+    }
+
+    #[test]
+    fn only_an_untouched_note_follows_an_external_change() {
+        let mut e = editor(Some("ab\nc"), None);
+        assert!(e.untouched());
+        // Insert or visual mode (a line opened at the end, nothing typed in
+        // it yet), a key waiting on another (edtui's or roster's), a command
+        // being typed.
+        for typed in ["Go", "A", "v", "d", "m", ":"] {
+            let mut e = editor(Some("a\nb"), None);
+            keys(&mut e, typed);
+            assert!(!e.dirty(), "{typed:?}");
+            assert!(!e.untouched(), "{typed:?}");
+        }
+        // Taken as saved, the cursor keeps its row and column.
+        keys(&mut e, "l");
+        e.reload(Some(&Note {
+            text: "abc\nd".into(),
+            pin: None,
+            at: 1,
+        }));
+        let cursor = e.state.borrow().cursor;
+        assert_eq!((cursor.row, cursor.col), (0, 1));
+        assert!(e.untouched());
     }
 
     #[test]

@@ -141,7 +141,9 @@ pub(super) fn editor_height(editor: &NoteEditor, width: u16, room: u16) -> u16 {
 }
 
 /// The editor, titled with the note shown and the other there is to show
-/// (its key, its mark), each marked if it has unsaved changes.
+/// (its key, its mark), each marked if it has unsaved changes, and if it has
+/// an external change since it was opened; the shown one with its conflicts
+/// instead, if it has any.
 pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
     let editor = open.shown();
     let (mode, color) = match editor.mode() {
@@ -158,6 +160,15 @@ pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
     if editor.dirty() {
         title.push(unsaved());
     }
+    let warning = match editor.conflicts() {
+        0 if editor.external => Some("external change".to_string()),
+        0 => None,
+        1 => Some("1 conflict".to_string()),
+        n => Some(format!("{n} conflicts")),
+    };
+    if let Some(warning) = warning {
+        title.push(Span::styled(format!("{warning} "), Style::new().fg(ERROR)));
+    }
     let other = match open.side() {
         Side::Session => Some(("[", Side::Project, "project")),
         Side::Project => open
@@ -172,6 +183,9 @@ pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
         ));
         if open.other().is_some_and(NoteEditor::dirty) {
             title.push(unsaved());
+        }
+        if open.other().is_some_and(|e| e.external) {
+            title.push(Span::styled("external change ", Style::new().fg(ERROR)));
         }
     }
     let (row, search) = {

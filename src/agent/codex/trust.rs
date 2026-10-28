@@ -2,15 +2,18 @@
 //! `config.toml` (in `$CODEX_HOME`, else `~/.codex`), the folder's table
 //! under `projects` with `trust_level = "trusted"`. Only there: one given as
 //! `-c` counts for nothing, nor do a sandbox and an approval policy given.
-//! Codex asks for a git repository's root, which covers the folders in it,
-//! and trusts that; a folder of it trusted alone is enough for that folder.
-//! One it was told not to trust (`"untrusted"`) is left as it was.
+//! Codex looks for the folder's own table, and without one, its git
+//! repository's (a worktree's is its repository's), which is what its screen
+//! trusts for any folder in it. So a folder with neither is trusted alone,
+//! and one whose own or repository's table says anything is left as it is:
+//! trusted already, or told not to be (`"untrusted"`), which a folder of its
+//! own trusted would override.
 //!
 //! The file is edited as it's written, its comments and layout kept, under a
 //! lock of roster's (`locked::update`), so sessions starting at once each
 //! keep the others' folders.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -27,12 +30,13 @@ fn trusted(file: &Path, text: &str, dir: &Path) -> Result<Option<String>> {
         .parse()
         .with_context(|| format!("{} isn't TOML roster can read", file.display()))?;
     let key = dir.to_string_lossy();
-    if config
-        .get("projects")
-        .and_then(|p| p.get(key.as_ref()))
-        .and_then(|p| p.get("trust_level"))
-        .is_some()
-    {
+    let said = |key: &str| {
+        (config.get("projects"))
+            .and_then(|p| p.get(key))
+            .and_then(|p| p.get("trust_level"))
+            .is_some()
+    };
+    if said(&key) || repository(dir).is_some_and(|root| said(&root.to_string_lossy())) {
         return Ok(None);
     }
     let projects = config
@@ -52,6 +56,26 @@ fn trusted(file: &Path, text: &str, dir: &Path) -> Result<Option<String>> {
         .with_context(|| format!("{}'s {key} isn't a table", file.display()))?;
     project.insert("trust_level", toml_edit::value("trusted"));
     Ok(Some(config.to_string()))
+}
+
+/// The git repository `dir` is in, as codex finds it for its trust: the
+/// folder with the `.git` nearest up from it; for a worktree's (a `.git` file
+/// pointing into `<repository>/.git/worktrees/`), its repository. None
+/// outside one.
+fn repository(dir: &Path) -> Option<PathBuf> {
+    let root = dir.ancestors().find(|d| d.join(".git").exists())?;
+    let worktree = std::fs::read_to_string(root.join(".git"))
+        .ok()
+        .and_then(|text| {
+            let gitdir = root.join(text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim());
+            // Git may write it relative to the worktree: resolved, it names
+            // the repository as its key in the config does.
+            let gitdir = std::fs::canonicalize(gitdir).ok()?;
+            let worktrees = gitdir.parent()?;
+            (worktrees.file_name()? == "worktrees")
+                .then(|| worktrees.parent()?.parent().map(Path::to_path_buf))?
+        });
+    Some(worktree.unwrap_or_else(|| root.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -93,5 +117,58 @@ mod tests {
         fs::write(&file, "model = ").unwrap();
         assert!(trust(&file, work).is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), "model = ");
+    }
+
+    #[test]
+    fn a_folder_in_a_repository_goes_by_the_repositorys_trust_as_codex_does() {
+        let tmp = tempfile::tempdir().unwrap();
+        // As the folder a session runs in is: links resolved.
+        let dir = fs::canonicalize(tmp.path()).unwrap();
+        let file = dir.join("config.toml");
+        let repo = dir.join("repo");
+        let svc = repo.join("svc");
+        fs::create_dir_all(&svc).unwrap();
+        // Worktrees of it: a `.git` file pointing into the repository's, as
+        // git writes it, or relative to the worktree.
+        let wt = dir.join("wt");
+        let rel = dir.join("rel");
+        for (worktree, gitdir) in [
+            (&wt, repo.join(".git/worktrees/wt").display().to_string()),
+            (&rel, "../repo/.git/worktrees/rel".to_string()),
+        ] {
+            let name = worktree.file_name().unwrap();
+            fs::create_dir_all(repo.join(".git/worktrees").join(name)).unwrap();
+            fs::create_dir_all(worktree.join("svc")).unwrap();
+            fs::write(worktree.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+        }
+        // A folder that isn't a repository: codex doesn't go up from one.
+        let plain = dir.join("plain");
+        fs::create_dir_all(plain.join("sub")).unwrap();
+        let level = |path: &Path, level: &str| {
+            format!(
+                "[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
+                path.display()
+            )
+        };
+        // The repository told not to be trusted: none of it is.
+        let told = level(&repo, "untrusted") + &level(&plain, "untrusted");
+        fs::write(&file, &told).unwrap();
+        for folder in [&svc, &wt, &wt.join("svc"), &rel.join("svc")] {
+            assert!(!trust(&file, folder).unwrap(), "{}", folder.display());
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), told);
+        // Under a plain folder told so, a folder is trusted all the same.
+        assert!(trust(&file, &plain.join("sub")).unwrap());
+        // The repository trusted already: nothing to write for a folder of it.
+        let trusted = level(&repo, "trusted");
+        fs::write(&file, &trusted).unwrap();
+        assert!(!trust(&file, &svc).unwrap());
+        assert!(!trust(&file, &wt).unwrap());
+        assert!(!trust(&file, &rel).unwrap());
+        assert_eq!(fs::read_to_string(&file).unwrap(), trusted);
+        // Neither has a say yet: the folder alone is trusted.
+        fs::write(&file, "").unwrap();
+        assert!(trust(&file, &svc).unwrap());
+        assert_eq!(fs::read_to_string(&file).unwrap(), level(&svc, "trusted"));
     }
 }

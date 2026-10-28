@@ -266,7 +266,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     it starts there, so neither asks whether to trust it first (off by default:
     it's their own config roster writes, `~/.claude.json` and Codex's
     `config.toml`, as answering them would). A folder Codex was told not to trust
-    stays so.
+    stays so, as does one in a repository it was told not to trust.
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
   - `card_subagents`: a Claude or Codex session's subagents at work, on its card: `"folded"`

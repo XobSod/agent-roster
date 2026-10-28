@@ -40,7 +40,7 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer};
 
 use crate::config::Config;
-use crate::model::{QUIET_MS, Session};
+use crate::model::{QUIET_MS, Session, State};
 use crate::stats::Transcript;
 use crate::tokens::Spending;
 use crate::usage::Usage;
@@ -624,6 +624,53 @@ pub fn prompt_again_question(s: &Session) -> String {
         "{} ({}) exited before it said it took its first prompt, \"{prompt}\", so it starts a new conversation. Give it the prompt again?",
         s.label(),
         s.agent
+    )
+}
+
+/// What archiving `s` asks: that its agent stops, if it runs.
+pub fn archive_question(s: &Session) -> String {
+    let stops = if s.state == State::Stopped {
+        ""
+    } else {
+        " Its agent stops."
+    };
+    format!("Archive {}?{stops}", s.label())
+}
+
+/// What deleting `s` for good asks: what stops, if it runs (a working one's
+/// turn, and its subagents, are cut short), and what goes and what stays.
+/// An archived one is stopped.
+pub fn delete_question(s: &Session) -> String {
+    let stops = if s.state == State::Stopped {
+        String::new()
+    } else {
+        let busy = match (s.state == State::Working, s.subagents.len()) {
+            (true, 0) => " (it's working)".to_string(),
+            (true, 1) => " (it's working, with a subagent)".to_string(),
+            (true, n) => format!(" (it's working, with {n} subagents)"),
+            (false, 0) => String::new(),
+            (false, 1) => " (a subagent of it is working)".to_string(),
+            (false, n) => format!(" ({n} subagents of it are working)"),
+        };
+        format!("Its agent stops{busy}, and ")
+    };
+    let roster = if stops.is_empty() { "Roster" } else { "roster" };
+    let note = if s.note.is_some() {
+        " and its note"
+    } else {
+        ""
+    };
+    let kept = if adapter(&s.agent).adopts() {
+        format!(
+            "; its {} conversation stays",
+            crate::util::capitalize(&s.agent)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Delete {} for good? {stops}{roster} forgets it{note}{kept}.",
+        s.label()
     )
 }
 

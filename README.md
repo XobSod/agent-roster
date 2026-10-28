@@ -56,7 +56,7 @@ Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` adopt a conversation · `d` archive / restore · `D` delete for good |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `p` all projects · `t` tmux server and database · `s` settings · `u` usage |
 
@@ -86,7 +86,7 @@ built-in project.
 
 A Claude, pi or Codex conversation started outside roster (plain `claude`, `pi` or
 `codex`, another
-session manager) can be adopted with `s a`: pick it (typing filters, `Tab` shows those
+session manager) can be adopted with `s A`: pick it (typing filters, `Tab` shows those
 outside your projects), and it continues as a session here, in its project or a new one
 for its directory. It goes on with the model and effort it last ran on (as far as its
 agent recorded them), the defaults (the project's, if the project runs the same agent,
@@ -220,7 +220,7 @@ roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
 roster archive api && roster restore api   # archived sessions keep their conversation
-roster rm api                           # delete an archived session for good (its conversation can be adopted again)
+roster rm api                           # delete one for good, archived or not (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster usage                            # what your Claude and Codex accounts have used of their limits
 roster tokens --days 7                  # what the agents spent: tokens by kind, and their cost at API prices
@@ -326,12 +326,12 @@ All files are optional and live in `~/.config/agent-roster/`:
     start = "s"
     stop = "x"
     restart = "r"
-    archive = "d"             # or restore an archived one
-    delete = "D"              # an archived one, for good
+    archive = "a"             # or restore an archived one
+    delete = "D"              # for good, archived or not: its agent stops
     toggle_read = "u"
     retitle = "t"             # a title generated from the recent prompts
     note = "o"                # the session's note, to read and write
-    adopt = "a"               # a conversation started elsewhere
+    adopt = "A"               # a conversation started elsewhere
 
     [keys.project]
     menu = "p"

@@ -44,7 +44,7 @@
 //! down = ["j", "Down"]
 //! [keys.session]                  # a menu: `menu` opens it, the rest act inside
 //! menu = "s"
-//! delete = ""                     # no key for deleting archived sessions for good
+//! delete = ""                     # no key for deleting sessions for good
 //!
 //! [agents.claude]
 //! command = "claude"              # default: the agent's name, found on PATH
@@ -304,7 +304,7 @@ pub struct SessionKeys {
     pub prompt: Option<toml::Value>,
     /// Archive a session, or restore an archived one.
     pub archive: KeyList,
-    /// Delete an archived session for good.
+    /// Delete a session for good, archived or not.
     pub delete: KeyList,
     pub toggle_read: KeyList,
     pub retitle: KeyList,
@@ -378,11 +378,11 @@ impl Default for SessionKeys {
             stop: keys(&["x"]),
             restart: keys(&["r"]),
             prompt: None,
-            archive: keys(&["d"]),
+            archive: keys(&["a"]),
             delete: keys(&["D"]),
             toggle_read: keys(&["u"]),
             retitle: keys(&["t"]),
-            adopt: keys(&["a"]),
+            adopt: keys(&["A"]),
             chat: keys(&["c"]),
             note: keys(&["o"]),
         }

@@ -1017,14 +1017,15 @@ impl Roster {
         self.db.save_changes(&before, &s)
     }
 
-    /// Deletes an archived session for good: roster forgets it and its events.
-    /// The conversation stays where the agent keeps it (a Claude one can be
-    /// adopted again).
+    /// Deletes a session for good, archived or not: its agent stops, as it
+    /// does archiving, and roster forgets it and its events. The conversation
+    /// stays where the agent keeps it (one of Claude, Codex or pi can be adopted
+    /// again).
     pub fn delete(&mut self, id: &str) -> Result<Session> {
         self.db.fold_events(now_ms())?;
         let s = self.db.session(id)?;
         if s.deleted_at.is_none() {
-            bail!("{} isn't archived; archive it first", s.label());
+            self.stop(id)?;
         }
         self.tmux.kill_session(&s.tmux_name())?;
         self.db.delete_session(id)?;

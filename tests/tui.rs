@@ -86,7 +86,7 @@ fn tui_walkthrough() {
         "{}",
         term.screen()
     );
-    term.keys(&["s", "d"]);
+    term.keys(&["s", "a"]);
     term.wait_for("the confirmation", "Archive demo/one?");
     term.keys(&["y"]);
     term.wait_for("the archive", "Archived demo/one");
@@ -112,7 +112,7 @@ fn tui_walkthrough() {
     term.wait_for_gone("the help closed", "Session menu (s …)");
 
     // Archived again, then deleted for good.
-    term.keys(&["s", "d"]);
+    term.keys(&["s", "a"]);
     term.wait_for("the confirmation", "Archive demo/one?");
     term.keys(&["y"]);
     term.wait_for("the archive", "Archived demo/one");

@@ -23,7 +23,7 @@ pub enum Op {
     Stop(String),
     Restart(String),
     Archive(String),
-    /// An archived session, for good.
+    /// A session, for good, archived or not.
     Delete(String),
     Restore {
         id: String,

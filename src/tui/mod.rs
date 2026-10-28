@@ -34,7 +34,7 @@ use ratatui::text::Text;
 use crate::adopt::Adopt;
 use crate::agent;
 use crate::engine::{Defaults, NewSession, Roster};
-use crate::keys::{Action, Keymap, Menu};
+use crate::keys::Keymap;
 use crate::note::Whose;
 use crate::settings::Reloaded;
 use app::{App, Mode};
@@ -747,9 +747,17 @@ fn perform(
                 .archive(&id)
                 .map(|()| format!("Archived {label}; it's under Archived"))
         }
-        Op::Delete(id) => roster
-            .delete(&id)
-            .map(|s| format!("Deleted {} for good", s.label())),
+        Op::Delete(id) => {
+            // A live one's agent stops first, which can take a moment.
+            busy(
+                terminal,
+                app,
+                format!("Deleting {}…", app.session_label(&id)),
+            )?;
+            roster
+                .delete(&id)
+                .map(|s| format!("Deleted {} for good", s.label()))
+        }
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
             app.select(EntryKey::Session(s.id.clone()));
             format!("Restored {} (stopped)", s.label())
@@ -775,7 +783,6 @@ fn perform(
             };
             roster.new_session(request).map(|s| {
                 app.select(EntryKey::Session(s.id.clone()));
-                let key = app.keymap.label(Action::Confirm).unwrap_or("?");
                 let prompt = match prompted {
                     false => "",
                     true if agent::adapter(&s.agent).takes_prompt() => {
@@ -783,7 +790,7 @@ fn perform(
                     }
                     true => "; the prompt is typed in once it's ready",
                 };
-                format!("Started {}{prompt}; {key} attaches", s.label())
+                format!("Started {}{prompt}", s.label())
             })
         }
         Op::EditSession {
@@ -798,9 +805,8 @@ fn perform(
                 if s.state == crate::model::State::Stopped {
                     format!("Saved {}", s.label())
                 } else {
-                    let chord = app.chord(Menu::Session, Action::Restart);
                     format!(
-                        "Saved {}; a new model or effort applies after a restart ({chord})",
+                        "Saved {}; a new model or effort applies after a restart",
                         s.label()
                     )
                 }
@@ -823,8 +829,7 @@ fn perform(
             )
             .map(|p| {
                 app.select_project(&p.name);
-                let chord = app.chord(Menu::Session, Action::NewSession);
-                format!("Added project {}; {chord} starts a session in it", p.name)
+                format!("Added project {}", p.name)
             }),
         Op::EditProject {
             id,
@@ -903,9 +908,8 @@ fn perform(
             };
             roster.adopt(request).map(|s| {
                 app.select(EntryKey::Session(s.id.clone()));
-                let key = app.keymap.label(Action::Confirm).unwrap_or("?");
                 let copy = if fork { " as a copy" } else { "" };
-                format!("Adopted {}{copy}; {key} attaches", s.label())
+                format!("Adopted {}{copy}", s.label())
             })
         }
         Op::KillOrphans => roster

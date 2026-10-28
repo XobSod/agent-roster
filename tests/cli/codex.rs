@@ -392,7 +392,7 @@ fn a_first_prompt_codex_exited_before_taking_is_kept_to_give_again() {
     );
     let out = t.ok(&["start", "--no-prompt-again", "s"]);
     assert!(
-        out.contains("is kept: starting it again asks again"),
+        out.contains("Its first prompt, not seen taken, is kept"),
         "{out}"
     );
     t.wait_for("codex up", |t| t.ok(&["show", "s"]).contains("fake codex:"));

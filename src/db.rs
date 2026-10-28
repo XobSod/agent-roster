@@ -599,12 +599,9 @@ impl Db {
     pub fn delete_session(&mut self, id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM events WHERE session_id = ?1", [id])?;
-        let n = tx.execute(
-            "DELETE FROM sessions WHERE id = ?1 AND deleted_at IS NOT NULL",
-            [id],
-        )?;
+        let n = tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         if n == 0 {
-            bail!("no archived session {id}");
+            bail!("no session {id}");
         }
         tx.commit()?;
         Ok(())

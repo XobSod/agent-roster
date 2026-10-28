@@ -176,7 +176,7 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Delete an archived session for good (its Claude, pi or codex conversation stays, and can be adopted again)
+    /// Delete a session for good, archived or not: its agent stops (its Claude, pi or codex conversation stays, and can be adopted again)
     Rm {
         session: String,
         #[arg(short, long)]
@@ -622,7 +622,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             r.start(&s.id)?;
             println!("Started {}", s.label());
             if s.given_prompt.is_some() {
-                println!("Its first prompt, not seen taken, is kept: starting it again asks again");
+                println!("Its first prompt, not seen taken, is kept");
             }
         }
         Cmd::Stop { session, yes } => {
@@ -675,51 +675,21 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             println!("Restarted {}", s.label());
         }
         Cmd::Archive { session, yes } => {
+            // Whether its agent still runs, for the question.
+            r.refresh()?;
             let s = r.resolve(&session, false)?;
-            if !confirm(
-                &format!(
-                    "Archive {}? Its agent stops (`roster restore` brings it back)",
-                    s.label()
-                ),
-                yes,
-            )? {
+            if !confirm(&agent::archive_question(&s), yes)? {
                 return Ok(());
             }
             r.archive(&s.id)?;
             println!("Archived {} ({})", s.label(), s.id);
         }
         Cmd::Rm { session, yes } => {
-            let s = match r.resolve(&session, true) {
-                Ok(s) => s,
-                Err(e) => match r.resolve(&session, false) {
-                    Ok(live) => bail!(
-                        "{} isn't archived; only archived sessions can be deleted (`roster archive {}`)",
-                        live.label(),
-                        live.label()
-                    ),
-                    Err(_) => return Err(e),
-                },
-            };
-            let kept = if agent::adapter(&s.agent).adopts() {
-                format!(
-                    "; its {} conversation stays and can be adopted again",
-                    util::capitalize(&s.agent)
-                )
-            } else {
-                String::new()
-            };
-            let note = if s.note.is_some() {
-                " and its note"
-            } else {
-                ""
-            };
-            if !confirm(
-                &format!(
-                    "Delete {} for good? Roster forgets it{note}{kept}",
-                    s.label()
-                ),
-                yes,
-            )? {
+            // What its hooks said since, in the question: a turn or a subagent
+            // it would cut short.
+            r.refresh()?;
+            let s = r.resolve_any(&session)?;
+            if !confirm(&agent::delete_question(&s), yes)? {
                 return Ok(());
             }
             r.delete(&s.id)?;
@@ -728,11 +698,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Restore { session, name } => {
             let s = r.resolve(&session, true)?;
             let s = r.restore(&s.id, name.as_deref())?;
-            println!(
-                "Restored {} (stopped; `roster start {}` resumes it)",
-                s.label(),
-                s.label()
-            );
+            println!("Restored {} (stopped)", s.label());
         }
         Cmd::Edit {
             session,
@@ -754,10 +720,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             // A running agent goes on with what it started with.
             let restart = (&s.model, &s.effort) != (&before.model, &before.effort);
             if restart && s.state != State::Stopped {
-                println!(
-                    "The agent picks up a new model or effort on its next start (`roster restart {}`)",
-                    s.label()
-                );
+                println!("The agent picks up a new model or effort on its next start");
             }
         }
         Cmd::Adopt {

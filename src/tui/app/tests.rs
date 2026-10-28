@@ -257,14 +257,35 @@ fn menus_open_with_their_key_and_reuse_letters() {
 fn archive_and_working_stop_or_restart_ask_first() {
     let mut app = app();
     select(&mut app, "s1");
-    assert_eq!(keys(&mut app, "sd"), None);
-    assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
+    assert_eq!(keys(&mut app, "sa"), None);
+    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+        panic!("no confirmation")
+    };
+    assert_eq!(question, "Archive alpha/s-s1? Its agent stops.");
     assert_eq!(keys(&mut app, "y"), Some(Op::Archive("s1".into())));
-    // Only archived sessions can be deleted for good.
+    // A live session can be deleted for good too: it says its agent stops.
     assert_eq!(keys(&mut app, "sD"), None);
-    assert!(app.dialog.is_none() && app.message().unwrap().error);
+    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+        panic!("no confirmation")
+    };
+    assert!(
+        question.starts_with("Delete ")
+            && question.contains("for good? Its agent stops, and roster forgets it"),
+        "{question}"
+    );
+    assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s1".into())));
     assert_eq!(keys(&mut app, "sr"), Some(Op::Restart("s1".into())));
     select(&mut app, "s4");
+    // A working one says so.
+    keys(&mut app, "sD");
+    let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+        panic!("no confirmation")
+    };
+    assert!(
+        question.contains("Its agent stops (it's working), and"),
+        "{question}"
+    );
+    assert_eq!(keys(&mut app, "n"), None);
     assert_eq!(keys(&mut app, "sr"), None);
     assert_eq!(keys(&mut app, "y"), Some(Op::Restart("s4".into())));
     assert_eq!(keys(&mut app, "sx"), None);
@@ -275,6 +296,20 @@ fn archive_and_working_stop_or_restart_ask_first() {
     assert!(app.dialog.is_none());
     assert_eq!(keys(&mut app, "sx"), None);
     assert_eq!(keys(&mut app, "y"), Some(Op::Stop("s4".into())));
+    // A stopped one's agent doesn't run: archiving or deleting it says
+    // nothing of stopping it.
+    let mut sessions = app.sessions.clone();
+    sessions.iter_mut().find(|s| s.id == "s4").unwrap().state = State::Stopped;
+    app.set_data(app.projects.clone(), sessions);
+    select(&mut app, "s4");
+    for chord in ["sa", "sD"] {
+        keys(&mut app, chord);
+        let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+            panic!("no confirmation")
+        };
+        assert!(!question.contains("stops"), "{question}");
+        keys(&mut app, "n");
+    }
 }
 
 #[test]
@@ -295,7 +330,7 @@ fn archived_sessions_restore_or_go_for_good() {
     });
     assert_eq!(app.hints()[0], ("Enter".to_string(), "restore"));
     assert_eq!(app.on_key(key(KeyCode::Enter)), restore);
-    assert_eq!(keys(&mut app, "sd"), restore);
+    assert_eq!(keys(&mut app, "sa"), restore);
     // Nothing else works on it.
     keys(&mut app, "sx");
     assert!(app.message().unwrap().error);
@@ -304,7 +339,10 @@ fn archived_sessions_restore_or_go_for_good() {
     let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
         panic!("no confirmation")
     };
-    assert!(question.contains("for good"), "{question}");
+    assert!(
+        question.contains("for good? Roster forgets it"),
+        "{question}"
+    );
     assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s3".into())));
 }
 
@@ -568,7 +606,7 @@ fn server_view_scrolls_kills_orphans_and_goes_back() {
 fn adopting_picks_a_conversation_then_fills_in_a_form() {
     use crate::tui::picker::tests::adoptable;
     let mut app = app();
-    assert_eq!(keys(&mut app, "sa"), Some(Op::FindConversations));
+    assert_eq!(keys(&mut app, "sA"), Some(Op::FindConversations));
     let mut open = adoptable("c2", "Busy elsewhere", Some("alpha"));
     open.conversation.open_in = Some(42);
     let mut deleted = adoptable("c3", "Old one", Some("alpha"));

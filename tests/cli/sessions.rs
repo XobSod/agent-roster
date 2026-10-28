@@ -138,14 +138,37 @@ fn session_lifecycle() {
         "{err}"
     );
 
-    // Deleting for good: only archived sessions, and it asks first.
-    let out = t.run(&["rm", "--yes", "one"]);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't archived"));
+    // Deleting for good asks first, archived or not.
     t.ok(&["archive", "--yes", "one"]);
     assert!(!t.run(&["rm", "one"]).status.success());
     let out = t.ok(&["rm", "--yes", "one"]);
     assert!(out.contains("for good"), "{out}");
     assert!(t.session("one", false).is_none() && t.session("one", true).is_none());
+    // A live one too: its agent stops and its tmux session goes with it.
+    t.ok(&["new", "demo", "--name", "live"]);
+    let id = t.session("live", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    t.wait_for("idle", |t| {
+        t.session("live", false).unwrap()["state"] == "idle"
+    });
+    // What its hooks said since it was last looked at is in the question.
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "subagent-start", subagent);
+    let out = t.run(&["rm", "live"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("Its agent stops (it's working, with a subagent)"),
+        "{err}"
+    );
+    t.ok(&["rm", "--yes", "live"]);
+    assert!(t.session("live", false).is_none() && t.session("live", true).is_none());
+    let tmux = Command::new("tmux")
+        .args(["-L", &t.socket, "has-session", "-t", &format!("=r-{id}")])
+        .output()
+        .unwrap();
+    assert!(!tmux.status.success());
     // Removing a project asks too: its archived sessions would go with it.
     t.ok(&["new", "demo", "--name", "two"]);
     t.ok(&["archive", "--yes", "two"]);

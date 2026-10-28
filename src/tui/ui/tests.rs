@@ -300,7 +300,7 @@ fn menu_popup_lists_its_keys() {
     assert!(screen.contains(" session "), "{screen}");
     assert!(screen.contains("n new"), "{screen}");
     assert!(screen.contains("x stop"), "{screen}");
-    assert!(screen.contains("d archive / restore"), "{screen}");
+    assert!(screen.contains("a archive / restore"), "{screen}");
     assert!(screen.contains("D delete for good"), "{screen}");
 }
 

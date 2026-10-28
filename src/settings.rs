@@ -833,7 +833,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             s("stop", stop, "stop"),
             s("restart", restart, "restart"),
             s("archive", archive, "archive, or restore an archived one"),
-            s("delete", delete, "delete an archived one for good"),
+            s("delete", delete, "delete one for good, archived or not"),
             s("toggle_read", toggle_read, "read / unread"),
             s(
                 "retitle",

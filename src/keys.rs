@@ -51,7 +51,7 @@ pub enum Action {
     Restart,
     /// Archive, or restore when archived.
     Archive,
-    /// Delete an archived session for good.
+    /// Delete a session for good, archived or not.
     Delete,
     ToggleRead,
     Retitle,
@@ -328,9 +328,9 @@ impl Keymap {
         )?;
         session.bind(t, "retitle", &k.retitle, Action::Retitle, &mut labels)?;
         session.bind(t, "note", &k.note, Action::Note, &mut labels)?;
-        session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
         session.bind(t, "archive", &k.archive, Action::Archive, &mut labels)?;
         session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
+        session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
 
         let mut project = Table::default();
         let (t, k) = ("keys.project", &keys.project);
@@ -473,7 +473,8 @@ mod tests {
         // The same letter means the same in each menu.
         assert_eq!(map.menu(Menu::Session, &chr('n')), Some(Action::NewSession));
         assert_eq!(map.menu(Menu::Project, &chr('n')), Some(Action::NewProject));
-        assert_eq!(map.menu(Menu::Session, &chr('d')), Some(Action::Archive));
+        assert_eq!(map.menu(Menu::Session, &chr('a')), Some(Action::Archive));
+        assert_eq!(map.menu(Menu::Session, &chr('A')), Some(Action::Adopt));
         assert_eq!(map.menu(Menu::Session, &chr('D')), Some(Action::Delete));
         assert_eq!(
             map.menu(Menu::Project, &chr('d')),
@@ -503,7 +504,7 @@ mod tests {
             .collect();
         assert_eq!(
             items,
-            ["n", "c", "e", "s", "x", "r", "u", "t", "o", "a", "d", "D"]
+            ["n", "c", "e", "s", "x", "r", "u", "t", "o", "a", "D", "A"]
         );
         // Its popup as wide as its longest item: the new chat's, to fit
         // narrow terminals.
@@ -544,7 +545,7 @@ mod tests {
     #[test]
     fn rejects_conflicts_and_allows_disabling() {
         let mut keys = Keys::default();
-        keys.session.stop = KeyList(vec!["d".into()]);
+        keys.session.stop = KeyList(vec!["a".into()]);
         assert!(Keymap::new(&keys).is_err());
         let mut keys = Keys::default();
         keys.view.menu = KeyList(vec!["s".into()]);
@@ -553,7 +554,7 @@ mod tests {
         keys.session.archive = KeyList(vec![]);
         let map = Keymap::new(&keys).unwrap();
         assert_eq!(map.label(Action::Archive), None);
-        assert_eq!(map.menu(Menu::Session, &chr('d')), None);
+        assert_eq!(map.menu(Menu::Session, &chr('a')), None);
         assert!(
             !map.menu_items(Menu::Session)
                 .iter()

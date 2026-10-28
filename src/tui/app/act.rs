@@ -255,30 +255,7 @@ impl App {
         if s.deleted_at.is_some() {
             return match action {
                 Action::Archive => self.restore(s),
-                Action::Delete => {
-                    let kept = if crate::agent::adapter(&s.agent).adopts() {
-                        format!(
-                            "; its {} conversation stays and can be adopted again ({})",
-                            crate::util::capitalize(&s.agent),
-                            self.chord(Menu::Session, Action::Adopt)
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let note = if s.note.is_some() {
-                        " and its note"
-                    } else {
-                        ""
-                    };
-                    self.confirm(
-                        format!(
-                            "Delete {} for good? Roster forgets it{note}{kept}.",
-                            s.label()
-                        ),
-                        Op::Delete(s.id),
-                    );
-                    None
-                }
+                Action::Delete => self.delete(s),
                 _ => {
                     self.fail(format!("{} is archived; {archive} restores it", s.label()));
                     None
@@ -336,24 +313,20 @@ impl App {
             }
             Action::Restart => Some(Op::Restart(s.id)),
             Action::Archive => {
-                let question = format!(
-                    "Archive {}? Its agent stops; {archive} on it under Archived restores it.",
-                    s.label()
-                );
-                self.confirm(question, Op::Archive(s.id));
+                self.confirm(crate::agent::archive_question(&s), Op::Archive(s.id));
                 None
             }
-            Action::Delete => {
-                self.fail(format!(
-                    "Only archived sessions can be deleted; {archive} archives {}",
-                    s.label()
-                ));
-                None
-            }
+            Action::Delete => self.delete(s),
             Action::ToggleRead => Some(Op::SetUnread(s.id, !s.unread)),
             Action::Retitle => Some(Op::RetitleSession(s.id)),
             _ => None,
         }
+    }
+
+    /// Asks whether to delete `s` for good.
+    fn delete(&mut self, s: Session) -> Option<Op> {
+        self.confirm(crate::agent::delete_question(&s), Op::Delete(s.id));
+        None
     }
 
     /// `p o`: the selected project's note, opened beside the selected

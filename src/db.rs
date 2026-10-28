@@ -80,7 +80,7 @@ CREATE TABLE events (
 /// and with the version of roster's reading and prices it was saved with;
 /// the models, by number; and each call, by its id's hash (`call_key`), of
 /// its file and model by number: about 106 bytes a call, where repeating
-/// the texts took 393. Their indexes are `SPENT_INDEXES`.
+/// the texts would take 393. Their indexes are `SPENT_INDEXES`.
 const SPENT_TABLES: &str = "
 CREATE TABLE spent_files (
     id       INTEGER PRIMARY KEY,
@@ -413,10 +413,10 @@ impl Db {
         }
         tx.commit()?;
         // Pages that pruning old events frees go back to the disk as they're
-        // freed (`fold_events`), so the file doesn't stay at its largest (54
-        // MB, most of it free, found in real use). Switching an existing file
-        // to that takes one VACUUM, done once (73 ms for that file, well
-        // within what hooks wait). Older rosters open it just the same.
+        // freed (`fold_events`), so the file doesn't stay at its largest,
+        // most of it free. Switching an existing file to that takes one
+        // VACUUM, done once (73 ms for a 54 MB file, well within what hooks
+        // wait). Older rosters open it just the same.
         let incremental: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
         if incremental != AUTO_VACUUM_INCREMENTAL {
             conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
@@ -608,7 +608,7 @@ impl Db {
     }
 
     /// All sessions, oldest first within each project; archived ones (`deleted_at`
-    /// set: the column keeps its first name) only if asked.
+    /// set) only if asked.
     pub fn sessions(&self, include_archived: bool) -> Result<Vec<Session>> {
         let filter = if include_archived {
             ""
@@ -997,10 +997,10 @@ impl Db {
     }
 
     /// Gives many free pages back (hundreds of MB, say), a few MB at a time
-    /// with a pause between, for hooks' reports to be written meanwhile
-    /// meanwhile); then the log of those writes,
-    /// which holds as much again until no roster has the file open (the TUI
-    /// may run for days), gives its room back too.
+    /// with a pause between, for hooks' reports to be written meanwhile;
+    /// then the log of those writes, which holds as much again until no
+    /// roster has the file open (the TUI may run for days), gives its room
+    /// back too.
     fn give_back_free_pages_slowly(&self) -> Result<()> {
         const PAGES: i64 = 1000;
         loop {

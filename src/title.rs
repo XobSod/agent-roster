@@ -198,7 +198,6 @@ impl TitleJob {
     }
 }
 
-/// How long a title may take.
 const TITLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn title_request(prompts: &[String], current: &str) -> String {

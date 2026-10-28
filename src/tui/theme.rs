@@ -9,7 +9,6 @@ pub const MUTED: Color = Color::Rgb(125, 130, 150);
 pub const FAINT: Color = Color::Rgb(85, 89, 106);
 /// Selection bar and focus.
 pub const ACCENT: Color = Color::Rgb(140, 150, 255);
-/// Background of the selected row.
 pub const SELECTED_BG: Color = Color::Rgb(46, 48, 64);
 pub const WORKING: Color = Color::Rgb(100, 160, 240);
 pub const INPUT: Color = Color::Rgb(240, 180, 80);

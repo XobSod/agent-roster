@@ -446,7 +446,6 @@ mod tests {
         assert_eq!(var("A").as_deref(), Some("one two"));
         assert_eq!(var("PATH").as_deref(), Some("/nowhere"));
         assert_eq!(var("B"), None);
-        // Failing, it says so, naming the file.
         std::fs::write(&file, "false\n").unwrap();
         let err = environment("/bin/sh", &file, dir.path(), Duration::from_secs(10))
             .err()
@@ -526,7 +525,6 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    /// Whether `pid` is gone within a few seconds.
     fn gone_soon(pid: libc::pid_t) -> bool {
         let by = Instant::now() + Duration::from_secs(5);
         while alive(pid) && Instant::now() < by {

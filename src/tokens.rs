@@ -64,7 +64,6 @@ impl Counts {
         self.sent() + self.output
     }
 
-    /// What the call sent.
     fn sent(&self) -> u64 {
         self.input + self.cache_read + self.cache_write
     }
@@ -593,7 +592,7 @@ impl Scan {
         let now = SystemTime::now();
         let mut recent = HashSet::new();
         // Saved many files at a time, each read before (no write held
-        // meanwhile): a transaction each made the first reading of a
+        // meanwhile): a transaction each would make the first reading of a
         // machine's thousands of files take a disk's flush each.
         let mut batch: Vec<SpentSave> = Vec::new();
         let mut batched = 0;

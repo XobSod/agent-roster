@@ -389,7 +389,6 @@ pub struct Question<'a> {
 }
 
 impl Question<'_> {
-    /// `argv`, reading nothing.
     pub fn of(argv: Vec<String>) -> Question<'static> {
         Question { argv, input: None }
     }
@@ -699,8 +698,8 @@ pub fn new_conversation_question(s: &Session) -> String {
 }
 
 /// The key under which what a model asked of `agent` (or "default") turned
-/// out to be is learned: Claude's as it is, as before there were other
-/// agents; another's after its name ("pi:default").
+/// out to be is learned: Claude's as it is, as keys already learned are;
+/// another's after its name ("pi:default").
 pub fn learned_key(agent: &str, asked: &str) -> String {
     if agent == CLAUDE {
         asked.to_string()

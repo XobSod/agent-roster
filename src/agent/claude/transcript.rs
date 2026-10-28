@@ -420,7 +420,7 @@ fn prompt(content: &RawValue, given: bool) -> Option<String> {
 /// Whether a transcript line can be one roster reads. Claude writes its own
 /// bookkeeping (titles, modes, the requests it sent, …) with `type` first, so
 /// those lines are told apart without parsing them; in a long transcript
-/// they're most of it (46 of 80 MB in one, seen in real use).
+/// they're most of it (46 of 80 MB in one).
 fn wanted(line: &[u8]) -> bool {
     leading_type(line).is_none_or(|kind| matches!(kind, b"assistant" | b"user" | b"cost-state"))
 }
@@ -821,8 +821,7 @@ mod tests {
 
     #[test]
     fn context_windows_come_from_the_model() {
-        // Claude 5's models have 1M without the "[1m]" marker (found in real use:
-        // "claude-opus-5-5" was shown as 200k while Claude's /context said 1m).
+        // Claude 5's models have 1M without the "[1m]" marker.
         assert_eq!(context_window("claude-opus-5-5"), Some(1_000_000));
         assert_eq!(context_window("claude-opus-5"), Some(1_000_000));
         assert_eq!(context_window("claude-opus-4-6"), Some(200_000));

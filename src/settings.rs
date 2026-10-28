@@ -344,7 +344,6 @@ pub enum Kind {
     Bool,
     /// One of these words.
     Choice(Vec<String>),
-    /// Any text.
     Text,
     /// A model of the agent's: any it takes (the ones it offers, to choose
     /// from), or none for its own default.

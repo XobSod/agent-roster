@@ -499,7 +499,6 @@ mod tests {
         assert_eq!(launch.argv.last().map(String::as_str), Some("--"));
         assert_eq!(launch.prompt.as_deref(), Some("-v is broken"));
         assert!(Codex.takes_prompt());
-        // None, no `--`.
         s.pending_prompt = None;
         assert!(!argv(&s).contains(&"--".to_string()));
     }

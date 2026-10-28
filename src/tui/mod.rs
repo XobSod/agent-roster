@@ -73,10 +73,10 @@ pub fn run(roster: &mut Roster) -> Result<()> {
 }
 
 /// ratatui's panic hook gives the terminal back whichever thread panicked: a
-/// thread's (asking the accounts, reading what was spent) left the TUI
-/// running in a terminal given back. Only the main thread's gives it back
-/// now; another thread's ends that thread, which whatever waits on it hears
-/// of (an account's asking says roster failed), and prints nothing over the
+/// thread's (asking the accounts, reading what was spent) would leave the TUI
+/// running in a terminal given back. Only the main thread's gives it back;
+/// another thread's ends that thread, which whatever waits on it hears of
+/// (an account's asking says roster failed), and prints nothing over the
 /// screen.
 fn restore_only_on_the_main_threads_panic() {
     let restoring = std::panic::take_hook();
@@ -1075,10 +1075,10 @@ fn edit_config(
 /// is the terminal's, the inner one the attach's: whether a prompt was submitted.
 ///
 /// tmux switches to the terminal's other screen and back by itself, so roster
-/// stays on its own until then (leaving it first flashed the normal screen),
+/// stays on its own until then (leaving it first flashes the normal screen),
 /// and draws itself again as it was the moment tmux is done, before catching
 /// up on what happened meanwhile (which takes a moment: catching up first
-/// showed the normal screen, then a blank one, found in real use).
+/// shows the normal screen, then a blank one).
 fn attach(
     terminal: &mut DefaultTerminal,
     roster: &mut Roster,

@@ -93,7 +93,7 @@ pub fn animating(app: &App) -> bool {
 }
 
 /// The session list's width: 30% of the terminal, 34 to 40 columns (wider
-/// only spread cards out; asked for in real use), the preview keeping 20.
+/// only spread cards out), the preview keeping 20.
 fn sidebar_width(total: u16) -> u16 {
     (total * 3 / 10)
         .clamp(34, 40)

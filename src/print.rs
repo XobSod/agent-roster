@@ -120,7 +120,6 @@ pub fn print_info(r: &Roster, s: &Session) {
     for (name, value) in rows {
         println!("{name:<13}{value}");
     }
-    // The note whole, its pinned line marked.
     if let Some(note) = &s.note {
         for (i, line) in note.text.lines().enumerate() {
             let name = if i == 0 { "note" } else { "" };

@@ -415,7 +415,6 @@ pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'s
     fit(width, left, right)
 }
 
-/// `✎` for a session with a note.
 fn note_mark(s: &Session) -> Vec<Span<'static>> {
     match s.note {
         Some(_) => vec![Span::styled("✎ ", Style::new().fg(MUTED))],
@@ -423,7 +422,6 @@ fn note_mark(s: &Session) -> Vec<Span<'static>> {
     }
 }
 
-/// Whether `s`'s project has a note.
 fn project_noted(app: &App, s: &Session) -> bool {
     app.project(s.project_id).is_some_and(|p| p.note.is_some())
 }

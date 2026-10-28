@@ -18,8 +18,8 @@ use crate::util::now_ms;
 const MAX_PAYLOAD: u64 = 1 << 20;
 
 /// A payload can carry what roster never reads: Claude's after a tool has the
-/// tool's input and output, whole files and command output among them (found
-/// in real use: 22 MB of a day's events). Top-level values longer than this
+/// tool's input and output, whole files and command output among them (22
+/// MB of a day's events). Top-level values longer than this
 /// aren't stored.
 const MAX_VALUE: usize = 4096;
 
@@ -50,7 +50,7 @@ fn report(args: &[String]) -> Result<()> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     // As long as roster itself waits: a report lost while roster writes
-    // (eight subagents starting at once, seen lost two) is a state wrong
+    // (eight subagents starting at once, say) is a state wrong
     // till the agent's next; the agent waits only while roster writes.
     conn.busy_timeout(Duration::from_secs(5))?;
     let payload = trimmed(payload);
@@ -89,7 +89,6 @@ mod tests {
             stored,
             serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"})
         );
-        // Short ones, and anything that isn't an object, stay as they are.
         let short = r#"{"session_id":"c-1",  "model":"claude-opus-5-5"}"#;
         assert_eq!(trimmed(short), short);
         assert_eq!(trimmed("not json"), "not json");

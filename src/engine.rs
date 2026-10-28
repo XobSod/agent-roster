@@ -1417,7 +1417,7 @@ impl Roster {
     }
 }
 
-/// Fills in the models of sessions that predate recording them: from recent hook
+/// Fills in the models of sessions with none recorded: from recent hook
 /// events, else from the end of their Claude transcript. (What each alias
 /// turned out to be is learned as start reports are folded, with what the
 /// start asked for: the session's model now may have been edited since.)
@@ -1654,7 +1654,6 @@ mod tests {
 
     #[test]
     fn asking_that_fails_on_a_mistake_of_rosters_says_so() {
-        // A panic in an agent's asking: an answer that says so.
         let panicked = std::thread::spawn(|| -> Option<Result<crate::usage::Usage>> {
             panic!("attempt to multiply with overflow")
         })
@@ -1722,7 +1721,6 @@ mod tests {
             ask(&[true, true, false]),
             "Remove project demo? Its 3 archived sessions go for good, 2 with notes."
         );
-        // Its own note goes too.
         let noted = Project {
             note: session(true).note,
             ..p.clone()

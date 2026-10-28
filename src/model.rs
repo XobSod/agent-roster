@@ -146,7 +146,6 @@ pub struct Session {
     /// Passed to the agent on every start; None means its own default.
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// When `state` last changed.
     pub state_since: Option<i64>,
     /// A first prompt to type into the agent once it's ready.
     pub pending_prompt: Option<String>,

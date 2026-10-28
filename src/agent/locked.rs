@@ -34,7 +34,6 @@ pub(crate) fn update(file: &Path, change: impl Fn(&str) -> Result<Option<String>
         let Some(changed) = change(&text)? else {
             return Ok(false);
         };
-        // Changed since it was read: read again.
         if stamp(file) != read {
             continue;
         }

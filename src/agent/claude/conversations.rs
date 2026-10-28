@@ -253,8 +253,7 @@ mod tests {
 
     #[test]
     fn reads_all_of_a_file_up_to_the_size_of_its_start_and_end() {
-        // A title near the end of a 200 KB file (found in real use: files
-        // between 64 and 512 KB were read only for their first 64 KB).
+        // A title near the end of a 200 KB file, past its first 64 KB.
         let dir = tempfile::tempdir().unwrap();
         let filler = format!(r#"{{"type":"progress","data":"{}"}}"#, "x".repeat(1000));
         let mut lines =

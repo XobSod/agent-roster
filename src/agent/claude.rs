@@ -268,7 +268,7 @@ fn settings(roster_exe: &Path) -> String {
 }
 
 /// The last `"model":"claude-…"` in (the last megabyte of) a transcript, for
-/// sessions that predate recording the model.
+/// sessions with no model recorded.
 pub fn last_model_in(transcript: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(transcript).ok()?;

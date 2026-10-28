@@ -37,7 +37,6 @@ enum Member {
 }
 
 impl Object {
-    /// The object in `raw`; None if it isn't one.
     fn parse(raw: &str) -> Option<Object> {
         serde_json::from_str(raw).ok()
     }

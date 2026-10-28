@@ -413,10 +413,10 @@ impl SessionKeys {
     }
 
     /// A key the config sets for one action that archive or adopt has by
-    /// default (archive's "a" was adopt's, adopt's "A" was free): their
-    /// default gives it way, so a config written before still loads, and
-    /// that's said. Any other default the config sets for another action
-    /// stays an error, as do two the config sets (`Keymap::new`).
+    /// default: their default gives it way, so a config written before they
+    /// had it still loads, and that's said. Any other default the config sets
+    /// for another action stays an error, as do two the config sets
+    /// (`Keymap::new`).
     fn yield_defaults(&mut self) -> Vec<String> {
         const MOVED: [&str; 2] = ["archive", "adopt"];
         let mut defaults = SessionKeys::default();
@@ -667,7 +667,6 @@ impl Config {
         self.account_limits.unwrap_or(true)
     }
 
-    /// How Claude's account's limits are asked.
     pub fn claude_limits(&self) -> ClaudeLimits {
         self.agent(crate::agent::CLAUDE).limits.unwrap_or_default()
     }
@@ -737,7 +736,6 @@ fn check_detach(key: &str) -> Result<()> {
     if key.eq_ignore_ascii_case("C-c") {
         bail!("keys.detach can't be C-c: that's how you interrupt an agent");
     }
-    // What terminals send for Enter, Tab and Backspace.
     if ["C-m", "C-j", "C-i", "C-h"]
         .iter()
         .any(|k| key.eq_ignore_ascii_case(k))

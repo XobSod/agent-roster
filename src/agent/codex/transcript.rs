@@ -326,7 +326,6 @@ impl Payload {
         self.metadata.as_ref()?.content_item_kinds.as_deref()
     }
 
-    /// The text of a message (`Text`).
     fn text(&self) -> Option<String> {
         self.content.as_ref()?.0.clone()
     }

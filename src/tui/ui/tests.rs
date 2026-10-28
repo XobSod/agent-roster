@@ -770,7 +770,6 @@ fn a_card_unfolds_to_show_its_subagents() {
     ]
     .into();
     let key = |app: &mut App, c| app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-    // Folded: how many, and that it opens.
     // Folded: how many, and that it opens, on its details' line.
     let screen = render(&app, 120, 24);
     let lines: Vec<&str> = screen.lines().collect();
@@ -1264,7 +1263,6 @@ fn the_sidebar_ends_with_whats_left_of_the_accounts_limits() {
     let screen = render(&app, 100, 12);
     let last = screen.lines().nth(10).unwrap();
     assert!(last.starts_with(" claude 10% 15% "), "{screen}");
-    // Turned off.
     app.sidebar_usage = false;
     let screen = render(&app, 100, 12);
     assert!(!screen.contains('%'), "{screen}");

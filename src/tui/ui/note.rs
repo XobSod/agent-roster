@@ -11,7 +11,6 @@ use crate::tui::note::{NoteEditor, OpenNotes, Side, TAB_WIDTH};
 /// A project's note's mark, as `✎` is a session's.
 pub const PROJECT_NOTE: &str = "▤";
 
-/// The marks of a session's note and of a project's.
 fn note_mark(side: Side) -> &'static str {
     match side {
         Side::Session => "✎",

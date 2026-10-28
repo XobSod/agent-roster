@@ -129,7 +129,6 @@ pub(super) fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         }
         lines
     };
-    // A column's width, and the space between two.
     const COLUMN: u16 = 45;
     const GAP: u16 = 2;
     // Too tall for the terminal: two columns, split where they're most even.

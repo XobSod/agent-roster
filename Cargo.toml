@@ -36,7 +36,7 @@ uuid = { version = "1.28.0", features = ["v4"] }
 tempfile = "3.27.0"
 
 # Dependencies optimized in debug builds too: unoptimized, parsing a long Claude
-# transcript (tens of MB) took several times longer. Roster's own code stays
+# transcript (tens of MB) takes several times longer. Roster's own code stays
 # quick to rebuild.
 [profile.dev.package."*"]
 opt-level = 3

@@ -76,7 +76,6 @@ impl Roster {
             problems: Vec::new(),
         };
 
-        // The server.
         r.heading("tmux server");
         let server = self.tmux.server()?;
         let socket = server
@@ -155,7 +154,6 @@ impl Roster {
             }
         }
 
-        // Its sessions, matched with roster's.
         let panes = self.tmux.pane_details()?;
         let sessions = self.db.sessions(true)?;
         let by_tmux: HashMap<String, &Session> =
@@ -220,7 +218,6 @@ impl Roster {
             r.problem(format!("tmux session {name} {why} (orphan)"));
         }
 
-        // Roster's sessions that tmux doesn't have.
         let missing: Vec<&Session> = sessions
             .iter()
             .filter(|s| s.deleted_at.is_none() && !panes.iter().any(|p| p.session == s.tmux_name()))
@@ -250,7 +247,6 @@ impl Roster {
             }
         }
 
-        // The database.
         r.heading("database");
         r.field(
             Level::Info,
@@ -283,7 +279,6 @@ impl Roster {
             );
         }
 
-        // The verdict.
         let problems = r.problems.len();
         r.heading(&format!("problems ({problems})"));
         if problems == 0 {

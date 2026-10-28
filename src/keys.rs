@@ -57,7 +57,6 @@ pub enum Action {
     Retitle,
     /// The session's note.
     Note,
-    /// The project's note.
     ProjectNote,
     Adopt,
     NewProject,

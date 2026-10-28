@@ -20,7 +20,6 @@ pub struct Note {
     pub at: i64,
 }
 
-/// Whose a note is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Whose {
     /// A session's, by its id.

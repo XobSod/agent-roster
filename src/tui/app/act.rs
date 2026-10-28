@@ -51,6 +51,7 @@ impl App {
             Action::EditSession
             | Action::Start
             | Action::Stop
+            | Action::Kill
             | Action::Restart
             | Action::Archive
             | Action::Delete
@@ -121,6 +122,7 @@ impl App {
         match action {
             Action::Up | Action::Down => self.move_in_report(action == Action::Down),
             Action::Collapse | Action::Expand => self.fold_in_report(action == Action::Collapse),
+            Action::Stop | Action::Kill => return self.end_in_report(action),
             Action::Confirm if self.orphans > 0 => {
                 let question = format!(
                     "Kill {} orphaned tmux session(s)? Their programs end.",
@@ -171,6 +173,54 @@ impl App {
             _ => self.fail("This is the usage view: Esc goes back to the sessions"),
         }
         None
+    }
+
+    /// Stops or kills the session the server view's cursor is on, or kills
+    /// the process it's on with those under it.
+    fn end_in_report(&mut self, action: Action) -> Option<Op> {
+        use crate::doctor::What;
+        let (id, process) = match self.report_selected.clone() {
+            Some(What::Session(id)) => (id, None),
+            Some(What::Process {
+                session,
+                pid,
+                started,
+            }) => (session, Some((pid, started))),
+            None => {
+                self.fail("Put the cursor on a session or one of its processes first");
+                return None;
+            }
+        };
+        let session = self.sessions.iter().find(|s| s.id == id).cloned();
+        match (action, session) {
+            (Action::Kill, _) => self.kill_question(&id, process),
+            (_, Some(s)) if s.deleted_at.is_none() => {
+                if s.state == State::Working {
+                    let question = format!("{} is working. Stop it?", s.label());
+                    self.confirm(question, Op::Stop(s.id));
+                } else {
+                    return Some(Op::Stop(s.id));
+                }
+            }
+            _ => self.fail("It has no agent to stop; killing ends what it left running"),
+        }
+        None
+    }
+
+    /// Asks whether to kill session `id`'s processes, or the process
+    /// `process` with those under it.
+    fn kill_question(&mut self, id: &str, process: Option<(i32, u64)>) {
+        let label = self.session_label(id);
+        let what = match process {
+            None => format!("{label}: its agent and all started in it, daemons too"),
+            Some((pid, _)) => format!("process {pid} of {label}, and all under it"),
+        };
+        let question = format!("Kill {what}, at once? What they're doing is lost.");
+        let op = Op::Kill {
+            session: id.to_string(),
+            process,
+        };
+        self.confirm(question, op);
     }
 
     /// The server view's cursor on the next line down, or up, with
@@ -302,9 +352,14 @@ impl App {
             self.fail("Select a session first");
             return None;
         };
-        // Archived sessions have notes too.
+        // Archived sessions have notes too, and may have left something
+        // running.
         if action == Action::Note {
             return self.open_note(Some(s.id.clone()), s.project_id, Side::Session, s.noted());
+        }
+        if action == Action::Kill {
+            self.kill_question(&s.id, None);
+            return None;
         }
         let archive = self.chord(Menu::Session, Action::Archive);
         if s.deleted_at.is_some() {

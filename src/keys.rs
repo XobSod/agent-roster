@@ -48,6 +48,7 @@ pub enum Action {
     EditSession,
     Start,
     Stop,
+    Kill,
     Restart,
     /// Archive, or restore when archived.
     Archive,
@@ -96,6 +97,7 @@ impl Action {
             Action::EditSession | Action::EditProject => "edit",
             Action::Start => "start",
             Action::Stop => "stop",
+            Action::Kill => "kill",
             Action::Restart => "restart",
             Action::Archive => "archive / restore",
             Action::Delete => "delete for good",
@@ -317,6 +319,7 @@ impl Keymap {
         session.bind(t, "edit", &k.edit, Action::EditSession, &mut labels)?;
         session.bind(t, "start", &k.start, Action::Start, &mut labels)?;
         session.bind(t, "stop", &k.stop, Action::Stop, &mut labels)?;
+        session.bind(t, "kill", &k.kill, Action::Kill, &mut labels)?;
         session.bind(t, "restart", &k.restart, Action::Restart, &mut labels)?;
         session.bind(
             t,
@@ -503,7 +506,9 @@ mod tests {
             .collect();
         assert_eq!(
             items,
-            ["n", "c", "e", "s", "x", "r", "u", "t", "o", "a", "D", "A"]
+            [
+                "n", "c", "e", "s", "x", "X", "r", "u", "t", "o", "a", "D", "A"
+            ]
         );
         // Its popup as wide as its longest item: the new chat's, to fit
         // narrow terminals.

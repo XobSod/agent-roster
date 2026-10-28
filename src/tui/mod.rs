@@ -751,6 +751,14 @@ fn perform(
                 }
             })
         }
+        Op::Kill { session, process } => {
+            let label = app.session_label(&session);
+            busy(terminal, app, format!("Killing {label}…"))?;
+            roster.kill(&session, process).map(|killed| match process {
+                Some((pid, _)) => killed.said(&format!("process {pid} of {label}")),
+                None => killed.said(&label),
+            })
+        }
         Op::Restart(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Restarting {label}…"))?;

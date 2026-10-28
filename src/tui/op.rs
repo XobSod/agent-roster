@@ -21,6 +21,12 @@ pub enum Op {
     /// Start, likewise, and attach.
     AttachPromptAgain(String),
     Stop(String),
+    /// Kill a session's processes at once; with a process (its pid and when
+    /// it started), that one and those under it alone.
+    Kill {
+        session: String,
+        process: Option<(i32, u64)>,
+    },
     Restart(String),
     Archive(String),
     /// A session, for good, archived or not.

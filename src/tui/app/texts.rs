@@ -47,6 +47,24 @@ impl App {
                 {
                     hints.push((format!("{left}/{right}"), "fold/unfold"));
                 }
+                // On a session or one of its processes: what ends it; a
+                // stop only with an agent to stop.
+                if let Some(what) = &self.report_selected {
+                    let session = match what {
+                        crate::doctor::What::Session(id) => id,
+                        crate::doctor::What::Process { session, .. } => session,
+                    };
+                    let live =
+                        (self.sessions.iter()).any(|s| s.id == *session && s.deleted_at.is_none());
+                    let ends = [(Action::Stop, "stop"), (Action::Kill, "kill")];
+                    for (action, what) in
+                        ends.into_iter().filter(|(a, _)| live || *a == Action::Kill)
+                    {
+                        if let Some(key) = self.keymap.direct_label(Menu::Session, action) {
+                            hints.push((key, what));
+                        }
+                    }
+                }
                 hints
             }
             Mode::Settings => self.settings_view_hints(),

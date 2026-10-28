@@ -56,7 +56,7 @@ Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `r` restart · `u` read/unread · `t` new title · `o` note · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `X` kill (it and all it started, at once) · `r` restart · `u` read/unread · `t` new title · `o` note · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage |
 
@@ -65,6 +65,8 @@ use together: memory, CPU lately, how many. `j`/`k` move the cursor; on a sessio
 unfolds it to its process tree (`h` folds), each process with its own memory, CPU and
 pid: the agent and all it started, and anything started in the session that left the
 agent or outlived it (an archived or deleted session's, in a section of their own).
+There the session menu's keys work without `s`: `x` stops the cursor's session, `X` kills
+it, or on a process, that one and all under it (a runaway build), the agent going on.
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
@@ -230,6 +232,7 @@ roster ls auth rework                   # only those matching (fuzzy, like / in 
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
+roster stop --kill api                  # at once: its agent and all it started, left running too
 roster archive api && roster restore api   # archived sessions keep their conversation
 roster rm api                           # delete one for good, archived or not (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
@@ -337,7 +340,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     chat = "c"                # a new chat, in no project of its own
     edit = "e"
     start = "s"
-    stop = "x"
+    stop = "x"                # the agent asked to exit
+    kill = "X"                # at once: the agent and all it started, asked nothing
     restart = "r"
     archive = "a"             # or restore an archived one
     delete = "D"              # for good, archived or not: its agent stops

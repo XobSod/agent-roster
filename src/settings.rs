@@ -793,6 +793,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         edit,
         start,
         stop,
+        kill,
         restart,
         // Gone: said so (`Config::gone`).
         prompt: _,
@@ -816,7 +817,12 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             s("chat", chat, "a new chat, in no project of its own"),
             s("edit", edit, "edit"),
             s("start", start, "start"),
-            s("stop", stop, "stop"),
+            s("stop", stop, "stop: the agent asked to exit"),
+            s(
+                "kill",
+                kill,
+                "kill at once: the agent and all it started, asked nothing",
+            ),
             s("restart", restart, "restart"),
             s("archive", archive, "archive, or restore an archived one"),
             s("delete", delete, "delete one for good, archived or not"),

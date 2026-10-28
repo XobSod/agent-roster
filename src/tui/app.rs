@@ -663,12 +663,13 @@ impl App {
             self.set_search(String::new());
             return None;
         }
-        // The projects view is about projects: the project menu's keys work
-        // without opening it (top-level keys win).
-        let action = if self.mode == Mode::Projects {
-            self.keymap.in_view(Menu::Project, &e)?
-        } else {
-            self.keymap.top(&e)?
+        // The projects view is about projects, the server view about
+        // sessions: their menu's keys work there without opening it
+        // (top-level keys win).
+        let action = match self.mode {
+            Mode::Projects => self.keymap.in_view(Menu::Project, &e)?,
+            Mode::Server => self.keymap.in_view(Menu::Session, &e)?,
+            _ => self.keymap.top(&e)?,
         };
         self.act(action)
     }

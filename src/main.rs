@@ -160,11 +160,14 @@ enum Cmd {
         #[command(flatten)]
         again: PromptAgain,
     },
-    /// Stop a session's agent, keeping the session (asks first if it's working)
+    /// Stop a session's agent, keeping the session (asks first if it's working); --kill kills it and all it started at once
     Stop {
         session: String,
         #[arg(short, long)]
         yes: bool,
+        /// Kill it at once instead, asking it nothing: its agent and all it started (an archived session's too, what it left running)
+        #[arg(long)]
+        kill: bool,
     },
     /// Stop and start a session, resuming its conversation
     Restart {
@@ -651,7 +654,63 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
                 println!("Its first prompt, not seen taken, is kept");
             }
         }
-        Cmd::Stop { session, yes } => {
+        Cmd::Stop {
+            session,
+            yes,
+            kill: true,
+        } => {
+            r.refresh()?;
+            // A deleted session's id, still carried by what it left running.
+            let (id, label) = match r.resolve_either(&session) {
+                Ok(s) => (s.id.clone(), s.label()),
+                Err(e) => match r.kill_targets(&session, None) {
+                    Ok(left) if !left.is_empty() => {
+                        (session.clone(), format!("{session} (deleted)"))
+                    }
+                    _ => return Err(e),
+                },
+            };
+            let targets = r.kill_targets(&id, None)?;
+            if targets.is_empty() {
+                println!("{label}: nothing running");
+                return Ok(());
+            }
+            // Those not under its agent may serve others too (a build daemon
+            // started in it): named. With no agent, all of them.
+            let outside: Vec<&str> = (targets.iter())
+                .filter(|p| p.session.is_some())
+                .map(|p| p.command.as_str())
+                .collect();
+            let mut names = outside.clone();
+            names.sort();
+            names.dedup();
+            let names = names.join(", ");
+            let count = match (targets.len(), outside.len()) {
+                (1, 1) => format!("1 process left running ({names})"),
+                (n, k) if k == n => format!("{n} processes left running ({names})"),
+                (1, _) => "1 process".to_string(),
+                (n, 0) => format!("{n} processes"),
+                (n, k) => format!("{n} processes, {k} not under its agent ({names})"),
+            };
+            if !confirm(&format!("Kill {label} at once: {count}?"), yes)? {
+                return Ok(());
+            }
+            // Not cut short, which would leave its processes stopped: nor by
+            // its terminal hanging up as its agent ends, when run from inside
+            // it (by its agent, say).
+            for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+                // SAFETY: setting a signal's disposition to ignore it.
+                unsafe { libc::signal(signal, libc::SIG_IGN) };
+            }
+            let said = r.kill(&id, None)?.said(&label);
+            // Its terminal may be gone by now.
+            let _ = writeln!(io::stdout(), "{said}");
+        }
+        Cmd::Stop {
+            session,
+            yes,
+            kill: false,
+        } => {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             if s.state == State::Working

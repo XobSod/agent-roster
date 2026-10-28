@@ -1144,6 +1144,104 @@ fn an_agent_that_died_unseen_stopped_when_it_died() {
 }
 
 #[test]
+fn killing_a_session_ends_its_agent_and_all_it_started() {
+    let Some(t) = TestEnv::new("kill") else {
+        return;
+    };
+    // An agent leaving a process behind it, out of its tree.
+    fs::write(
+        t.config_dir().join("config.toml"),
+        "[agents.leaver]\ncommand = \"sh\"\nargs = [\"-c\", \"(setsid sleep 600 >/dev/null 2>&1 &); exec sleep 600\"]\n",
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "leaver", "--agent", "leaver"]);
+    let processes = |t: &TestEnv| {
+        let list: serde_json::Value =
+            serde_json::from_str(&t.ok(&["ls", "--resources", "--json"])).unwrap();
+        list[0]["resources"]["processes"].as_u64()
+    };
+    t.wait_for("both running", |t| processes(t) == Some(2));
+    let out = t.ok(&["stop", "--kill", "--yes", "leaver"]);
+    assert_eq!(out, "Killed demo/leaver: 2 processes\n");
+    let s = t.session("leaver", false).unwrap();
+    // Stopped, its exit asked for, no error.
+    assert_eq!(
+        (s["state"].as_str(), &s["exit_status"]),
+        (Some("stopped"), &Value::Null)
+    );
+    assert_eq!(processes(&t), None);
+    assert_eq!(
+        t.ok(&["stop", "--kill", "--yes", "leaver"]),
+        "demo/leaver: nothing running\n"
+    );
+
+    // Archived, what it left running; deleted for good, by its id.
+    let left = |t: &TestEnv, name: &str| {
+        let id = t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        t.wait_for("its leftover", |t| {
+            let list: serde_json::Value =
+                serde_json::from_str(&t.ok(&["ls", "--resources", "--json"])).unwrap();
+            let s = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id.as_str())
+                .unwrap();
+            s["resources"]["processes"].as_u64() == Some(2)
+        });
+        id
+    };
+    t.ok(&["new", "demo", "--name", "stray", "--agent", "leaver"]);
+    left(&t, "stray");
+    t.ok(&["archive", "--yes", "stray"]);
+    let out = t.ok(&["stop", "--kill", "--yes", "stray"]);
+    assert_eq!(out, "Killed demo/stray: 1 process\n");
+    t.ok(&["new", "demo", "--name", "gone", "--agent", "leaver"]);
+    let id = left(&t, "gone");
+    t.ok(&["rm", "--yes", "gone"]);
+    let out = t.ok(&["stop", "--kill", "--yes", &id]);
+    assert_eq!(out, format!("Killed {id} (deleted): 1 process\n"));
+    assert!(!t.run(&["stop", "--kill", "--yes", &id]).status.success());
+}
+
+#[test]
+fn a_session_can_kill_itself_from_inside() {
+    let Some(t) = TestEnv::new("killself") else {
+        return;
+    };
+    // Its agent leaving a process behind, then running roster to kill its
+    // own session: roster outlives the rest, and says so.
+    let out = t.path("out");
+    let script = format!(
+        "(setsid sleep 600 >/dev/null 2>&1 &); sleep 1; \"$ROSTER_EXE\" stop --kill --yes \"$ROSTER_SESSION\" > '{}' 2>&1; sleep 600",
+        out.display()
+    );
+    let config = format!(
+        "[agents.self]\ncommand = \"sh\"\nargs = [\"-c\", {}]\n",
+        toml::Value::String(script)
+    );
+    fs::write(t.config_dir().join("config.toml"), config).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "self", "--agent", "self"]);
+    t.wait_for("its report", |_| {
+        fs::read_to_string(&out).is_ok_and(|o| o.ends_with('\n'))
+    });
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        "Killed demo/self: 2 processes\n"
+    );
+    let s = t.session("self", false).unwrap();
+    assert_eq!(
+        (s["state"].as_str(), &s["exit_status"]),
+        (Some("stopped"), &Value::Null)
+    );
+}
+
+#[test]
 fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
     let Some(t) = TestEnv::new("signal") else {
         return;

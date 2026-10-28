@@ -235,6 +235,84 @@ impl Snapshot {
     }
 }
 
+/// `process` (a pid and when it started) and those under it in `tree`, a
+/// session's (`Snapshot::of_session`); None if it's not there (it ended).
+pub fn subtree<'a>(
+    tree: &[(&'a Process, usize)],
+    (pid, started): (i32, u64),
+) -> Option<Vec<&'a Process>> {
+    let at = (tree.iter()).position(|(p, _)| p.pid == pid && p.started == started)?;
+    let depth = tree[at].1;
+    let under = tree[at + 1..].iter().take_while(|(_, d)| *d > depth);
+    Some(
+        std::iter::once(tree[at].0)
+            .chain(under.map(|(p, _)| *p))
+            .collect(),
+    )
+}
+
+/// A process held on to, to signal it and no other, pids being reused:
+/// through a pidfd, which holds on to the process its start time is then
+/// checked of; without pidfds (Linux before 5.3), by its pid, its start time
+/// checked each time.
+#[derive(Debug)]
+pub struct Held {
+    process: Process,
+    fd: Option<libc::c_int>,
+}
+
+impl Held {
+    /// `p`, if it's still the process it was.
+    pub fn new(p: &Process) -> Option<Held> {
+        // SAFETY: pidfd_open takes a pid and flags, and gives a new fd or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, p.pid, 0) } as libc::c_int;
+        let no_pidfd = std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS);
+        if fd < 0 && !no_pidfd {
+            return None;
+        }
+        let held = Held {
+            process: p.clone(),
+            fd: (fd >= 0).then_some(fd),
+        };
+        held.same().then_some(held)
+    }
+
+    pub fn process(&self) -> &Process {
+        &self.process
+    }
+
+    /// Still the process it was.
+    fn same(&self) -> bool {
+        let p = &self.process;
+        (fs::read(format!("/proc/{}/stat", p.pid)).ok())
+            .and_then(|stat| parse_stat(p.pid, &String::from_utf8_lossy(&stat), 1, 1))
+            .is_some_and(|now| now.started == p.started)
+    }
+
+    /// Sends it `sig`; whether it was sent (not to another user's process).
+    pub fn signal(&self, sig: libc::c_int) -> bool {
+        match self.fd {
+            Some(fd) => {
+                let none: *const libc::siginfo_t = std::ptr::null();
+                // SAFETY: the fd is ours and open, the signal info none, the
+                // flags 0.
+                unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, none, 0) == 0 }
+            }
+            // SAFETY: kill(2) has no memory effects.
+            None => self.same() && unsafe { libc::kill(self.process.pid, sig) } == 0,
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd {
+            // SAFETY: the fd is ours, closed once.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
 /// Readings shorter apart than this keep the last figures: a CPU share
 /// worked out over a few ms is noise.
 const MIN_INTERVAL_MS: i64 = 1000;
@@ -433,6 +511,56 @@ mod tests {
         assert_eq!(read(vec![reused.clone()], 200_000), [None]);
         reused.cpu_ms = 60_500;
         assert_eq!(read(vec![reused], 201_000), [Some(50.0)]);
+    }
+
+    #[test]
+    fn a_process_is_taken_with_those_under_it() {
+        let procs = [
+            process(100, 1, 1, 0, "claude"),
+            process(101, 100, 1, 0, "bash"),
+            process(102, 101, 1, 0, "cargo"),
+            process(103, 102, 1, 0, "rustc"),
+            process(104, 100, 1, 0, "tsserver"),
+            process(300, 1, 1, 0, "node"),
+        ];
+        let tree: Vec<(&Process, usize)> = [0, 1, 2, 3, 1, 0]
+            .iter()
+            .zip(&procs)
+            .map(|(d, p)| (p, *d))
+            .collect();
+        let pids = |found: Option<Vec<&Process>>| {
+            found.map(|f| f.iter().map(|p| p.pid).collect::<Vec<_>>())
+        };
+        assert_eq!(pids(subtree(&tree, (101, 101))), Some(vec![101, 102, 103]));
+        assert_eq!(pids(subtree(&tree, (104, 104))), Some(vec![104]));
+        assert_eq!(
+            pids(subtree(&tree, (100, 100))),
+            Some(vec![100, 101, 102, 103, 104])
+        );
+        // Another process under the same pid (started since): not it.
+        assert_eq!(pids(subtree(&tree, (101, 7))), None);
+    }
+
+    #[test]
+    fn a_signal_goes_to_the_process_it_was_only() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let all = processes(&[], Path::new("/nowhere")).unwrap();
+        let p = all.iter().find(|p| p.pid == pid).unwrap().clone();
+        // Taken for another started at another time: not held.
+        let mut other = p.clone();
+        other.started += 1;
+        assert!(Held::new(&other).is_none());
+        // Held, it's signalled, then gone: nothing more to send to.
+        let held = Held::new(&p).unwrap();
+        assert!(held.signal(libc::SIGSTOP));
+        assert!(held.signal(libc::SIGKILL));
+        assert!(!child.wait().unwrap().success());
+        assert!(!held.signal(libc::SIGKILL));
+        assert!(Held::new(&p).is_none());
     }
 
     #[test]

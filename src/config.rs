@@ -284,6 +284,8 @@ pub struct SessionKeys {
     pub edit: KeyList,
     pub start: KeyList,
     pub stop: KeyList,
+    /// End a session at once: its agent and all it started, asking nothing.
+    pub kill: KeyList,
     pub restart: KeyList,
     /// The key that gave a first prompt again, gone (starting asks):
     /// taken, and said to be gone (`Config::gone`).
@@ -362,6 +364,7 @@ impl Default for SessionKeys {
             edit: keys(&["e"]),
             start: keys(&["s"]),
             stop: keys(&["x"]),
+            kill: keys(&["X"]),
             restart: keys(&["r"]),
             prompt: None,
             archive: keys(&["a"]),
@@ -378,13 +381,14 @@ impl Default for SessionKeys {
 impl SessionKeys {
     /// The session menu's keys, by setting (`menu`, which opens it, is the
     /// list's).
-    fn menu_keys(&mut self) -> [(&'static str, &mut KeyList); 12] {
+    fn menu_keys(&mut self) -> [(&'static str, &mut KeyList); 13] {
         [
             ("new", &mut self.new),
             ("chat", &mut self.chat),
             ("edit", &mut self.edit),
             ("start", &mut self.start),
             ("stop", &mut self.stop),
+            ("kill", &mut self.kill),
             ("restart", &mut self.restart),
             ("toggle_read", &mut self.toggle_read),
             ("retitle", &mut self.retitle),
@@ -395,13 +399,13 @@ impl SessionKeys {
         ]
     }
 
-    /// A key the config sets for one action that archive or adopt has by
-    /// default: their default gives it way, so a config written before they
+    /// A key the config sets for one action that archive, adopt or kill has
+    /// by default: their default gives it way, so a config written before they
     /// had it still loads, and that's said. Any other default the config sets
     /// for another action stays an error, as do two the config sets
     /// (`Keymap::new`).
     fn yield_defaults(&mut self) -> Vec<String> {
-        const MOVED: [&str; 2] = ["archive", "adopt"];
+        const MOVED: [&str; 3] = ["archive", "adopt", "kill"];
         let mut defaults = SessionKeys::default();
         let defaults: Vec<Vec<String>> = (defaults.menu_keys().into_iter())
             .map(|(_, list)| list.0.clone())
@@ -901,12 +905,13 @@ mod tests {
 
     #[test]
     fn a_default_key_gives_way_to_one_the_config_sets() {
-        // Set for another action before archive took "a", or adopt "A":
-        // theirs, and said.
+        // Set for another action before archive took "a", adopt "A" or
+        // kill "X": theirs, and said.
         for (text, by, yields) in [
             ("toggle_read = \"a\"", "toggle_read", "archive"),
             ("adopt = \"a\"", "adopt", "archive"),
             ("retitle = [\"t\", \"A\"]", "retitle", "adopt"),
+            ("restart = \"X\"", "restart", "kill"),
         ] {
             let config = Config::parse(&format!("[keys.session]\n{text}")).unwrap();
             let gone = config.gone();

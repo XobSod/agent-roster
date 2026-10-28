@@ -203,6 +203,48 @@ fn selection_follows_a_session_to_its_new_shelf() {
 }
 
 #[test]
+fn what_an_archived_session_left_running_can_be_killed() {
+    use crate::doctor::{Diagnosis, Item, Level, Line, What};
+    let mut app = app();
+    // In the list: killed after asking, though archived.
+    let archived = EntryKey::Group(Group::Shelf(Shelf::Archived));
+    app.selected = app
+        .entries
+        .iter()
+        .position(|e| e.key() == archived)
+        .unwrap();
+    keys(&mut app, "lj");
+    assert_eq!(app.selected_session().unwrap().id, "s3");
+    assert_eq!(keys(&mut app, "sX"), None);
+    let kill = Op::Kill {
+        session: "s3".into(),
+        process: None,
+    };
+    assert_eq!(keys(&mut app, "y"), Some(kill.clone()));
+    // In the server view: no agent to stop, only what it left to kill.
+    keys(&mut app, "vt");
+    app.set_report(Diagnosis {
+        lines: vec![Line {
+            level: Level::Note,
+            text: "demo/old (archived)  ".into(),
+            figures: None,
+            item: Some(Item {
+                what: What::Session("s3".into()),
+                depth: 0,
+                children: false,
+            }),
+        }],
+        orphans: Vec::new(),
+        problems: 0,
+    });
+    assert_eq!(keys(&mut app, "x"), None);
+    assert!(app.message().unwrap().error);
+    assert!(!app.hints().iter().any(|(_, what)| *what == "stop"));
+    keys(&mut app, "X");
+    assert_eq!(keys(&mut app, "y"), Some(kill));
+}
+
+#[test]
 fn a_session_moving_into_a_folded_shelf_selects_that_shelf() {
     let mut app = app();
     select(&mut app, "s1");
@@ -229,6 +271,14 @@ fn menus_open_with_their_key_and_reuse_letters() {
     assert_eq!(app.menu, Some(Menu::Session));
     assert_eq!(keys(&mut app, "x"), Some(Op::Stop("s1".into())));
     assert_eq!(app.menu, None);
+    // Killing asks first.
+    assert_eq!(keys(&mut app, "sX"), None);
+    assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
+    let kill = Op::Kill {
+        session: "s1".into(),
+        process: None,
+    };
+    assert_eq!(keys(&mut app, "y"), Some(kill));
     assert_eq!(keys(&mut app, "su"), Some(Op::SetUnread("s1".into(), true)));
     // An unbound key closes the menu without doing anything.
     assert_eq!(keys(&mut app, "sz"), None);
@@ -670,6 +720,16 @@ fn server_view_unfolds_a_session_to_its_processes() {
     // Folded again.
     keys(&mut app, "h");
     assert_eq!(shown(&app), ["s1", "s2", "", "database"]);
+    // x stops the cursor's session, X kills it, or on a process, that one
+    // and those under it; on neither, nothing.
+    assert_eq!(keys(&mut app, "x"), Some(Op::Stop("s1".into())));
+    keys(&mut app, "ljX");
+    let kill = Op::Kill {
+        session: "s1".into(),
+        process: Some((20, 0)),
+    };
+    assert_eq!(keys(&mut app, "y"), Some(kill));
+    keys(&mut app, "kh");
     // Every line within reach, not only theirs (blank ones skipped): past
     // the last session, the cursor on none, and stopping at the end.
     keys(&mut app, "jjjj");

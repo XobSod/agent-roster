@@ -999,8 +999,18 @@ impl Roster {
     }
 
     /// `restart`, giving its kept first prompt again (`give_prompt_again`):
-    /// for an agent still at a screen it showed before taking it.
+    /// for an agent still at a screen it showed before taking it. One that
+    /// said it took it since it was asked about is left running, rather
+    /// than stopped for a start that would refuse it.
     pub fn restart_giving_prompt(&mut self, id: &str) -> Result<()> {
+        self.refresh()?;
+        let s = self.live_session(id)?;
+        if s.given_prompt.is_none() {
+            bail!(
+                "{} took its first prompt meanwhile; left as it is",
+                s.label()
+            );
+        }
         self.stop(id)?;
         self.give_prompt_again(id)
     }

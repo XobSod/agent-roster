@@ -270,6 +270,8 @@ impl App {
             // Its first prompt not seen taken (its agent exited first, or
             // is still at a screen it showed first): given again, or not.
             // A new conversation either way, as its agent never said which.
+            // A working one's restart asks this alone, which says it's cut
+            // short.
             Action::Start if s.state == State::Stopped && s.given_prompt.is_some() => {
                 let question = crate::agent::prompt_again_question(&s);
                 self.ask(question, Op::PromptAgain(s.id.clone()), Op::Start(s.id));

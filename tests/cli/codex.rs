@@ -425,6 +425,25 @@ fn a_first_prompt_codex_exited_before_taking_is_kept_to_give_again() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
     assert!(said.contains("has no first prompt to give again"), "{said}");
+    // Running, not heard taking it (still at what it showed first): told on
+    // the command line whether to give it, a restart still asks before
+    // cutting a working one short.
+    fs::remove_file(proj.join(".exit-early")).unwrap();
+    fs::write(proj.join(".hold-early"), "").unwrap();
+    t.ok(&["new", "demo", "--name", "h", "--prompt", "fix it"]);
+    t.wait_for("codex at its first screen", |t| {
+        t.ok(&["show", "h"]).contains("at its first screen")
+    });
+    let s = t.session("h", false).unwrap();
+    assert_eq!(
+        (&s["state"], &s["given_prompt"]),
+        (&json!("working"), &json!(true))
+    );
+    let out = t.run(&["restart", "--no-prompt-again", "h"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("is working. Restart it?"), "{said}");
+    t.ok(&["restart", "--yes", "--no-prompt-again", "h"]);
 }
 
 #[test]

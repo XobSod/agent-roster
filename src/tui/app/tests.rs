@@ -532,6 +532,16 @@ fn a_kept_first_prompt_is_asked_about_as_it_starts() {
             Op::Restart("c1".into())
         )
     );
+    // Which says it's cut short, not that it exited, as it's all a working
+    // one's restart asks.
+    keys(&mut app, "sr");
+    let Some(Dialog::Ask { question, .. }) = app.dialog.take() else {
+        panic!("not asked")
+    };
+    assert!(
+        question.contains("cuts that short") && !question.contains("exited"),
+        "{question}"
+    );
     // The answers, and Esc.
     app.ask("q".into(), Op::Start("y".into()), Op::Start("n".into()));
     assert_eq!(keys(&mut app, "y"), Some(Op::Start("y".into())));

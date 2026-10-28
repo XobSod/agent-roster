@@ -647,8 +647,17 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             r.refresh()?;
             let s = r.resolve(&session, false)?;
             // Still at a screen it showed before taking its first prompt,
-            // say: whether to give it again is asked instead.
+            // say: whether to give it again is asked instead. That question
+            // says a working one is cut short; answered on the command line,
+            // it isn't asked, so that's asked as any restart asks it.
             if s.given_prompt.is_some() {
+                let answered = again.prompt_again || again.no_prompt_again;
+                if answered
+                    && s.state == State::Working
+                    && !confirm(&format!("{} is working. Restart it?", s.label()), yes)?
+                {
+                    return Ok(());
+                }
                 let Some(give) = give_prompt_again(&s, &again)? else {
                     return Ok(());
                 };
@@ -964,9 +973,8 @@ fn start_session(r: &mut Roster, request: NewSession, attach: bool) -> Result<()
 /// prompt: time to answer what it asks first, a folder to trust say.
 const DELIVER_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Asks before (re)starting an agent that can't resume its conversation.
-/// Whether a start of `s`, whose first prompt its agent exited before saying
-/// it took, gives it again: as `again` says, else asked (with a terminal to
+/// Whether a start of `s`, whose first prompt its agent hasn't said it took,
+/// gives it again: as `again` says, else asked (with a terminal to
 /// ask in); None for no start at all.
 fn give_prompt_again(s: &Session, again: &PromptAgain) -> Result<Option<bool>> {
     if again.prompt_again || again.no_prompt_again {
@@ -987,6 +995,7 @@ fn give_prompt_again(s: &Session, again: &PromptAgain) -> Result<Option<bool>> {
     })
 }
 
+/// Asks before (re)starting an agent that can't resume its conversation.
 fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> {
     if r.can_resume(s) {
         return Ok(true);

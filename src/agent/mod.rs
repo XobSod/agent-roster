@@ -609,22 +609,28 @@ pub fn resumes(s: &Session) -> bool {
     adapter(&s.agent).resumes() && (s.conversation_id.is_some() || s.fork_from.is_some())
 }
 
-/// What the CLI and TUI ask before starting `s`, which begins a new
-/// conversation (`resumes`).
-/// What starting `s` asks when its agent exited before it said it took its
-/// first prompt (`Session::given_prompt`): whether to give it again. Either
-/// way it's a new conversation, its agent never having said which it's on.
+/// What starting `s` asks when its agent hasn't said it took its first
+/// prompt (`Session::given_prompt`): whether to give it again. Either way
+/// it's a new conversation, its agent never having said which it's on.
+/// Stopped, its agent exited first; running, it's at a screen it showed
+/// first, or at work on it unheard (its hooks not running), and a restart
+/// cuts that short: said, as it's what a working one's restart asks.
 pub fn prompt_again_question(s: &Session) -> String {
     let prompt = crate::util::one_line(s.given_prompt.as_deref().unwrap_or(""));
     let prompt = match prompt.char_indices().nth(60) {
         Some((at, _)) => format!("{}…", &prompt[..at]),
         None => prompt,
     };
-    format!(
-        "{} ({}) exited before it said it took its first prompt, \"{prompt}\", so it starts a new conversation. Give it the prompt again?",
-        s.label(),
-        s.agent
-    )
+    let (label, agent) = (s.label(), &s.agent);
+    if s.state == State::Stopped {
+        format!(
+            "{label} ({agent}) exited before it said it took its first prompt, \"{prompt}\", so it starts a new conversation. Give it the prompt again?"
+        )
+    } else {
+        format!(
+            "{label} ({agent}) hasn't said it took its first prompt, \"{prompt}\": it may be at a screen it showed first, or at work on it unheard. Restarting cuts that short and starts a new conversation. Give it the prompt again?"
+        )
+    }
 }
 
 /// What archiving `s` asks: that its agent stops, if it runs.
@@ -674,6 +680,8 @@ pub fn delete_question(s: &Session) -> String {
     )
 }
 
+/// What the CLI and TUI ask before starting `s`, which begins a new
+/// conversation (`resumes`).
 pub fn new_conversation_question(s: &Session) -> String {
     if adapter(&s.agent).names_its_conversation() {
         format!(

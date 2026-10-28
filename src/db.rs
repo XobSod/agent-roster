@@ -852,8 +852,6 @@ impl Db {
 
     // Events
 
-    /// Applies events reported since the last fold, in one transaction, so any
-    /// number of roster processes can fold concurrently. Returns how many were applied.
     /// Forgets the subagents sessions haven't heard of for a while
     /// (`Session::forget_quiet_subagents`), as of `now`; a session whose own
     /// turn is over with none left is idle. Each read again under the write
@@ -909,6 +907,8 @@ impl Db {
         Ok(())
     }
 
+    /// Applies events reported since the last fold, in one transaction, so any
+    /// number of roster processes can fold concurrently. Returns how many were applied.
     pub fn fold_events(&mut self, now: i64) -> Result<usize> {
         // Most of the time nothing is new: find that out without taking the
         // write lock, which agents' hooks wait for.

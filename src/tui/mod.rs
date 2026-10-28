@@ -711,7 +711,16 @@ fn perform(
         Op::AttachPromptAgain(id) => {
             let label = app.session_label(&id);
             busy(terminal, app, format!("Starting {label}…"))?;
-            match roster.give_prompt_again(&id) {
+            // Started meanwhile (by a roster of its own, say): attached to
+            // as it is, as attaching would.
+            let started =
+                (roster.resolve(&id, false)).is_ok_and(|s| s.state != crate::model::State::Stopped);
+            let given = if started {
+                Ok(())
+            } else {
+                roster.give_prompt_again(&id)
+            };
+            match given {
                 Err(e) => Err(e),
                 Ok(()) => {
                     app.attaching(&id);

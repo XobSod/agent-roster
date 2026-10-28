@@ -57,6 +57,8 @@ turn() {
 }
 # As at a screen it shows first, declined: gone before its first turn.
 if [ -e .exit-early ]; then echo "declined"; exit 1; fi
+# Still at it, not answered yet: its first turn not begun.
+if [ -e .hold-early ]; then echo "at its first screen"; read -r _; fi
 [ -n "$prompt" ] && turn "$prompt"
 while read -r line; do
   case "$line" in

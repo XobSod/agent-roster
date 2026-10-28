@@ -63,6 +63,23 @@ pub fn on_path(command: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| runs(&dir.join(command))))
 }
 
+/// Roster's own path, for what runs it again (hooks, launches). A binary
+/// replaced while it runs (rebuilt, upgraded) Linux names "<path> (deleted)",
+/// which runs nothing; the path itself runs what replaced it.
+pub fn own_exe() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+    let exe = std::env::current_exe().context("can't find roster's own path")?;
+    Ok(replaced(exe))
+}
+
+/// `exe`, or the path it was at if it's been replaced there (`own_exe`).
+fn replaced(exe: std::path::PathBuf) -> std::path::PathBuf {
+    match exe.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(path) if !exe.exists() && std::path::Path::new(path).exists() => path.into(),
+        _ => exe,
+    }
+}
+
 /// Runs `$VISUAL` or `$EDITOR` (else vi) on `file`, in this terminal; whether
 /// it exited successfully.
 pub fn run_editor(file: &std::path::Path) -> anyhow::Result<bool> {
@@ -349,6 +366,22 @@ pub fn clock(elapsed_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_replaced_binary_is_run_from_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("roster");
+        let gone = dir.path().join("roster (deleted)");
+        // Replaced: what's at its path now.
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(replaced(gone.clone()), exe);
+        // There as it is, or nothing there: as it is.
+        assert_eq!(replaced(exe.clone()), exe);
+        std::fs::write(&gone, "").unwrap();
+        assert_eq!(replaced(gone.clone()), gone);
+        let other = dir.path().join("other (deleted)");
+        assert_eq!(replaced(other.clone()), other);
+    }
 
     #[test]
     fn a_model_is_named_short() {

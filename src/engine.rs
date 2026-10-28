@@ -173,7 +173,7 @@ impl Roster {
         {
             notices.push(config_notice(&e));
         }
-        let exe = std::env::current_exe().context("can't find roster's own path")?;
+        let exe = util::own_exe()?;
         Ok(Roster {
             paths,
             config,

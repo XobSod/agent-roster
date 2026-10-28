@@ -17,7 +17,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 7. **The environment is made at every start**, by env files that may run commands, so rotating credentials are fresh each time.
 8. **Restarting keeps the conversation**, for agents that can resume, and nothing starts a fresh one silently.
 9. **Archiving is recoverable**, and deleting for good is a separate key, confirmed.
-10. **Low coupling.** Roster never changes an agent's own config or the user's tmux config: whatever it adds to an agent, it adds for that run, at launch. What it writes lives only in its own XDG directories, and of its own config it writes only what is changed in its settings.
+10. **Low coupling.** Roster never changes the user's tmux config, nor an agent's own config but where a setting off by default asks it to (`trust_project_folders`, which writes a session's folder there as trusted, as answering the agent's trust screen would; §3.2). Whatever it adds to an agent, it adds for that run, at launch. Otherwise what it writes lives only in its own XDG directories, and of its own config it writes only what is changed in its settings.
 11. **What an agent lacks, roster adds per run, and only that**: pi doesn't report its state, so roster loads an extension of its own into the sessions it starts; Codex gets hooks of its own the same way. Nothing it adds changes how the agent behaves for the user.
 12. **Several roster processes at once, without lost work.** The TUI, commands and agents calling roster share one database, and none undoes what another saved meanwhile. One TUI runs at a time: one is enough, and commands run alongside it.
 13. **Small scope.** Features come when they're needed.

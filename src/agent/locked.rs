@@ -71,8 +71,9 @@ impl Lock {
             }
             let age = (fs::metadata(&path).and_then(|m| m.modified()).ok())
                 .and_then(|t| t.elapsed().ok());
-            if age.is_some_and(|age| age > STALE) {
-                let _ = fs::remove_dir(&path);
+            // One that can't be removed (a file, say) is waited for as one
+            // held, and given up on.
+            if age.is_some_and(|age| age > STALE) && fs::remove_dir(&path).is_ok() {
                 continue;
             }
             if since.elapsed() > wait {
@@ -127,6 +128,11 @@ mod tests {
         fs::File::open(&lock).unwrap().set_modified(old).unwrap();
         assert!(Lock::take(&file, short).is_ok());
         assert!(!lock.exists());
+        // Old, but not one to remove (a file): given up on all the same.
+        fs::write(&lock, "").unwrap();
+        fs::File::open(&lock).unwrap().set_modified(old).unwrap();
+        assert!(Lock::take(&file, short).is_err());
+        assert!(lock.is_file());
     }
 
     #[test]

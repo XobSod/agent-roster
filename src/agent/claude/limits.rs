@@ -1,33 +1,17 @@
-//! What Claude's account has used of its limits, in the environment Claude's
-//! sessions get (where an env file may point `CLAUDE_CONFIG_DIR` elsewhere),
-//! asked one of two ways (`[agents.claude] limits`):
-//!
-//! - Of Claude Code itself (`ask_claude`): in its SDK mode, its `get_usage`
-//!   control request, which Claude answers with what its own `/usage` shows,
-//!   reading its own login and asking the usage service itself. Roster never
-//!   sees the login. Claude calls the request experimental.
-//! - Of Claude.ai's usage service (`ask`), as Claude's `/usage` does, with
-//!   Claude's login (the token in its `.credentials.json`), through curl, the
-//!   token on its stdin rather than its command line, where anyone could read
-//!   it. The token is never renewed here: renewing replaces the one Claude
-//!   keeps for that, which could log Claude out.
+//! What Claude's account has used of its limits, asked of Claude Code itself
+//! in the environment Claude's sessions get (where an env file may point
+//! `CLAUDE_CONFIG_DIR` elsewhere): in its SDK mode, its `get_usage` control
+//! request, which Claude answers with what its own `/usage` shows, reading its
+//! own login and asking the usage service itself. Roster never sees the login.
+//! Claude calls the request experimental.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::agent::{Ask, Question};
 use crate::launch::Input;
 use crate::usage::{Usage, Window};
 use crate::util::{iso_ms, now_ms};
-
-/// The service, and the beta its login's tokens are for.
-const URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const BETA: &str = "oauth-2025-04-20";
-
-const EXPIRED: &str = "Claude's login has expired; Claude renews it the next time it runs";
-
-/// Prints Claude's login, where Claude looks for it: nothing without one.
-const PRINT_LOGIN: &str = r#"f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"; if [ -f "$f" ]; then /bin/cat "$f"; fi"#;
 
 /// What asks Claude Code its plan's limits, as its SDK does: `initialize`,
 /// then `get_usage` without the scan of the local transcripts, answered as
@@ -46,7 +30,7 @@ const GET_USAGE: &str = concat!(
 /// there, Claude would take it over its login, where its sessions take it
 /// only if told to. None if no plan's limits apply (Claude on an API key, or
 /// never logged in).
-pub(super) fn ask_claude(command: String, ask: &Ask<'_>) -> Option<Result<Usage>> {
+pub(super) fn ask(command: String, ask: &Ask<'_>) -> Option<Result<Usage>> {
     let answered = |printed: &[u8]| get_usage(printed).is_some();
     let question = Question {
         argv: [
@@ -69,7 +53,7 @@ pub(super) fn ask_claude(command: String, ask: &Ask<'_>) -> Option<Result<Usage>
         .into(),
         input: Some(Input {
             text: GET_USAGE.as_bytes(),
-            answered: Some(&answered),
+            answered: &answered,
         }),
     };
     let printed = match ask(question) {
@@ -127,141 +111,9 @@ fn read_usage(answer: &Value, now: i64) -> Result<Option<Usage>> {
     }))
 }
 
-/// Asks the usage service with Claude's login. None without one (Claude on
-/// an API key, or never logged in).
-pub(super) fn ask(ask: &Ask<'_>) -> Option<Result<Usage>> {
-    // By its path: the env file's PATH may have no sh.
-    let argv = ["/bin/sh", "-c", PRINT_LOGIN].map(String::from).into();
-    let login = match ask(Question::of(argv)).and_then(|file| login(&file)) {
-        Ok(login) => login?,
-        Err(e) => return Some(Err(e.context("couldn't read Claude's login"))),
-    };
-    let now = now_ms();
-    if login.expires_at <= now {
-        return Some(Err(anyhow::anyhow!(EXPIRED)));
-    }
-    let headers = format!(
-        "Authorization: Bearer {}\nanthropic-beta: {BETA}\n",
-        login.token
-    );
-    let argv = [
-        "curl",
-        "--silent",
-        "--show-error",
-        "--max-time",
-        "8",
-        "--header",
-        "@-",
-        "--write-out",
-        "\n%{http_code}",
-        URL,
-    ];
-    let question = Question {
-        argv: argv.map(String::from).into(),
-        input: Some(Input {
-            text: headers.as_bytes(),
-            answered: None,
-        }),
-    };
-    let printed = match ask(question) {
-        Ok(printed) => printed,
-        Err(e) => return Some(Err(e.context("couldn't ask Claude.ai's usage service"))),
-    };
-    read_answer(&printed, login.plan, now).transpose()
-}
-
-struct Login {
-    token: String,
-    /// In ms.
-    expires_at: i64,
-    plan: Option<String>,
-}
-
-/// Claude's login to Claude.ai, from the file it keeps it in: None if there's
-/// none, nor one in it (it may hold only MCP servers' logins). A file that
-/// isn't JSON (something else printed before it, say) is an error, not taken
-/// for no login; what it holds isn't said, being secret.
-fn login(file: &str) -> Result<Option<Login>> {
-    if file.trim().is_empty() {
-        return Ok(None);
-    }
-    let file: Value = serde_json::from_str(file).context("it isn't JSON")?;
-    let login = &file["claudeAiOauth"];
-    let Some(token) = login["accessToken"].as_str() else {
-        return Ok(None);
-    };
-    Ok(Some(Login {
-        token: token.to_string(),
-        expires_at: login["expiresAt"].as_i64().unwrap_or(i64::MAX),
-        plan: login["subscriptionType"].as_str().map(String::from),
-    }))
-}
-
-/// The service's answer, as curl printed it with its status on a last line,
-/// as of `now`; None if it has neither window.
-fn read_answer(printed: &str, plan: Option<String>, now: i64) -> Result<Option<Usage>> {
-    let printed = printed.trim_end();
-    let (body, status) = printed.rsplit_once('\n').unwrap_or(("", printed));
-    match status {
-        "200" => {}
-        "401" => bail!(EXPIRED),
-        "429" => bail!("Claude.ai's usage service is busy; roster asks again later"),
-        status => bail!("Claude.ai's usage service answered {status}"),
-    }
-    let answer: Value = serde_json::from_str(body)
-        .context("Claude.ai's usage service answered what roster can't read")?;
-    let windows: Vec<Window> = [("five_hour", 300), ("seven_day", 10_080)]
-        .into_iter()
-        .filter_map(|(key, minutes)| {
-            let window = &answer[key];
-            Some(Window {
-                minutes,
-                used: window["utilization"].as_f64()?,
-                resets_at: window["resets_at"].as_str().and_then(iso_ms),
-            })
-        })
-        .collect();
-    Ok((!windows.is_empty()).then(|| Usage {
-        plan,
-        windows,
-        notes: Vec::new(),
-        at: now,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_answer_gives_both_windows() {
-        // As the service answered on 2026-10-25 (cut short).
-        let printed = r#"{"five_hour":{"utilization":31.0,"resets_at":"2026-10-25T18:20:00.471005+00:00","limit_dollars":null},"seven_day":{"utilization":52.0,"resets_at":"2026-10-25T16:00:00.471026+00:00"},"seven_day_opus":null,"extra_usage":{"is_enabled":false}}
-200"#;
-        let usage = read_answer(printed, Some("pro".into()), 7)
-            .unwrap()
-            .unwrap();
-        assert_eq!(usage.plan.as_deref(), Some("pro"));
-        assert_eq!(usage.at, 7);
-        assert_eq!(
-            usage.windows,
-            [
-                Window {
-                    minutes: 300,
-                    used: 31.0,
-                    resets_at: Some(1_792_952_400_471)
-                },
-                Window {
-                    minutes: 10_080,
-                    used: 52.0,
-                    resets_at: Some(1_792_944_000_471)
-                },
-            ]
-        );
-        // Neither: nothing to show.
-        let printed = "{\"five_hour\":null,\"seven_day\":null}\n200";
-        assert_eq!(read_answer(printed, None, 0).unwrap(), None);
-    }
 
     #[test]
     fn claude_answers_its_plans_limits() {
@@ -323,99 +175,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not supported")
-        );
-    }
-
-    #[test]
-    fn a_refusal_says_why() {
-        let said = |printed| read_answer(printed, None, 0).unwrap_err().to_string();
-        assert_eq!(said("{\"error\":{}}\n401"), EXPIRED);
-        assert!(said("{}\n429").contains("busy"));
-        assert!(said("<html>\n502").ends_with("answered 502"));
-        assert!(said("not json\n200").contains("can't read"));
-    }
-
-    #[test]
-    fn the_login_is_claudes_and_without_one_nothing_is_asked() {
-        // What the login file holds, as the session's environment finds it,
-        // and whether curl was asked.
-        let file = std::cell::RefCell::new(String::new());
-        let curled = std::cell::Cell::new(false);
-        let ask = |q: Question<'_>| {
-            if q.argv[0] == "/bin/sh" {
-                return Ok(file.borrow().clone());
-            }
-            curled.set(true);
-            // The token goes on curl's stdin, never its command line.
-            assert_eq!(q.argv[0], "curl");
-            assert!(q.argv.iter().all(|a| !a.contains("t0k")));
-            let input = q.input.unwrap();
-            assert!(String::from_utf8_lossy(input.text).contains("Bearer t0k\n"));
-            assert!(input.answered.is_none());
-            Ok("{\"five_hour\":{\"utilization\":5.0,\"resets_at\":null}}\n200".into())
-        };
-        // No login: Claude on an API key.
-        assert!(super::ask(&ask).is_none());
-        // Expired: said, without asking.
-        *file.borrow_mut() =
-            r#"{"claudeAiOauth":{"accessToken":"t0k","expiresAt":1000,"subscriptionType":"pro"}}"#
-                .into();
-        let err = super::ask(&ask).unwrap().unwrap_err();
-        assert_eq!(err.to_string(), EXPIRED);
-        assert!(!curled.get());
-        *file.borrow_mut() = r#"{"claudeAiOauth":{"accessToken":"t0k","expiresAt":99999999999999,"subscriptionType":"pro"}}"#.into();
-        let usage = super::ask(&ask).unwrap().unwrap();
-        assert!(curled.get());
-        assert_eq!(usage.windows[0].used, 5.0);
-        assert_eq!(usage.windows[0].resets_at, None);
-        assert_eq!(usage.plan.as_deref(), Some("pro"));
-        // A login file that isn't JSON (an env file printed into it): said,
-        // without what it holds.
-        *file.borrow_mut() = "env loaded\n{\"claudeAiOauth\":{\"accessToken\":\"t0k\"}}".into();
-        let err = format!("{:#}", super::ask(&ask).unwrap().unwrap_err());
-        assert!(
-            err.starts_with("couldn't read Claude's login: it isn't JSON"),
-            "{err}"
-        );
-        assert!(!err.contains("t0k"), "{err}");
-        // One with only MCP servers' logins: none.
-        *file.borrow_mut() = r#"{"mcpOAuth":{"server":{"accessToken":"m"}}}"#.into();
-        assert!(super::ask(&ask).is_none());
-        // Its login couldn't be read: said.
-        let failing = |_: Question<'_>| anyhow::bail!("env file failed");
-        let err = super::ask(&failing).unwrap().unwrap_err();
-        assert_eq!(
-            format!("{err:#}"),
-            "couldn't read Claude's login: env file failed"
-        );
-    }
-
-    #[test]
-    fn the_login_is_found_where_claude_looks() {
-        let dir = tempfile::tempdir().unwrap();
-        let printed = |envs: &[(&str, &std::path::Path)]| {
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", PRINT_LOGIN])
-                .env_remove("CLAUDE_CONFIG_DIR");
-            for (var, value) in envs {
-                cmd.env(var, value);
-            }
-            let out = cmd.output().unwrap();
-            assert!(out.status.success());
-            String::from_utf8(out.stdout).unwrap()
-        };
-        // None there: nothing, and no error.
-        assert_eq!(printed(&[("HOME", dir.path())]), "");
-        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
-        std::fs::write(dir.path().join(".claude/.credentials.json"), "home").unwrap();
-        assert_eq!(printed(&[("HOME", dir.path())]), "home");
-        // `CLAUDE_CONFIG_DIR` wins.
-        let other = dir.path().join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join(".credentials.json"), "other").unwrap();
-        assert_eq!(
-            printed(&[("HOME", dir.path()), ("CLAUDE_CONFIG_DIR", &other)]),
-            "other"
         );
     }
 }

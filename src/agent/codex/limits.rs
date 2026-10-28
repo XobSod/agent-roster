@@ -45,7 +45,7 @@ pub(super) fn ask(command: String, ask: &crate::agent::Ask<'_>) -> Option<Result
         ],
         input: Some(Input {
             text: requests.as_bytes(),
-            answered: Some(&answered),
+            answered: &answered,
         }),
     };
     let printed = match ask(question) {

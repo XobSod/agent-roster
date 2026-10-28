@@ -1,6 +1,6 @@
-//! What the account an agent runs on has used of its limits, as the agent's
-//! own service tells it (`Adapter::usage`): each window (five hours, a week),
-//! how much of it is used, and when it starts over.
+//! What the account an agent runs on has used of its limits, as the agent
+//! tells it (`Adapter::usage`): each window (five hours, a week), how much of
+//! it is used, and when it starts over.
 
 use serde::Serialize;
 

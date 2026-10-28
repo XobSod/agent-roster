@@ -164,17 +164,12 @@ which Claude calls experimental); Claude reads its own login and asks Claude.ai'
 usage service, and roster never sees the login. It's asked without
 `ANTHROPIC_API_KEY`, which Claude would otherwise take over your login there. When
 Claude can't reach the service it may answer with what it kept from up to an hour
-before, which roster can't tell from fresh figures. With `limits = "service"` under
-`[agents.claude]` roster does that itself instead: it reads Claude's login from `<claude
-dir>/.credentials.json` (`~/.claude`, or `$CLAUDE_CONFIG_DIR`) and sends its token to
-`https://api.anthropic.com/api/oauth/usage`, the endpoint Claude's `/usage` asks, which
-isn't documented (through `curl`, the token on its stdin; the login is Claude's to
-renew, so once it expires roster waits for Claude to). For Codex it starts Codex's own
+before, which roster can't tell from fresh figures. For Codex it starts Codex's own
 server, `codex app-server`, and asks it.
 It asks at the start, every 5 minutes while the figures show, and when the view opens;
 `Enter` there asks again. Each time, the global env file is sourced once for all of
-them, as for the agents' sessions. `account_limits = false` stops all of it: no login
-read, nothing sent, no server started; `v u` and `roster usage` say how to turn it back
+them, as for the agents' sessions. `account_limits = false` stops all of it: neither
+agent is started, so nothing is sent; `v u` and `roster usage` say how to turn it back
 on. Codex also writes its limits into its rollouts as it works, which roster reads as
 they change, asked or not. pi and other agents say nothing of the kind.
 
@@ -258,8 +253,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     meanwhile shows from the next attach. Turning it on or off changes sessions'
     height by a row on their next attach.
   - `account_limits`: `false`: roster never asks your Claude and Codex accounts
-    what's left of their limits (no `claude -p`, no login read, nothing sent to
-    Claude.ai, no `codex app-server`); `v u` and `roster usage` say so.
+    what's left of their limits (no `claude -p`, no `codex app-server`); `v u` and
+    `roster usage` say so.
   - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
     Codex accounts have used of their limits (`v u` still shows it).
   - `trust_project_folders`: `true` trusts a session's folder in Claude and Codex as
@@ -358,11 +353,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     settings, which roster doesn't change), and `title_model`, the model a generated
     title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
     quicker). pi names no task itself, so roster has it make a title after a
-    conversation's first turn; `auto_title = false` turns that off. Claude's
-    `limits`: `"claude"` (default), its account's limits asked of Claude itself
-    (`claude -p`, with its own login); `"service"`: its login read by roster and sent
-    to Claude.ai's usage service (where Claude won't start so, under managed settings
-    with their own MCP servers, say). Any other
+    conversation's first turn; `auto_title = false` turns that off. Any other
     agent goes in its own table and is then offered for new sessions:
 
     ```toml

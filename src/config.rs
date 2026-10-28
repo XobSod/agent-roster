@@ -10,9 +10,8 @@
 //! fit_preview = "never"           # "auto" (default): agents drawing full screen are
 //!                                 # sized to the TUI's preview while no one's attached
 //! account_limits = false          # default true: asks your Claude and codex accounts
-//!                                 # what's left of their limits (Claude itself, or its
-//!                                 # login sent to Claude.ai's usage service, as
-//!                                 # [agents.claude] limits says; codex's own server)
+//!                                 # what's left of their limits (claude -p, codex
+//!                                 # app-server)
 //! sidebar_usage = false           # default true: under the session list, what your
 //!                                 # Claude and codex accounts have used of their limits
 //! trust_project_folders = true    # default false: a project's folder trusted in Claude
@@ -52,10 +51,6 @@
 //! model = "sonnet"                # new sessions', unless they or their project pick
 //! effort = "high"                 # one; default: the agent's own
 //! title_model = "haiku"           # makes generated titles; default: model above
-//! limits = "service"              # "claude" (default): its account's limits asked of
-//!                                 # Claude itself (claude -p, its own login); "service":
-//!                                 # its login read here and sent to Claude.ai's usage
-//!                                 # service
 //! [agents.pi]                     # pi is offered once installed; this only adds to it
 //! args = ["--tui-mode", "regular"]
 //! title_model = "claude-haiku-4-5"
@@ -99,7 +94,7 @@ pub struct Config {
     /// While attached, a line at the top saying where you are (default on).
     pub status_line: Option<bool>,
     /// Whether the agents' accounts are asked what's left of their limits
-    /// (default on): Claude's with its login, codex's of its server.
+    /// (default on), of Claude and codex themselves.
     pub account_limits: Option<bool>,
     /// Under the session list, a line with what the agents' accounts have
     /// used of their limits (default on).
@@ -145,18 +140,6 @@ pub struct LongPrice {
     pub cache_read: f64,
     #[serde(default)]
     pub cache_write: f64,
-}
-
-/// How Claude's account's limits are asked: of Claude Code itself (in its
-/// SDK mode, its `get_usage`: Claude reads its own login and asks the usage
-/// service), or of Claude.ai's usage service with Claude's login, read from
-/// its file here.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ClaudeLimits {
-    #[default]
-    Claude,
-    Service,
 }
 
 /// How the session list is grouped: on shelves by what waits for you, or
@@ -521,9 +504,6 @@ pub struct AgentConfig {
     /// For an agent that doesn't name its task itself (pi): a title made
     /// after its first turn (default true).
     pub auto_title: Option<bool>,
-    /// Claude's: how its account's limits are asked (default: of Claude
-    /// itself).
-    pub limits: Option<ClaudeLimits>,
 }
 
 impl AgentConfig {
@@ -665,10 +645,6 @@ impl Config {
 
     pub fn account_limits(&self) -> bool {
         self.account_limits.unwrap_or(true)
-    }
-
-    pub fn claude_limits(&self) -> ClaudeLimits {
-        self.agent(crate::agent::CLAUDE).limits.unwrap_or_default()
     }
 
     pub fn trust_project_folders(&self) -> bool {

@@ -93,9 +93,8 @@ pub struct Input<'a> {
     /// stays open, for a command that serves until its input ends (codex's
     /// server), and then it closes, for the command to exit as it does
     /// (Claude tidies up as it goes), or be ended a little later, as if it
-    /// had exited with 0. None: its stdin closes once it has the text, and it
-    /// runs to its end.
-    pub answered: Option<&'a Answered>,
+    /// had exited with 0.
+    pub answered: &'a Answered,
 }
 
 /// Whether what a command printed so far answers it (`Input::answered`).
@@ -125,10 +124,7 @@ pub fn converse(
         if let Some(pipe) = stdin.as_mut() {
             let _ = pipe.write_all(input.text);
         }
-        answered = input.answered;
-        if answered.is_none() {
-            stdin = None;
-        }
+        answered = Some(input.answered);
     }
     let group = child.id() as libc::pid_t;
     // SAFETY: kill only sends a signal, to the group the child leads.
@@ -650,18 +646,6 @@ mod timeout_tests {
 
     #[test]
     fn a_command_is_given_its_input_and_ended_once_it_has_answered() {
-        // It reads to its end: its input closes once given.
-        let out = converse(
-            sh("cat"),
-            "it",
-            Duration::from_secs(3),
-            Some(Input {
-                text: b"one\n",
-                answered: None,
-            }),
-        )
-        .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "one\n");
         // One that serves until its input ends has it end once it answers,
         // and finishes as it would.
         let answered = |out: &[u8]| out.ends_with(b"two\n");
@@ -672,7 +656,7 @@ mod timeout_tests {
             Duration::from_secs(5),
             Some(Input {
                 text: b"two\n",
-                answered: Some(&answered),
+                answered: &answered,
             }),
         )
         .unwrap();
@@ -687,7 +671,7 @@ mod timeout_tests {
             Duration::from_secs(8),
             Some(Input {
                 text: b"two\n",
-                answered: Some(&answered),
+                answered: &answered,
             }),
         )
         .unwrap();

@@ -137,8 +137,8 @@ pub trait Adapter: Sync {
     }
 
     /// What the account it runs on has used of its limits, asked of the
-    /// agent's service now (through `ask`, as for `models`); None if it has
-    /// none roster can read (an API key, say).
+    /// agent now (through `ask`, as for `models`); None if it has none roster
+    /// can read (an API key, say).
     fn usage(&self, _config: &Config, _ask: &Ask<'_>) -> Option<Result<Usage>> {
         None
     }

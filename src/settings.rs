@@ -286,9 +286,6 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
                 "args" => Some(Kind::Words),
                 "idle_after" => Some(Kind::Seconds),
                 "auto_title" => Some(Kind::Bool),
-                "limits" if name == agent::CLAUDE => {
-                    Some(Kind::Choice(vec!["claude".into(), "service".into()]))
-                }
                 "fit_preview" => Some(Kind::Choice(vec!["auto".into(), "never".into()])),
                 _ => None,
             }
@@ -510,7 +507,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             bool_setting(
                 &["account_limits"],
                 account_limits.unwrap_or(true),
-                "ask your Claude and codex accounts what's left of their limits (Claude as its limits setting says; codex's own server)",
+                "ask your Claude and codex accounts what's left of their limits (claude -p, codex app-server)",
             ),
             bool_setting(
                 &["sidebar_usage"],
@@ -654,7 +651,6 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             effort,
             title_model,
             auto_title,
-            limits,
         } = &agent;
         let own = format!("{name}'s own default");
         let p = |key: &'static str| -> Vec<&str> { vec!["agents", name, key] };
@@ -724,17 +720,6 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &p("auto_title"),
                 auto_title.unwrap_or(true),
                 "a title made after a conversation's first turn (it names no task itself)",
-            ));
-        }
-        if name == agent::CLAUDE {
-            settings.push(choice(
-                &p("limits"),
-                &["claude", "service"],
-                match limits.unwrap_or_default() {
-                    crate::config::ClaudeLimits::Claude => "claude",
-                    crate::config::ClaudeLimits::Service => "service",
-                },
-                "its account's limits asked of Claude itself (claude -p, with its own login), or its login read here and sent to Claude.ai's usage service",
             ));
         }
         if !adapter.reports() {
@@ -1505,11 +1490,6 @@ mod tests {
                 .all(|s| s.dotted() != "agents.claude.auto_title")
         );
         assert_eq!(find(&sections, "agents.claude.fit_preview").value, "never");
-        // How its account's limits are asked: Claude's alone.
-        assert_eq!(find(&sections, "agents.claude.limits").value, "claude");
-        assert!(
-            (sections.iter().flat_map(|s| &s.settings)).all(|s| s.dotted() != "agents.pi.limits")
-        );
         assert_eq!(find(&sections, "keys.session.stop").value, "x");
         assert_eq!(find(&sections, "keys.up").value, "k, Up");
     }
@@ -1738,7 +1718,6 @@ mod tests {
         assert!(matches!(kind("agents.pi.effort"), Some(Kind::Choice(_))));
         // Claude names its own titles; not a name.
         assert_eq!(kind("agents.claude.auto_title"), None);
-        assert_eq!(kind("agents.pi.limits"), None);
         assert_eq!(kind("agents.a b.command"), None);
         assert_eq!(kind("agents..command"), None);
     }

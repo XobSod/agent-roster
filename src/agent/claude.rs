@@ -93,15 +93,10 @@ impl Adapter for Claude {
         aliases.chain(pinned).collect()
     }
 
-    /// As Claude.ai's usage service says, asked with Claude's login.
+    /// What Claude's own `/usage` shows, asked of Claude itself.
     fn usage(&self, config: &Config, ask: &Ask<'_>) -> Option<Result<Usage>> {
-        match config.claude_limits() {
-            crate::config::ClaudeLimits::Claude => {
-                let command = config.agent(CLAUDE).command.clone();
-                limits::ask_claude(command.unwrap_or_else(|| CLAUDE.to_string()), ask)
-            }
-            crate::config::ClaudeLimits::Service => limits::ask(ask),
-        }
+        let command = config.agent(CLAUDE).command.clone();
+        limits::ask(command.unwrap_or_else(|| CLAUDE.to_string()), ask)
     }
 
     /// A new conversation, or its existing one resumed.

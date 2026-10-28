@@ -1,6 +1,6 @@
 //! What the agents' accounts have used of their limits, as the TUI knows it:
-//! asked of each agent's service in the background (at the start, every
-//! few minutes, when the usage view opens, and on request), and taken from
+//! asked of each agent in the background (at the start, every few minutes,
+//! when the usage view opens, and on request), and taken from
 //! the transcripts of agents that write it as they go (codex) whenever they
 //! change, which costs nothing.
 
@@ -14,7 +14,7 @@ use anyhow::Result;
 use crate::model::{Session, State};
 use crate::usage::Usage;
 
-/// How often the services are asked while it's shown.
+/// How often the agents are asked while it's shown.
 pub const EVERY: Duration = Duration::from_secs(5 * 60);
 /// Opening the view asks again, unless asked this recently.
 const RECENT: Duration = Duration::from_secs(60);

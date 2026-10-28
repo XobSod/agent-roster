@@ -124,10 +124,10 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 
 ### 3.12 Usage
 - **What the agents' accounts have used of their limits**: for each window (five hours, a week), how much is left and when it starts over. What's left rather than what's used: it's what you work with, running down as you use it, as a battery does. Claude and Codex say; pi and generic agents don't, and don't show.
-- **Asked of each agent itself**, so it shows with no session running: Claude, answering what its `/usage` shows, or, as a setting says, the Claude.ai service its `/usage` asks, with Claude's login read by roster and sent to an endpoint that isn't documented; Codex, its own server. Each in the environment the agent's sessions get, so an env file pointing an agent at another account points its usage there too. Roster never renews Claude's login: renewing replaces what Claude keeps to renew it, which could log Claude out, so an expired login waits for Claude, and roster says so. A token never goes on a command line, where any process could read it. An agent with no login to such an account (Claude on an API key) shows nothing; one that can't be asked says why, keeping what it said before.
+- **Asked of each agent itself**, so it shows with no session running: Claude, answering what its `/usage` shows; Codex, its own server. Roster never reads their logins: each agent asks its own service with its own. Each in the environment the agent's sessions get, so an env file pointing an agent at another account points its usage there too. An agent with no login to such an account (Claude on an API key) shows nothing; one that can't be asked says why, keeping what it said before.
 - **Codex also writes it into its rollouts**, so a running Codex session keeps it current between asks, for nothing. It holds as of when Codex wrote it, so an old figure never undoes a newer answer.
 - **When**: at the start, every few minutes while it shows, when the view opens, and on request; in the background, so the TUI never waits on a service. What's old says when it's from, and has no pace.
-- **Never, if turned off**: no agent started, no login read, nothing sent, by the TUI or `roster usage`, which say how to turn it back on. On by default, being what the view and the sidebar are for; said plainly where it's described, being a login read and sent elsewhere.
+- **Never, if turned off**: no agent started, nothing sent, by the TUI or `roster usage`, which say how to turn it back on. On by default, being what the view and the sidebar are for.
 - **How it's going**, not only how much: each window is used slower than its time goes by (more could be used before it starts over), about as fast, faster (at this rate it runs out first), or it's used up, each with a mark and a colour, the colours told apart with deuteranopia. A window that has started over since, or doesn't say when it does, or was known long ago, has no pace. Marks alone in the sidebar, where words don't fit; words beside them elsewhere, and no forecast.
 
 ### 3.13 Spent
@@ -205,7 +205,7 @@ Checked against the real programs (tmux 3.5a, Claude Code 2.1.303 and later, pi 
 - On its first start in a directory it asks whether to trust the folder, before any hook, and keeps the answer only in its own `.claude.json`, which it rewrites itself under a lock of its own; a folder above it trusted counts too, up to the git repository's root (2.1.311).
 - Its classic renderer draws on the normal screen, where a resize garbles scrolling back; the fullscreen one draws in the alternate screen.
 - A transcript records each reply's tokens and what changes its price (fast mode, US-only runs, web searches); a subagent's calls are in its own transcript, not the parent's.
-- Its login to Claude.ai is kept in its config directory; on an API key there's none. Claude renews the token itself. Its `/usage` asks a Claude.ai endpoint that isn't documented, with that login.
+- Its login to Claude.ai is kept in its config directory, and its `/usage` asks Claude.ai with it; on an API key there's none, and no plan's limits.
 - In its SDK mode it answers a request for what its `/usage` shows, which it calls experimental, calling no model and, told so, starting no MCP server and reading no settings; there, `ANTHROPIC_API_KEY` is used over the login, unasked (2.1.311).
 
 **pi**

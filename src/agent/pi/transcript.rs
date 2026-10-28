@@ -372,6 +372,14 @@ mod tests {
         );
         text += r#"{"type":"model_change","id":"b","provider":"anthropic","modelId":"x"}"#;
         text += "\n";
+        // Not prompts either, as pi 1.4.0 writes them: an extension's message
+        // (a background subagent's result), and a command run with `!`.
+        text += r#"{"type":"custom_message","customType":"subagent-result","content":"Subagent #1 finished","display":true,"id":"e","parentId":"b","timestamp":"t"}"#;
+        text += "\n";
+        text += &message(
+            "bashExecution",
+            serde_json::json!({"command": "ls", "output": "a\n", "exitCode": 0, "cancelled": false}),
+        );
         std::fs::write(&path, &text).unwrap();
         let mut t = PiTranscript::new(&path);
         t.update().unwrap();

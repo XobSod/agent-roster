@@ -273,9 +273,10 @@ impl Lines for Totals {
                 }
             }
             Some("user") if entry.is_meta != Some(true) && !sidechain && !copied => {
-                let given = entry.prompt_source.is_some();
-                if let Some(text) = message.content.and_then(|c| prompt(c, given))
-                    && is_prompt(&text, given)
+                let summary = entry.is_compact_summary == Some(true);
+                let source = Source::of(entry.prompt_source.as_deref(), summary);
+                if let Some(text) = message.content.and_then(|c| prompt(c, source))
+                    && is_prompt(&text, source)
                 {
                     self.prompts.push(text);
                 }
@@ -351,9 +352,10 @@ struct Entry<'a> {
     timestamp: Option<std::borrow::Cow<'a, str>>,
     #[serde(borrow)]
     uuid: Option<std::borrow::Cow<'a, str>>,
-    /// Where a prompt came from, on prompts alone.
-    #[serde(rename = "promptSource")]
-    prompt_source: Option<IgnoredAny>,
+    #[serde(rename = "promptSource", borrow)]
+    prompt_source: Option<std::borrow::Cow<'a, str>>,
+    #[serde(rename = "isCompactSummary")]
+    is_compact_summary: Option<bool>,
     #[serde(borrow)]
     message: Option<Message<'a>>,
     #[serde(rename = "totalCostUSD")]
@@ -393,24 +395,52 @@ struct Usage {
     cache_creation_input_tokens: Option<u64>,
 }
 
-/// Whether a user message's text is a prompt the user gave: one Claude marked
-/// as given (`promptSource`, since 2.1.283) whatever it begins with, markup
-/// too; one unmarked (from an older Claude, or Claude's own: its local
-/// commands, shell input and their output) only if it isn't wrapped in tags,
-/// as those are. Both of Claude's readers, transcript and conversations, ask.
-pub(super) fn is_prompt(text: &str, given: bool) -> bool {
-    given || !text.trim_start().starts_with('<')
+/// Where a user message came from, as Claude marks it (`promptSource`, by
+/// 2.1.220).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Source {
+    /// Given to it: typed, queued, a suggestion accepted, from the SDK.
+    Given,
+    /// Not from anyone (`system`): a background task's notice that it ended,
+    /// another session's message, a scheduled wake-up. Or its summary of the
+    /// conversation before a compaction, marked as that alone.
+    Claudes,
+    /// Not marked: from an older Claude, or not a prompt (a tool's result, an
+    /// interruption, its local commands, shell input and their output).
+    Unmarked,
+}
+
+impl Source {
+    pub(super) fn of(prompt_source: Option<&str>, compact_summary: bool) -> Source {
+        match prompt_source {
+            _ if compact_summary => Source::Claudes,
+            None => Source::Unmarked,
+            Some("system") => Source::Claudes,
+            Some(_) => Source::Given,
+        }
+    }
+}
+
+/// Whether a user message's text is a prompt the user gave: one given
+/// whatever it begins with, markup too; one unmarked only if it isn't wrapped
+/// in tags, as Claude's own are. Both of Claude's readers, transcript and
+/// conversations, ask.
+pub(super) fn is_prompt(text: &str, source: Source) -> bool {
+    match source {
+        Source::Given => true,
+        Source::Claudes => false,
+        Source::Unmarked => !text.trim_start().starts_with('<'),
+    }
 }
 
 /// A prompt's text, from a user message's content: a string, or the text
 /// blocks of a list, which Claude writes for a prompt with an image or a
-/// file. A list is read only if it was `given`: Claude marks the prompts it
-/// was given (`promptSource`: typed, queued, from the SDK), and its other
-/// lists, tool results and its own markers (an interruption), aren't.
-fn prompt(content: &RawValue, given: bool) -> Option<String> {
+/// file. A list is read only if it was given: Claude's other lists are tool
+/// results and its own markers.
+fn prompt(content: &RawValue, source: Source) -> Option<String> {
     if content.get().starts_with('"') {
         serde_json::from_str(content.get()).ok()
-    } else if given {
+    } else if source == Source::Given {
         serde_json::from_str::<Text>(content.get()).ok()?.0
     } else {
         None
@@ -493,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_with_an_image_counts_and_claudes_own_lists_dont() {
+    fn only_what_the_user_gave_is_a_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
         // As Claude Code 2.1.310 writes them.
@@ -516,6 +546,17 @@ mod tests {
                 "message": {"role": "user", "content": "<bash-input>echo hi</bash-input>"}}),
             serde_json::json!({"type": "user",
                 "message": {"role": "user", "content": "<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"}}),
+            // A background task's notice that it ended, as 2.1.306 writes it:
+            // marked, but as no one's; so is one not in tags.
+            serde_json::json!({"type": "user", "promptSource": "system",
+                "origin": {"kind": "task-notification", "producer": "session-task"},
+                "message": {"role": "user", "content": "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"}}),
+            serde_json::json!({"type": "user", "promptSource": "system", "origin": {"kind": "scheduled"},
+                "message": {"role": "user", "content": "check the deploy"}}),
+            // Its summary after a compaction, as 2.1.306 writes it: neither
+            // marked nor in tags.
+            serde_json::json!({"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+                "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context."}}),
         ]
         .map(line)
         .concat();

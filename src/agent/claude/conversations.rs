@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::transcript::Source;
 use crate::agent::Conversation;
 
 /// Claude's own directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
@@ -112,20 +113,20 @@ fn read(path: &Path) -> Option<Conversation> {
 
 /// A prompt the user gave, as Claude's transcript reader tells one
 /// (`transcript::is_prompt`): not a meta message, a tool result, or one of
-/// Claude's own; a list (a prompt with an image or a file) only if Claude
-/// marked it as given.
+/// Claude's own (its summary after a compaction among them); a list (a prompt
+/// with an image or a file) only if Claude marked it as given.
 fn typed_prompt(e: &Value) -> Option<String> {
     if e["isMeta"].as_bool() == Some(true) {
         return None;
     }
-    let given = !e["promptSource"].is_null();
+    let source = Source::of(e["promptSource"].as_str(), e["isCompactSummary"] == true);
     let content = &e["message"]["content"];
     let text = match content {
         Value::String(text) => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
-        Value::Array(_) if given => crate::agent::message_text(content),
+        Value::Array(_) if source == Source::Given => crate::agent::message_text(content),
         _ => None,
     }?;
-    super::transcript::is_prompt(&text, given).then_some(text)
+    super::transcript::is_prompt(&text, source).then_some(text)
 }
 
 /// Conversations a running Claude has open, by conversation id, with its pid.
@@ -208,12 +209,16 @@ mod tests {
                 r#"{"type":"custom-title","customTitle":"Reviews"}"#,
             ],
         );
-        // Only a prompt in markup, typed: offered, with it.
+        // Only a prompt in markup, typed, after Claude's own (shell input, a
+        // background task's notice, its summary after a compaction): offered,
+        // with it.
         conversation_file(
             dir.path(),
             "c-3",
             &[
                 r#"{"type":"user","cwd":"/work/app","message":{"content":"<bash-input>ls</bash-input>"}}"#,
+                r#"{"type":"user","promptSource":"system","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>a1</task-id>\n</task-notification>"}}"#,
+                r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation."}}"#,
                 r#"{"type":"user","promptSource":"typed","message":{"content":"<task>Fix the bug</task>"}}"#,
             ],
         );

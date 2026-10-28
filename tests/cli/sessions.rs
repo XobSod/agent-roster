@@ -994,14 +994,33 @@ fn a_projects_note_is_its_own() {
         .as_str()
         .unwrap()
         .to_string();
+    let inside = |args: &[&str]| {
+        let out = t.command(args).env("ROSTER_SESSION", &id).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    assert_eq!(
+        inside(&["note", "--project"]),
+        (true, "backlog\n- [ ] retry\n".into())
+    );
+    // And without a session, its own session's, read and written.
+    t.ok(&["note", "one", "--set", "mine"]);
+    assert_eq!(inside(&["note"]), (true, "mine\n".into()));
+    assert!(inside(&["note", "--append", "- [x] done"]).0);
+    assert_eq!(t.ok(&["note", "one"]), "mine\n- [x] done\n");
+    t.ok(&["note", "one", "--clear"]);
+    // An id left over from a session gone says where it came from.
     let out = t
-        .command(&["note", "--project"])
-        .env("ROSTER_SESSION", &id)
+        .command(&["note"])
+        .env("ROSTER_SESSION", "0123abcd")
         .output()
         .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "backlog\n- [ ] retry\n"
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("ROSTER_SESSION is 0123abcd"),
+        "{err}"
     );
     for which in [
         &["note", "--project"][..],

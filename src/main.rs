@@ -193,7 +193,8 @@ enum Cmd {
     Info { session: String },
     /// Print a session's or a project's note, or change it (in the TUI: s o, p o)
     Note {
-        /// Whose note: a session's; with --project alone, its project's
+        /// Whose note: a session's (inside an agent, left out: its own
+        /// session's); with --project alone, its project's
         session: Option<String>,
         /// A project's note: this project's, or the session's project's (inside
         /// an agent, its own session's)
@@ -1004,12 +1005,24 @@ fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> 
 }
 
 /// Whose note `roster note` acts on: `session`'s, or with `project` a
-/// project's, the one named or else the session's (inside an agent, without
-/// a session, its own's).
+/// project's, the one named or else the session's. Inside an agent, without
+/// a session, its own session is meant.
 fn noted(r: &Roster, session: Option<&str>, project: Option<&str>) -> Result<note::Noted> {
     let of = |id: i64| -> Result<note::Noted> {
         let p = r.projects()?.into_iter().find(|p| p.id == id);
         Ok(p.context("its project is gone")?.noted())
+    };
+    // Inside an agent, its session, by the id roster gave it.
+    let own = || -> Result<Option<model::Session>> {
+        match std::env::var("ROSTER_SESSION") {
+            Ok(id) if !id.is_empty() => {
+                let s = r.sessions(false)?.into_iter().find(|s| s.id == id);
+                let gone =
+                    || format!("ROSTER_SESSION is {id}, which names no live session: give one");
+                s.map(Some).with_context(gone)
+            }
+            _ => Ok(None),
+        }
     };
     match (session, project) {
         (Some(_), Some(name)) if !name.is_empty() => {
@@ -1017,15 +1030,18 @@ fn noted(r: &Roster, session: Option<&str>, project: Option<&str>) -> Result<not
         }
         (Some(session), Some(_)) => of(r.resolve_any(session)?.project_id),
         (Some(session), None) => Ok(r.resolve_any(session)?.noted()),
-        (None, Some("")) => match std::env::var("ROSTER_SESSION") {
-            Ok(id) => of(r.resolve_any(&id)?.project_id),
-            Err(_) => bail!("which project's note? --project <PROJECT>"),
+        (None, Some("")) => match own()? {
+            Some(s) => of(s.project_id),
+            None => bail!("which project's note? --project <PROJECT>"),
         },
         (None, Some(name)) => match r.projects()?.into_iter().find(|p| p.name == name) {
             Some(p) => Ok(p.noted()),
             None => bail!("no project named {name:?}"),
         },
-        (None, None) => bail!("which note? a session's, or --project <PROJECT>"),
+        (None, None) => match own()? {
+            Some(s) => Ok(s.noted()),
+            None => bail!("which note? a session's, or --project <PROJECT>"),
+        },
     }
 }
 

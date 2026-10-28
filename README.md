@@ -212,7 +212,8 @@ roster note api                         # print its note; --edit opens it in $ED
 roster note api --append "- [ ] check the fork path"   # --set replaces it ("-": from stdin), --clear removes it
 roster note api --pin 3                 # the line the preview shows, with the one below; --unpin
 roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
-roster note api --project               # api's project's; inside an agent, --project alone is its own's
+roster note api --project               # api's project's
+roster note --append "- [x] tests pass" # inside an agent: its own session's note; --project alone, its project's
 roster adopt --list                     # Claude, pi and Codex conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
@@ -236,7 +237,9 @@ roster config --edit                    # config.toml in $EDITOR (from those def
 ```
 
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`
-lists every command.
+lists every command. Each agent's session has `ROSTER_SESSION` set to its id, which
+is how `roster note` inside it knows whose note is meant, and `ROSTER_EXE` to the roster
+that started it, for an agent whose `PATH` has no `roster` (`"$ROSTER_EXE" note`).
 
 ## Configure
 

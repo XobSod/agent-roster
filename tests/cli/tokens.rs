@@ -61,7 +61,7 @@ fn tokens_are_summed_from_every_agents_conversations() {
     };
     write(
         t.codex_dir().join(
-            "sessions/2026/10/25/rollout-2026-10-25T10-00-00-01a17268-0ae7-78e0-960f-6e022d1f4e83.jsonl",
+            "sessions/2026/10/25/rollout-2026-10-25T10-00-00-01a17280-b500-7000-8000-000000000001.jsonl",
         ),
         &[
             json!({"timestamp": iso("40 days"), "type": "turn_context", "payload": {"model": "gpt-6.1-sol"}}),
@@ -133,7 +133,7 @@ fn tokens_are_summed_from_every_agents_conversations() {
     assert_eq!(json["sessions"], 3);
 
     // Archived, a rollout moves: it's the same calls, where it is now.
-    let rollout = "rollout-2026-10-25T10-00-00-01a17268-0ae7-78e0-960f-6e022d1f4e83.jsonl";
+    let rollout = "rollout-2026-10-25T10-00-00-01a17280-b500-7000-8000-000000000001.jsonl";
     fs::create_dir_all(t.codex_dir().join("archived_sessions")).unwrap();
     fs::rename(
         t.codex_dir().join("sessions/2026/10/25").join(rollout),

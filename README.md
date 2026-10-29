@@ -52,8 +52,8 @@ heading); in an agent, a line at the top says where you are, like the preview's 
 (project, the session's name if you gave it one, and its title), and Ctrl+Q comes back
 and marks it read. `/` filters the list as you type, fuzzily (`atrw` finds "Auth
 rework"; `'word` matches exactly): `Enter` keeps the filter, `Esc` clears it. `?` shows
-every key, and `q` quits (in the projects and server views it goes back, like `Esc`).
-Everything else is in three menus, which pop up their keys:
+every key, and `q` quits (in a view it goes back, like `Esc`). Everything else is in
+three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
@@ -117,12 +117,11 @@ Roster can tell when one is open in Claude, but not in pi or Codex.
 
 A Claude or Codex session's card says how many subagents it has at work, on its second
 line: `↳2 ›`; one whose own turn ended with subagents still at work (in the background)
-stays working until the last one is done. `l` on the card unfolds a line for each, the model it runs,
-what it's doing (its latest step, in the manner of its agent's own screen; what it was
-given to do till its first) and how long it's been at it; `h` folds it again (`card_subagents` keeps
-them unfolded, the lines then saying how many, or shows the count only). One unheard of
-for fifteen minutes is taken for gone. Sessions started before roster knew this (before
-it was updated) don't say when their subagents start: restart them.
+stays working until the last one is done. `l` on the card unfolds a line for each, the
+model it runs, what it's doing (its latest step, in the manner of its agent's own
+screen; what it was given to do till its first) and how long it's been at it; `h` folds
+it again (`card_subagents` keeps them unfolded, the lines then saying how many, or
+shows the count only). One unheard of for fifteen minutes is taken for gone.
 
 ### Notes
 
@@ -183,8 +182,9 @@ use together: memory, CPU lately, how many. `j`/`k` move the cursor; on a sessio
 unfolds it to its process tree (`h` folds), each process with its own memory, CPU and
 pid: the agent and all it started, and anything started in the session that left the
 agent or outlived it (an archived or deleted session's, in a section of their own).
-There the session menu's keys work without `s`: `x` stops the cursor's session, `X` kills
-it, or on a process, that one and all under it (a runaway build), the agent going on.
+There, two of the session menu's keys work without `s`: `x` stops the cursor's
+session, `X` kills it, or on a process, that one and all under it (a runaway build),
+the agent going on.
 
 ### Usage and spending
 
@@ -346,18 +346,19 @@ All files are optional and live in `~/.config/agent-roster/`:
     quickly: at most this many milliseconds from one to the next (default 300). Typed
     slower, they're just text. `lines`, how many of each note's lines the preview
     shows, from the pinned one (default 2, at most 10).
-  - `fit_preview`: agents drawing full screen (in the terminal's alternate screen, as
-    Claude Code's fullscreen renderer does) are sized to the preview while you're not
-    attached, so it shows all of their screen; `"never"` turns that off, also per agent
-    under `[agents.<name>]`. Agents drawing on the normal screen, Claude's classic
-    renderer among them, keep your terminal's size: resizing would garble their
-    history in tmux. `"always"` sizes every agent to the preview's width and keeps it
-    there, while you're attached too, with your terminal's height and the session list
-    beside it, read only, where the TUI's is, faint but for the session you're in, on a
-    background of its own (in a terminal too narrow for both, the agent alone, narrower
-    only in a narrower terminal): the preview shows all of each agent's screen, and copy
-    mode its history as written, since its width changes only with the preview's. New
-    sessions start at the size the TUI last showed, from the CLI too.
+  - `fit_preview` (default `"auto"`): agents drawing full screen (in the terminal's
+    alternate screen, as Claude Code's fullscreen renderer does) are sized to the
+    preview while you're not attached, so it shows all of their screen; `"never"`
+    turns that off, also per agent under `[agents.<name>]`. Agents drawing on the
+    normal screen, Claude's classic renderer among them, keep your terminal's size:
+    resizing would garble their history in tmux. `"always"` sizes every agent to the
+    preview's width and keeps it there, while you're attached too, with your terminal's
+    height and the session list beside it, read only, where the TUI's is, faint but for
+    the session you're in, on a background of its own (in a terminal too narrow for
+    both, the agent alone, narrower only in a narrower terminal): the preview shows all
+    of each agent's screen, and copy mode its history as written, since its width
+    changes only with the preview's. With it, new sessions start at the preview's size
+    as the TUI last had it, from the CLI too.
   - `[order]`: per shelf (`needs_input`, `idle`, `stopped`, `working`, `archived`),
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
@@ -377,7 +378,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     expand = ["l", "Right"]   # unfold
     confirm = "Enter"         # attach, fold or unfold a heading, restore when archived
     search = "/"              # filter the list
-    quit = ["q", "C-c"]       # in the projects and server views: back
+    quit = ["q", "C-c"]       # in a view: back
     help = "?"
 
     [keys.session]            # the session menu: `menu` opens it, the rest act in it
@@ -408,7 +409,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     [keys.view]
     menu = "v"
     projects = "p"            # the projects view
-    server = "t"              # the tmux server and the database
+    server = "t"              # the tmux server, the database and processes
     settings = "s"            # every setting, to see and change
     usage = "u"               # what the agents' accounts have used of their limits
     ```

@@ -32,7 +32,7 @@ pub use self::{
     sessions::{Defaults, NewSession},
 };
 
-// What one job has that others use, as when they were one file.
+// What one job has that the others use.
 use self::{processes::*, prompts::*, sessions::*};
 
 /// What's said of a config roster's tmux didn't take: what tmux said first

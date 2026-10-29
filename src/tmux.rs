@@ -318,8 +318,9 @@ impl Tmux {
                         Some(size) if !crate::procs::alive(owner) => {
                             self.close_sidebar(name, id, size).ok();
                         }
-                        // Marked by an older roster, whose owner isn't to
-                        // be told: once no one's attached.
+                        // A mark with no size after its owner can't be told
+                        // left behind, nor the agent's size given back:
+                        // closed once no one's attached.
                         None if clients == "0" => {
                             self.kill_pane(id).ok();
                         }

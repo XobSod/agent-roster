@@ -452,10 +452,10 @@ impl SessionKeys {
     }
 
     /// A key the config sets for one action that archive, adopt or kill has
-    /// by default: their default gives it way, so a config written before they
-    /// had it still loads, and that's said. Any other default the config sets
-    /// for another action stays an error, as do two the config sets
-    /// (`Keymap::new`).
+    /// by default: their default gives way, so a config giving that key to
+    /// another action still loads, and that's said. Any other default the
+    /// config sets for another action stays an error, as do two the config
+    /// sets (`Keymap::new`).
     fn yield_defaults(&mut self) -> Vec<String> {
         const MOVED: [&str; 3] = ["archive", "adopt", "kill"];
         let mut defaults = SessionKeys::default();

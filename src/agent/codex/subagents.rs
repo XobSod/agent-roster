@@ -376,8 +376,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const PARENT: &str = "01a17e29-6e30-7793-9e26-e312a759e09f";
-    const ID: &str = "01a17e29-794e-70b3-b335-0d09d7b766ef";
+    const PARENT: &str = "01a17d3b-4a00-7000-8000-000000000001";
+    const ID: &str = "01a17d3b-55b8-7000-8000-000000000002";
 
     /// A subagent's rollout as Codex 0.164 writes it: its meta, a copy of its
     /// parent's (with a turn of it ended), then its own lines (`own`), from
@@ -427,9 +427,9 @@ mod tests {
         let (y, m, d) = crate::util::local_date(made).unwrap();
         let day = dir.path().join(format!("sessions/{y:04}/{m:02}/{d:02}"));
         fs::create_dir_all(&day).unwrap();
-        let parent = day.join(format!("rollout-2026-10-27T17-20-06-{PARENT}.jsonl"));
+        let parent = day.join(format!("rollout-2026-10-27T12-00-00-{PARENT}.jsonl"));
         fs::write(&parent, "").unwrap();
-        let sub = day.join(format!("rollout-2026-10-27T17-20-09-{ID}.jsonl"));
+        let sub = day.join(format!("rollout-2026-10-27T12-00-03-{ID}.jsonl"));
         (dir, parent, sub)
     }
 

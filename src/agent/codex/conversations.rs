@@ -305,10 +305,10 @@ mod tests {
 
     #[test]
     fn finds_the_id_in_a_rollouts_name() {
-        let id = "01a16554-00a8-7983-837e-721a0ace204e";
+        let id = "01a15de7-4500-7000-8000-000000000001";
         assert_eq!(
             id_of(Path::new(&format!(
-                "rollout-2026-10-22T22-36-06-{id}.jsonl"
+                "rollout-2026-10-21T10-00-00-{id}.jsonl"
             ))),
             Some(id)
         );
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn reads_what_a_rollout_says_about_itself() {
         let dir = tempfile::tempdir().unwrap();
-        let id = "01a16554-00a8-7983-837e-721a0ace204e";
+        let id = "01a15de7-4500-7000-8000-000000000001";
         rollout(
             dir.path(),
             id,
@@ -344,15 +344,15 @@ be brief
         // Nothing but injected context: not offered.
         rollout(
             dir.path(),
-            "01a16554-00a8-7983-837e-721a0ace205f",
+            "01a15de7-4500-7000-8000-000000000002",
             "20",
             &[
-                r#"{"type":"session_meta","payload":{"id":"01a16554-00a8-7983-837e-721a0ace205f","cwd":"/work/app"}}"#,
+                r#"{"type":"session_meta","payload":{"id":"01a15de7-4500-7000-8000-000000000002","cwd":"/work/app"}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>hi</environment_context>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["environments.environment_context"]}}}"#,
             ],
         );
         // Nothing but a prompt in markup, from an older codex: offered.
-        let older = "019d880a-44de-7563-a769-7d41f3a34580";
+        let older = "019d8648-a100-7000-8000-000000000004";
         rollout(
             dir.path(),
             older,
@@ -395,7 +395,7 @@ be brief
 
         // Asked for by a part of its id, as `roster adopt` matches them.
         assert_eq!(
-            conversations(dir.path(), |i| i.starts_with("01a16554")).len(),
+            conversations(dir.path(), |i| i.starts_with("01a15de7")).len(),
             1
         );
         assert!(conversations(dir.path(), |i| i.starts_with("ffff")).is_empty());
@@ -405,8 +405,8 @@ be brief
     fn a_fork_is_its_own_not_the_one_it_was_forked_from() {
         let dir = tempfile::tempdir().unwrap();
         let (fork, parent) = (
-            "019d880a-44de-7563-a769-7d41f3a32222",
-            "019d880a-44de-7563-a769-7d41f3a31111",
+            "019d8648-a100-7000-8000-000000002222",
+            "019d8648-a100-7000-8000-000000001111",
         );
         rollout(
             dir.path(),
@@ -428,7 +428,7 @@ be brief
         assert_eq!(found[0].cwd, PathBuf::from("/work/child"));
         assert_eq!(found[0].branch.as_deref(), Some("fork"));
         // A subagent's thread, a fork too, is its parent's: not one to adopt.
-        let subagent = "019d880a-44de-7563-a769-7d41f3a33333";
+        let subagent = "019d8648-a100-7000-8000-000000003333";
         rollout(
             dir.path(),
             subagent,

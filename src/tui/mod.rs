@@ -44,7 +44,7 @@ use crate::settings::Reloaded;
 use app::{App, Mode};
 use list::{Entry, EntryKey, Group};
 use op::Op;
-// What one job has that others use, as when they were one file.
+// What one job has that the others use.
 use perform::*;
 use transcripts::*;
 

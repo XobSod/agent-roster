@@ -25,7 +25,7 @@ mod tests;
 
 pub use self::{events::insert_event, spent::SpentSave};
 
-// What one has that others use, as when they were one file.
+// What one module has that the others use.
 use self::{notes::*, projects::*, schema::*, sessions::*, spent::*};
 
 /// SQLite's `auto_vacuum` mode in which `PRAGMA incremental_vacuum` gives

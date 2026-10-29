@@ -150,14 +150,9 @@ fn pid_namespace() -> Option<String> {
     Some(inode.to_string())
 }
 
-/// When the process `pid` started, while it runs: not once it's ended,
-/// waiting to be reaped.
+/// When the process `pid` started, while it runs.
 fn started(pid: i32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let state = stat[stat.rfind(')')? + 1..].split_whitespace().next()?;
-    if matches!(state, "Z" | "X") {
-        return None;
-    }
     Some(parse_stat(pid, &stat, 1, 1)?.started)
 }
 
@@ -181,12 +176,19 @@ fn descendants(all: &[Process], root: i32) -> Vec<i32> {
 /// A process from its `/proc/<pid>/stat`: its command in parentheses (which
 /// may hold any character, parentheses too), then the fields `proc(5)`
 /// numbers, CPU time in clock ticks of `ticks` a second, memory in pages of
-/// `page` bytes.
+/// `page` bytes; None once it's ended, waiting to be reaped (a parent that
+/// never reaps keeps it so), using nothing and not to be killed. Shown as
+/// ended while threads of it run on (its first having exited), it hasn't.
 fn parse_stat(pid: i32, stat: &str, ticks: u64, page: u64) -> Option<Process> {
     let command = &stat[stat.find('(')? + 1..stat.rfind(')')?];
     let fields: Vec<&str> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
     // From field 3 (the state) on.
     let field = |n: usize| fields.get(n - 3)?.parse::<u64>().ok();
+    match fields.first() {
+        Some(&"X") => return None,
+        Some(&"Z") if field(20).is_none_or(|threads| threads <= 1) => return None,
+        _ => {}
+    }
     Some(Process {
         pid,
         ppid: fields.get(1)?.parse().ok()?,
@@ -496,6 +498,12 @@ mod tests {
             (1, 98765, 51200 * 4096, 15_000, "node (claude) x")
         );
         assert_eq!(parse_stat(1, "1 (init) S", 100, 4096), None);
+        // Ended, not reaped yet: none; but one whose first thread alone
+        // ended (its 11 others on) runs on.
+        let zombie = stat.replacen(") S ", ") Z ", 1);
+        assert!(parse_stat(4242, &zombie, 100, 4096).is_some());
+        let zombie = zombie.replacen(" 0 11 0 ", " 0 1 0 ", 1);
+        assert_eq!(parse_stat(4242, &zombie, 100, 4096), None);
         let env = b"HOME=/h\0ROSTER_SESSION=3f2a\0ROSTER_DB=/state/roster.db\0";
         assert_eq!(
             session_in(env),

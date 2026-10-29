@@ -15,7 +15,8 @@ use anyhow::{Context, Result, bail};
 /// Variables never passed into roster's tmux: the ones that make tmux think it's
 /// nested, and the per-session ones of Claude Code and Codex, and roster's own,
 /// which leak in when roster itself is run from inside one of them (a server
-/// carrying a session's id would have its every pane taken for that session's).
+/// carrying a session's id and database would be taken for one of that
+/// session's processes, and killing the session would kill it).
 pub(crate) const LEAKY_ENV: &[&str] = &[
     "TMUX",
     "TMUX_PANE",

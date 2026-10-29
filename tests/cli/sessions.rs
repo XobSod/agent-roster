@@ -577,6 +577,28 @@ fn doctor_finds_orphans_and_fixes_them() {
         fixed.contains("Killed 1 orphaned tmux session(s)") && fixed.contains("problems (0)"),
         "{fixed}"
     );
+
+    // A server carrying a roster session's id, as one started from inside it would.
+    Command::new("tmux")
+        .args([
+            "-L",
+            &t.socket,
+            "set-environment",
+            "-g",
+            "ROSTER_SESSION",
+            "leaked",
+        ])
+        .env_remove("TMUX")
+        .output()
+        .unwrap();
+    let out = t.run(&["doctor"]);
+    assert!(!out.status.success());
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains("✗ environment has ROSTER_SESSION")
+            && report.contains("or a roster session"),
+        "{report}"
+    );
 }
 
 #[test]

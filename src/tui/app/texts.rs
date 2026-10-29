@@ -696,13 +696,17 @@ fn member_line(s: &Session, group: Group, width: usize, now: i64) -> Line<'stati
         }
         None => left.push(Span::raw(s.name.clone())),
     }
-    let right = vec![waiting_words(s, now), Span::raw(" ")];
+    let right = [waiting_words(s, now), vec![Span::raw(" ")]].concat();
     Line::from(fit(width, left, right))
 }
 
-/// What a session is waiting for, and since when.
-fn waiting_words(s: &Session, now: i64) -> ratatui::text::Span<'static> {
-    use ratatui::style::{Color, Style};
+/// What a session is waiting for, and since when; working unread (its
+/// turn over, on what it left running), with the unread mark.
+fn waiting_words(s: &Session, now: i64) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::{
+        style::{Color, Style},
+        text::Span,
+    };
     let ago = |at: i64| theme::ago(now - at);
     let at = s.state_since.unwrap_or(s.created_at);
     let (words, color): (String, Color) = match (s.deleted_at, s.state, s.unread) {
@@ -716,5 +720,9 @@ fn waiting_words(s: &Session, now: i64) -> ratatui::text::Span<'static> {
             _ => (format!("stopped {}", ago(at)), theme::MUTED),
         },
     };
-    ratatui::text::Span::styled(words, Style::new().fg(color))
+    let words = Span::styled(words, Style::new().fg(color));
+    match (s.state, s.unread) {
+        (State::Working, true) => vec![Span::styled("● ", Style::new().fg(theme::UNREAD)), words],
+        _ => vec![words],
+    }
 }

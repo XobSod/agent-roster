@@ -111,7 +111,7 @@ else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--eff
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
 Roster can tell when one is open in Claude, but not in pi or Codex.
 
-### Subagents
+### Subagents and shells
 
 ![roster: a card counting its session's subagents at work, unfolded to what each is doing, folding as they finish](demo/gifs/subagents.gif)
 
@@ -122,6 +122,13 @@ model it runs, what it's doing (its latest step, in the manner of its agent's ow
 screen; what it was given to do till its first) and how long it's been at it; `h` folds
 it again (`card_subagents` keeps them unfolded, the lines then saying how many, or
 shows the count only). One unheard of for fifteen minutes is taken for gone.
+
+Commands Claude left running in the background (a build, the tests, a dev server) are
+counted beside them, `$1`, with a line each when unfolded: what it does, as Claude put
+it, and how long it's been running. A turn that ends with only those left stays on
+*Working*, marked unread (`● ⠋`): Claude may be waiting for one, taking its result up by
+itself once it's done, which takes the mark off, or for you, with a server left running
+for you to try.
 
 ### Notes
 
@@ -319,9 +326,10 @@ All files are optional and live in `~/.config/agent-roster/`:
     stays so, as does one in a repository it was told not to trust.
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
-  - `card_subagents`: a Claude or Codex session's subagents at work, on its card: `"folded"`
-    (default), how many (`↳2 ›`), and a line each once you unfold it with `l`;
-    `"unfolded"`, the lines always; `"count"`, how many only.
+  - `card_subagents`: a Claude or Codex session's subagents at work, and the commands
+    Claude left running, on its card: `"folded"` (default), how many (`↳2 $1 ›`), and a
+    line each once you unfold it with `l`; `"unfolded"`, the lines always; `"count"`,
+    how many only.
   - `memory_warning`: a session whose processes (its agent, all it started, and what it
     left running) use more memory than this is marked in red: `⚠` and how much on its card,
     in its header and on a folded group's heading, and a line under the summary saying how

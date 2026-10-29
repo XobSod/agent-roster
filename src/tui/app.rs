@@ -205,9 +205,9 @@ pub struct App {
     /// Whether the accounts are asked at all (`account_limits`).
     pub account_limits: bool,
     pub sidebar_usage: bool,
-    /// What cards say of their sessions' subagents at work (config.toml),
-    /// the cards unfolded to show them (`l`), by session, and what's read
-    /// of each subagent, by its agent's id for it.
+    /// What cards say of their sessions' subagents and shells at work
+    /// (config.toml), the cards unfolded to show them (`l`), by session, and
+    /// what's read of each subagent, by its agent's id for it.
     pub card_subagents: crate::config::CardSubagents,
     /// Above how much memory a session's processes are said to use too
     /// much; None: not said.
@@ -319,11 +319,11 @@ impl App {
         self.dialog = Some(Dialog::Form(Box::new(form.with_models(&self.models))));
     }
 
-    /// Whether `s`'s card shows a line for each of its subagents at work
-    /// (as of `now`): unfolded, or always.
-    pub fn subagents_shown(&self, s: &Session, now: i64) -> bool {
+    /// Whether `s`'s card shows a line for each of its subagents and shells
+    /// at work (as of `now`): unfolded, or always.
+    pub fn at_work_shown(&self, s: &Session, now: i64) -> bool {
         use crate::config::CardSubagents;
-        s.subagents_running(now) > 0
+        s.at_work(now) > 0
             && match self.card_subagents {
                 CardSubagents::Count => false,
                 CardSubagents::Folded => self.unfolded.contains(&s.id),

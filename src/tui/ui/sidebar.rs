@@ -148,17 +148,18 @@ pub(super) fn list_lines(
             Entry::Card(s) => {
                 let noted = !app.grouped && project_noted(app, s);
                 use crate::config::CardSubagents;
-                let shown = app.subagents_shown(s, now);
+                let shown = app.at_work_shown(s, now);
                 // How many, unless always unfolded: then the lines say it.
                 let mark = match app.card_subagents {
-                    CardSubagents::Count => subagents_mark(s, now, None),
-                    CardSubagents::Folded => subagents_mark(s, now, Some(shown)),
+                    CardSubagents::Count => at_work_mark(s, now, None),
+                    CardSubagents::Folded => at_work_mark(s, now, Some(shown)),
                     CardSubagents::Unfolded => Vec::new(),
                 };
                 let mark = [memory_mark(app, s), mark].concat();
                 let mut rows = card(s, hit(app, s), !app.grouped, noted, mark, content, now);
                 if shown {
                     rows.extend(subagent_rows(app, s, content, now));
+                    rows.extend(shell_rows(s, content, now));
                 }
                 rows
             }
@@ -362,6 +363,29 @@ fn subagent_rows(app: &App, s: &Session, width: usize, now: i64) -> Vec<Vec<Span
             ));
             let right = vec![Span::styled(
                 format!("{} ", theme::clock(now - a.started)),
+                Style::new().fg(FAINT),
+            )];
+            fit(width, left, right)
+        })
+        .collect()
+}
+
+/// A line for each command `s`'s agent left running, as they were left:
+/// what it does, as the agent put it, cut to fit, and how long it's been
+/// running.
+fn shell_rows(s: &Session, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
+    let mut running: Vec<_> = s.shells.iter().collect();
+    running.sort_by_key(|(id, shell)| (shell.started, *id));
+    (running.into_iter())
+        .map(|(_, shell)| {
+            let what = shell.what.as_deref().unwrap_or("a command");
+            let left = vec![
+                Span::raw("   "),
+                Span::styled("$ ", Style::new().fg(MUTED)),
+                Span::styled(crate::util::one_line(what), Style::new().fg(MUTED)),
+            ];
+            let right = vec![Span::styled(
+                format!("{} ", theme::clock(now - shell.started)),
                 Style::new().fg(FAINT),
             )];
             fit(width, left, right)

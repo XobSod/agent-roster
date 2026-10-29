@@ -97,6 +97,83 @@ pub struct Roster {
     /// Which of its sessions each process was started in, by pid and start,
     /// as read once from its environment.
     sessions_of: HashMap<(i32, u64), Option<String>>,
+    /// How far each session's transcript has been read for the ends of its
+    /// shells, by session.
+    shells_read: HashMap<String, ShellsRead>,
+}
+
+/// How far a session's transcript has been read for the ends of what its
+/// agent left running (`Adapter::shells_ended`), and those found: when each
+/// was first written (else read), and whether its agent was told it then.
+/// A refresh reads only what was written since.
+struct ShellsRead {
+    path: String,
+    upto: u64,
+    ended: HashMap<String, (i64, bool)>,
+}
+
+/// How far before a shell was reported its transcript is read for its end:
+/// a command that ends at once may have its end written before the hook
+/// reporting it ran, what tools called beside it returned in between.
+const SHELL_SLACK: u64 = 1 << 20;
+
+/// How long an end queued for its agent while it waits is left to the turn
+/// the agent starts on it, which reports it (written a moment before the
+/// report comes); only one it never reports is taken from its transcript.
+/// Longer than a report may wait for the database (`report`'s busy
+/// timeout), so a slow one still comes first.
+const SHELL_END_GRACE_MS: i64 = 10_000;
+
+/// How much further than its shells' own mark a transcript is read with
+/// none of their ends in it before that's saved with them, so the next
+/// roster process starts reading there.
+const SHELL_READ_SAVED: u64 = 1 << 20;
+
+/// Which of `s`'s shells its transcript says have ended, each by when, read
+/// on from where `read` left it; and how far it's read with none of their
+/// ends in it, once that's worth saving (`SHELL_READ_SAVED`).
+fn shells_ended(
+    read: &mut HashMap<String, ShellsRead>,
+    s: &Session,
+    now: i64,
+) -> (Vec<(String, i64)>, Option<u64>) {
+    let (Some(path), Some(first)) = (
+        s.transcript_path.as_deref(),
+        s.shells.values().map(|shell| shell.from).min(),
+    ) else {
+        return (Vec::new(), None);
+    };
+    let fresh = || ShellsRead {
+        path: path.to_string(),
+        upto: first.saturating_sub(SHELL_SLACK),
+        ended: HashMap::new(),
+    };
+    let known = read.entry(s.id.clone()).or_insert_with(fresh);
+    // Another conversation's (cleared since).
+    if known.path != path {
+        *known = fresh();
+    }
+    if let Some((ends, upto)) = agent::adapter(&s.agent).shells_ended(Path::new(path), known.upto) {
+        for end in ends {
+            let seen = known
+                .ended
+                .entry(end.id)
+                .or_insert((end.at.unwrap_or(now).min(now), false));
+            seen.1 |= end.told;
+        }
+        known.upto = upto;
+    }
+    let found: Vec<(&String, i64, bool)> = (s.shells.keys())
+        .filter_map(|id| known.ended.get(id).map(|&(at, told)| (id, at, told)))
+        .collect();
+    // Waiting, an end only queued is the turn's it starts on it, for now.
+    let ended = (found.iter())
+        .filter(|(_, at, told)| !s.awaiting || *told || now - at >= SHELL_END_GRACE_MS)
+        .map(|(id, at, _)| (id.to_string(), *at))
+        .collect();
+    let saved = (found.is_empty() && known.upto >= first.saturating_add(SHELL_READ_SAVED))
+        .then_some(known.upto);
+    (ended, saved)
 }
 
 impl Roster {
@@ -150,6 +227,7 @@ impl Roster {
             sampler: procs::Sampler::default(),
             told_preview: None,
             sessions_of: HashMap::new(),
+            shells_read: HashMap::new(),
         })
     }
 
@@ -167,6 +245,14 @@ impl Roster {
                 agent::adapter(&s.agent).subagent_finished(Path::new(path), id, heard)
             })
         })?;
+        // A shell whose end its agent was told mid-turn, which no hook says.
+        let read = &mut self.shells_read;
+        let mut with_shells = HashSet::new();
+        self.db.settle_shells(&mut |s| {
+            with_shells.insert(s.id.clone());
+            shells_ended(read, s, now)
+        })?;
+        read.retain(|id, _| with_shells.contains(id));
         let panes = self.tmux.panes()?;
         self.resized.retain(|_, until| *until > now);
         // Typed once every session is saved, each claimed just before it's
@@ -532,5 +618,102 @@ pub(crate) fn project_removal_question<'a>(
         0 => format!("Remove project {name}?"),
         1 => format!("Remove project {name}? Its archived session goes for good{with}."),
         n => format!("Remove project {name}? Its {n} archived sessions go for good{with}."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Shell;
+
+    /// A Claude session waiting (or not) on shells `ids`, its transcript at
+    /// `path`, as long as `from` when they were reported.
+    fn on_shells(path: &Path, ids: &[&str], from: u64, awaiting: bool) -> Session {
+        let mut s = crate::model::tests::session("a");
+        s.transcript_path = Some(path.to_string_lossy().into_owned());
+        s.awaiting = awaiting;
+        for id in ids {
+            let shell = Shell {
+                what: None,
+                started: 0,
+                from,
+            };
+            s.shells.insert(id.to_string(), shell);
+        }
+        s
+    }
+
+    fn notice(id: &str, at: &str) -> String {
+        let content = format!("<task-notification>\n<task-id>{id}</task-id>\n</task-notification>");
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue",
+            "content": content, "timestamp": at})
+        .to_string()
+            + "\n"
+    }
+
+    #[test]
+    fn shells_ends_are_read_on_from_where_the_last_read_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        let at = |text: &str| crate::util::iso_ms(text).unwrap();
+        let (t1, t2) = ("2026-10-29T10:00:01Z", "2026-10-29T10:00:02Z");
+        // An end written before its shell was reported, a little.
+        let early = notice("b1", t1);
+        std::fs::write(&path, format!("{early}{}\n", "x".repeat(100))).unwrap();
+        let mut read = HashMap::new();
+        let later = at(t1) + SHELL_END_GRACE_MS;
+        let s = on_shells(&path, &["b1"], early.len() as u64 + 50, false);
+        assert_eq!(
+            shells_ended(&mut read, &s, later),
+            (vec![("b1".to_string(), at(t1))], None)
+        );
+        // Read on from there: an end seen before its shell was known counts
+        // once it is.
+        std::fs::write(
+            &path,
+            format!("{early}{}\n{}", "x".repeat(100), notice("b2", t2)),
+        )
+        .unwrap();
+        let s = on_shells(&path, &["b3"], 0, false);
+        assert_eq!(shells_ended(&mut read, &s, later), (Vec::new(), None));
+        let s = on_shells(&path, &["b2"], 0, false);
+        assert_eq!(
+            shells_ended(&mut read, &s, later).0,
+            [("b2".to_string(), at(t2))]
+        );
+        // Waiting on it, a fresh end only queued is left to the turn its
+        // agent starts on it; one it was told already isn't.
+        let s = on_shells(&path, &["b2"], 0, true);
+        assert!(shells_ended(&mut read, &s, at(t2) + 1).0.is_empty());
+        assert_eq!(shells_ended(&mut read, &s, later + 1_000).0.len(), 1);
+        let told = serde_json::json!({"type": "attachment", "timestamp": t2, "attachment": {
+            "type": "queued_command", "prompt": "<task-notification>\n<task-id>b5</task-id>\n</task-notification>"}});
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}{told}\n")).unwrap();
+        let s = on_shells(&path, &["b5"], 0, true);
+        assert_eq!(
+            shells_ended(&mut read, &s, at(t2) + 1).0,
+            [("b5".to_string(), at(t2))]
+        );
+        // A shell with an end known, even one held back, isn't read past.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let filler = format!("{}\n", "z".repeat(SHELL_READ_SAVED as usize));
+        std::fs::write(&path, format!("{text}{filler}")).unwrap();
+        let s = on_shells(&path, &["b2"], 0, true);
+        assert_eq!(shells_ended(&mut read, &s, at(t2) + 1), (Vec::new(), None));
+        // Another conversation (cleared): read from its shells' mark there.
+        let other = dir.path().join("d.jsonl");
+        std::fs::write(&other, notice("b1", t1)).unwrap();
+        let s = on_shells(&other, &["b2"], 0, false);
+        assert_eq!(shells_ended(&mut read, &s, later), (Vec::new(), None));
+        // Read far past its shells' mark with no end: that's to be saved.
+        let long = format!("{}\n", "y".repeat(SHELL_READ_SAVED as usize));
+        std::fs::write(&other, &long).unwrap();
+        let s = on_shells(&other, &["b4"], 0, false);
+        let mut read = HashMap::new();
+        assert_eq!(
+            shells_ended(&mut read, &s, later),
+            (Vec::new(), Some(long.len() as u64))
+        );
     }
 }

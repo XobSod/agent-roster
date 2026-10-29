@@ -544,7 +544,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                     CardSubagents::Folded => "folded",
                     CardSubagents::Unfolded => "unfolded",
                 },
-                "a session's subagents at work on its card: how many, and a line each once unfolded (l), always, or how many only",
+                "a session's subagents and shells at work on its card: how many, and a line each once unfolded (l), always, or how many only",
             ),
             {
                 let quarter = crate::procs::total_memory()

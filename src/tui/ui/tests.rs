@@ -1073,6 +1073,64 @@ fn a_card_unfolds_to_show_its_subagents() {
 }
 
 #[test]
+fn a_card_on_its_shells_alone_is_working_and_unread() {
+    let mut app = app();
+    let now = crate::util::now_ms();
+    let mut sessions = app.sessions.clone();
+    let s = sessions.iter_mut().find(|s| s.id == "b1").unwrap();
+    s.title = Some("Speed up the build".into());
+    s.state_since = Some(now - 60_000);
+    s.unread = true;
+    s.awaiting = true;
+    let shell = crate::model::Shell {
+        what: Some("Run the full test suite".into()),
+        started: now - 180_000,
+        from: 0,
+    };
+    s.shells = [("b9".to_string(), shell)].into();
+    app.set_data(app.projects.clone(), sessions);
+    app.selected = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if !s.shells.is_empty()))
+        .unwrap();
+    let screen = render(&app, 120, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let card = (lines.iter())
+        .position(|l| l.contains("$1 › "))
+        .unwrap_or_else(|| panic!("{screen}"));
+    // On the Working shelf, marked unread beside its spinner, its shell
+    // counted; the header says what it's at.
+    let shelf = (lines[..card].iter())
+        .rev()
+        .find(|l| l.contains(" (1)"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(shelf.contains("Working"), "{screen}");
+    assert!(
+        lines[card - 1].contains("Speed up the build") && lines[card - 1].contains("● "),
+        "{screen}"
+    );
+    assert!(screen.contains("working 1m, 1 shell"), "{screen}");
+    // Unfolded: what it does, how long it's been running; still so once
+    // what's at work is read again, as after every key.
+    app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    crate::tui::transcripts::read_subagents(&mut app);
+    let screen = render(&app, 120, 24);
+    let line = (screen.lines())
+        .find(|l| l.contains("$ Run the full test suite"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(line.contains(" 3m"), "{screen}");
+    // Read, it's working only.
+    let mut sessions = app.sessions.clone();
+    sessions.iter_mut().find(|s| s.id == "b1").unwrap().unread = false;
+    app.set_data(app.projects.clone(), sessions);
+    let screen = render(&app, 120, 24);
+    let lines: Vec<&str> = screen.lines().collect();
+    let card = (lines.iter())
+        .position(|l| l.contains("$1 ⌄ "))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(!lines[card - 1].contains("● "), "{screen}");
+}
+
+#[test]
 fn only_a_card_with_subagents_at_work_folds_and_unfolds() {
     use crate::config::CardSubagents;
     let mut app = app();

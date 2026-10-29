@@ -446,6 +446,7 @@ pub fn list_sessions(r: &Roster, query: &str, options: &ListOptions) -> Result<(
                     "title_override": s.title_override, "created_at": s.created_at,
                     "turns": s.turns, "worked_ms": s.worked(util::now_ms()),
                     "subagents": s.subagents_running(util::now_ms()),
+                    "shells": s.shells.len(),
                     "note": s.note.as_ref().map(|n| &n.text),
                     "note_pin": s.note.as_ref().and_then(|n| n.pin),
                 });
@@ -626,6 +627,15 @@ pub fn summarize(agent: &str, payload: Option<&str>) -> String {
     }
     if let Some(agent) = &report.subagent {
         parts.push(format!("subagent={}", agent.get(..8).unwrap_or(agent)));
+    }
+    if let Some(shell) = &report.shell {
+        parts.push(format!("shell={}", shell.id));
+    }
+    if !report.shells_ended.is_empty() {
+        parts.push(format!("shells-ended={}", report.shells_ended.join(",")));
+    }
+    if report.woken {
+        parts.push("woken".into());
     }
     for (key, value) in [("model", &report.model), ("effort", &report.effort)] {
         if let Some(value) = value {

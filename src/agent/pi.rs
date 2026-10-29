@@ -300,6 +300,9 @@ mod tests {
                 effort: Some("medium".into()),
                 title: Some(None),
                 context_window: Some(1_000_000),
+                shell: None,
+                shells_ended: Vec::new(),
+                woken: false,
             }
         );
         assert_eq!(read_report(PI, Some("[1, 2]")), Report::default());

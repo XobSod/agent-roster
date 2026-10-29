@@ -78,7 +78,8 @@ pub(super) fn details(s: &Session, name_marks: &[usize], style: Style) -> Vec<Sp
 }
 
 /// The state at the right of a card: a word, a spinner with a clock, or an
-/// age; a stopped one's with how long ago it stopped.
+/// age; a stopped one's with how long ago it stopped. Working unread (its
+/// turn over, on what it left running), with the unread mark.
 pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
     let since = now - s.state_since.unwrap_or(s.created_at);
     let span = match (s.state, s.unread) {
@@ -104,24 +105,33 @@ pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
             ),
         },
     };
-    vec![span]
+    match (s.state, s.unread) {
+        (State::Working, true) => vec![Span::styled("● ", Style::new().fg(UNREAD)), span],
+        _ => vec![span],
+    }
 }
 
-/// How many subagents a session has at work, for its card: with whether
-/// their lines show (`unfolded`), where they can be unfolded.
-pub(super) fn subagents_mark(s: &Session, now: i64, unfolded: Option<bool>) -> Vec<Span<'static>> {
+/// What a session has at work beside its own turn, for its card: how many
+/// subagents (`↳`) and shells (`$`), with whether their lines show
+/// (`unfolded`), where they can be unfolded.
+pub(super) fn at_work_mark(s: &Session, now: i64, unfolded: Option<bool>) -> Vec<Span<'static>> {
     let chevron = match unfolded {
         Some(true) => " ⌄",
         Some(false) => " ›",
         None => "",
     };
-    match s.subagents_running(now) {
-        0 => Vec::new(),
-        n => vec![Span::styled(
-            format!("↳{n}{chevron} "),
-            Style::new().fg(WORKING),
-        )],
+    let counts: Vec<String> = [("↳", s.subagents_running(now)), ("$", s.shells.len())]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(mark, n)| format!("{mark}{n}"))
+        .collect();
+    if counts.is_empty() {
+        return Vec::new();
     }
+    vec![Span::styled(
+        format!("{}{chevron} ", counts.join(" ")),
+        Style::new().fg(WORKING),
+    )]
 }
 
 /// The state in words, for the header.
@@ -130,11 +140,17 @@ pub(super) fn state_words(s: &Session, now: i64) -> Span<'static> {
     match (s.state, s.unread) {
         (State::NeedsInput, _) => Span::styled("needs input", Style::new().fg(INPUT)),
         (State::Working, _) => {
-            let words = match s.subagents_running(now) {
-                0 => format!("working {}", theme::clock(since)),
-                1 => format!("working {}, 1 subagent", theme::clock(since)),
-                n => format!("working {}, {n} subagents", theme::clock(since)),
-            };
+            let mut words = format!("working {}", theme::clock(since));
+            for (n, what) in [
+                (s.subagents_running(now), "subagent"),
+                (s.shells.len(), "shell"),
+            ] {
+                match n {
+                    0 => {}
+                    1 => words += &format!(", 1 {what}"),
+                    n => words += &format!(", {n} {what}s"),
+                }
+            }
             Span::styled(words, Style::new().fg(WORKING))
         }
         (State::Idle, true) => Span::styled(

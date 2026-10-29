@@ -3,6 +3,7 @@
 
 pub mod conversations;
 mod limits;
+mod shells;
 mod subagents;
 mod tokens;
 mod transcript;
@@ -154,7 +155,7 @@ impl Adapter for Claude {
 
     /// A hook's payload (`super::hook_report`): SessionStart names the
     /// model, Stop the effort too (a subagent's is its own, not the
-    /// session's).
+    /// session's); and its shells (`shells::read`).
     fn report(&self, payload: &Value) -> Report {
         let report = super::hook_report(payload);
         let effort = payload
@@ -162,7 +163,9 @@ impl Adapter for Claude {
             .and_then(Value::as_str)
             .map(String::from)
             .filter(|_| report.subagent.is_none());
-        Report { effort, ..report }
+        let mut report = Report { effort, ..report };
+        shells::read(payload, &mut report);
+        report
     }
 
     fn says_subagents_start(&self) -> bool {
@@ -207,6 +210,10 @@ impl Adapter for Claude {
 
     fn subagent_finished(&self, transcript: &Path, id: &str, heard: i64) -> bool {
         subagents::finished(transcript, id, heard)
+    }
+
+    fn shells_ended(&self, transcript: &Path, from: u64) -> Option<(super::ShellEnds, u64)> {
+        shells::ended(transcript, from)
     }
 
     fn subagent_doing(&self, file: &Path) -> Option<String> {

@@ -19,9 +19,16 @@ const MAX_PAYLOAD: u64 = 1 << 20;
 
 /// A payload can carry what roster never reads: Claude's after a tool has the
 /// tool's input and output, whole files and command output among them (22
-/// MB of a day's events). Top-level values longer than this
-/// aren't stored.
+/// MB of a day's events). Top-level values longer than this aren't stored,
+/// but for their plain members no longer than `MAX_MEMBER` (a long
+/// command's description, a long output's background task).
 const MAX_VALUE: usize = 4096;
+const MAX_MEMBER: usize = 256;
+
+/// What roster adds to a payload that names the agent's transcript: how
+/// long it was as the agent reported (bytes), so what the agent writes after
+/// is told from what it wrote before.
+pub const TRANSCRIPT_SIZE: &str = "roster_transcript_size";
 
 pub fn run(args: &[String]) -> ! {
     std::panic::set_hook(Box::new(|_| {}));
@@ -53,25 +60,41 @@ fn report(args: &[String]) -> Result<()> {
     // (eight subagents starting at once, say) is a state wrong
     // till the agent's next; the agent waits only while roster writes.
     conn.busy_timeout(Duration::from_secs(5))?;
-    let payload = trimmed(payload);
+    let payload = stored(payload);
     let payload = (!payload.is_empty()).then_some(payload.as_str());
     crate::db::insert_event(&conn, &session, kind, now_ms(), payload)
 }
 
-/// The payload without its long top-level values; as it is if it isn't a
-/// JSON object.
-fn trimmed(payload: &str) -> String {
-    let Ok(mut object) =
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(payload)
-    else {
+/// The payload as it's stored: without its long top-level values, but for
+/// their short plain members, and with its transcript's size; as it is if it
+/// isn't a JSON object.
+fn stored(payload: &str) -> String {
+    use serde_json::Value;
+    let Ok(mut object) = serde_json::from_str::<serde_json::Map<String, Value>>(payload) else {
         return payload.to_string();
     };
-    let before = object.len();
-    object.retain(|_, v| v.to_string().len() <= MAX_VALUE);
-    if object.len() == before {
+    let mut changed = false;
+    object.retain(|_, v| {
+        if v.to_string().len() <= MAX_VALUE {
+            return true;
+        }
+        changed = true;
+        let Value::Object(members) = v else {
+            return false;
+        };
+        members
+            .retain(|_, m| !(m.is_object() || m.is_array()) && m.to_string().len() <= MAX_MEMBER);
+        !members.is_empty()
+    });
+    let size = (object.get("transcript_path").and_then(Value::as_str))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|m| m.len());
+    if let Some(size) = size {
+        object.insert(TRANSCRIPT_SIZE.into(), size.into());
+    } else if !changed {
         return payload.to_string();
     }
-    serde_json::Value::Object(object).to_string()
+    Value::Object(object).to_string()
 }
 
 #[cfg(test)]
@@ -79,18 +102,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_values_are_left_out() {
+    fn long_values_are_left_out_but_for_their_short_members() {
         let output = "x".repeat(MAX_VALUE * 2);
+        let edit = "y".repeat(MAX_MEMBER * 2);
         let payload = format!(
-            r#"{{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_response":{{"stdout":"{output}"}}}}"#
+            r#"{{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":"{output}","tool_response":{{"stdout":"{output}","oldString":"{edit}","structuredPatch":[1],"backgroundTaskId":"b1","interrupted":false}}}}"#
         );
-        let stored: serde_json::Value = serde_json::from_str(&trimmed(&payload)).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&stored(&payload)).unwrap();
         assert_eq!(
-            stored,
-            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"})
+            kept,
+            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_response": {"backgroundTaskId": "b1", "interrupted": false}})
         );
         let short = r#"{"session_id":"c-1",  "model":"claude-opus-5-5"}"#;
-        assert_eq!(trimmed(short), short);
-        assert_eq!(trimmed("not json"), "not json");
+        assert_eq!(stored(short), short);
+        assert_eq!(stored("not json"), "not json");
+    }
+
+    #[test]
+    fn a_payload_naming_its_transcript_gets_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonl");
+        std::fs::write(&path, "0123456789").unwrap();
+        let payload = serde_json::json!({"transcript_path": path}).to_string();
+        let kept: serde_json::Value = serde_json::from_str(&stored(&payload)).unwrap();
+        assert_eq!(kept[TRANSCRIPT_SIZE], 10);
+        // Not there (yet): nothing said.
+        let gone = serde_json::json!({"transcript_path": dir.path().join("none")}).to_string();
+        assert_eq!(stored(&gone), gone);
     }
 }

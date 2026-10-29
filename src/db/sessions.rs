@@ -1,4 +1,4 @@
-//! Sessions: their rows, saved column by column, first prompts claimed once, subagents settled.
+//! Sessions: their rows, saved column by column, first prompts claimed once, subagents and shells settled.
 
 use super::*;
 
@@ -7,7 +7,7 @@ pub(super) const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting_subagents,
+    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting, s.shells,
     s.note, s.note_pin, s.note_at";
 
 impl Db {
@@ -136,16 +136,21 @@ impl Db {
             asked_by,
             given_prompt,
             subagents,
-            awaiting_subagents,
+            shells,
+            awaiting,
         } = after;
         let state_name = state.as_str();
         let subagents_text = subagents_text(subagents);
+        let shells_text = shells_text(shells);
         let mut set: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
         if before.state != *state {
             set.push(("state", &state_name));
         }
         if before.subagents != *subagents {
             set.push(("subagents", &subagents_text));
+        }
+        if before.shells != *shells {
+            set.push(("shells", &shells_text));
         }
         macro_rules! changed {
             ($($field:ident),*) => {$(
@@ -178,7 +183,7 @@ impl Db {
             fork_from,
             asked_by,
             given_prompt,
-            awaiting_subagents
+            awaiting
         );
         if set.is_empty() {
             return Ok(());
@@ -274,7 +279,7 @@ impl Db {
         let waiting = |conn: &Connection| -> Result<Vec<Session>> {
             let sql = format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
-                 WHERE s.deleted_at IS NULL AND (s.subagents IS NOT NULL OR s.awaiting_subagents)"
+                 WHERE s.deleted_at IS NULL AND (s.subagents IS NOT NULL OR s.awaiting)"
             );
             let mut stmt = conn.prepare_cached(&sql)?;
             let rows = stmt.query_map([], session_from_row)?;
@@ -303,6 +308,50 @@ impl Db {
             }
             s.forget_quiet_subagents(now);
             if s != before {
+                save_session(&tx, &s)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ends the shells sessions' agents left running that `ended` says have
+    /// ended, each by when (`Session::shells_ended`): those whose end no hook
+    /// said, told to the agent mid-turn; and saves how far `ended` says each
+    /// session's transcript was read with none of their ends in it
+    /// (`Session::shells_read_to`). Each read again under the write lock, as
+    /// `settle_subagents` does.
+    pub fn settle_shells(&mut self, ended: &mut dyn FnMut(&Session) -> ShellsFound) -> Result<()> {
+        let running = |conn: &Connection| -> Result<Vec<Session>> {
+            let sql = format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.deleted_at IS NULL AND s.shells IS NOT NULL"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map([], session_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let mut found = HashMap::new();
+        for s in running(&self.conn)? {
+            let (ids, read) = ended(&s);
+            if !ids.is_empty() || read.is_some() {
+                let read = read.map(|upto| (upto, s.shells.keys().cloned().collect::<Vec<_>>()));
+                found.insert(s.id.clone(), (ids, read));
+            }
+        }
+        if found.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for mut s in running(&tx)? {
+            let Some((ids, read)) = found.get(&s.id) else {
+                continue;
+            };
+            let ended = s.shells_ended(ids);
+            let further = (read.as_ref()).is_some_and(|(upto, read)| s.shells_read_to(*upto, read));
+            if ended || further {
                 save_session(&tx, &s)?;
             }
         }
@@ -358,7 +407,8 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              asked_by = :asked_by,
              given_prompt = :given_prompt,
              subagents = :subagents,
-             awaiting_subagents = :awaiting_subagents
+             shells = :shells,
+             awaiting = :awaiting
          WHERE id = :id",
         named_params! {
             ":id": s.id,
@@ -387,7 +437,8 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":asked_by": s.asked_by,
             ":given_prompt": s.given_prompt,
             ":subagents": subagents_text(&s.subagents),
-            ":awaiting_subagents": s.awaiting_subagents,
+            ":shells": shells_text(&s.shells),
+            ":awaiting": s.awaiting,
         },
     )
     .map_err(|e| {
@@ -437,9 +488,24 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         subagents: (r.get::<_, Option<String>>("subagents")?)
             .map(|text| subagents_from(&text))
             .unwrap_or_default(),
-        awaiting_subagents: r.get("awaiting_subagents")?,
+        shells: (r.get::<_, Option<String>>("shells")?)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default(),
+        awaiting: r.get("awaiting")?,
         note: note_from_row(r)?,
     })
+}
+
+/// What's found of a session's shells in its agent's transcript
+/// (`Db::settle_shells`): those ended, each by when, and how far it was read
+/// with none of their ends in it, if that's to be kept.
+pub type ShellsFound = (Vec<(String, i64)>, Option<u64>);
+
+/// A session's shells as kept: JSON, by id; nothing for none.
+pub(super) fn shells_text(
+    shells: &std::collections::BTreeMap<String, crate::model::Shell>,
+) -> Option<String> {
+    (!shells.is_empty()).then(|| serde_json::to_string(shells).unwrap_or_default())
 }
 
 /// A session's subagents as kept: JSON, by id; nothing for none.

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 13;
+pub(super) const SCHEMA_VERSION: i64 = 14;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -52,7 +52,8 @@ CREATE TABLE sessions (
     asked_by          TEXT,
     given_prompt      TEXT,
     subagents         TEXT,
-    awaiting_subagents INTEGER NOT NULL DEFAULT 0
+    awaiting          INTEGER NOT NULL DEFAULT 0,
+    shells            TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -191,6 +192,13 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
         13,
         Sql("ALTER TABLE sessions ADD COLUMN subagents TEXT;
          ALTER TABLE sessions ADD COLUMN awaiting_subagents INTEGER NOT NULL DEFAULT 0;"),
+    ),
+    (
+        14,
+        Sql(
+            "ALTER TABLE sessions RENAME COLUMN awaiting_subagents TO awaiting;
+         ALTER TABLE sessions ADD COLUMN shells TEXT;",
+        ),
     ),
 ];
 

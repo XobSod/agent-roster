@@ -213,6 +213,14 @@ pub trait Adapter: Sync {
         None
     }
 
+    /// The commands it left running in the background whose end its
+    /// transcript at `transcript` records from byte `from` on, and how far
+    /// that was read: to the end of its last whole line. None if it can't
+    /// tell.
+    fn shells_ended(&self, _transcript: &Path, _from: u64) -> Option<(ShellEnds, u64)> {
+        None
+    }
+
     /// Trusts the folder `dir` in the agent's own config, as answering its
     /// question there would (`trust_project_folders`), unless it trusts it
     /// already: whether it wrote that. Its config is found from the
@@ -428,6 +436,44 @@ pub struct Report {
     pub title: Option<Option<String>>,
     /// The context window of the model it's running, in tokens.
     pub context_window: Option<u64>,
+    /// A command it just left running in the background (Claude's shells).
+    pub shell: Option<Backgrounded>,
+    /// Commands it left running that it says have ended, by its id for each.
+    pub shells_ended: Vec<String>,
+    /// A prompt it was given by itself: told that something it left running
+    /// ended, not by you.
+    pub woken: bool,
+}
+
+/// Ends of commands an agent left running, as its transcript records them
+/// (`Adapter::shells_ended`).
+pub type ShellEnds = Vec<ShellEnd>;
+
+/// The end of a command an agent left running, as its transcript records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellEnd {
+    /// The agent's id for the command.
+    pub id: String,
+    /// When it was written (ms), if it says.
+    pub at: Option<i64>,
+    /// Told to the agent mid-turn, not only queued for it nor given as the
+    /// prompt of a turn of its own (which reports it): no hook will report
+    /// it.
+    pub told: bool,
+}
+
+/// A command an agent left running in the background (`Report::shell`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Backgrounded {
+    /// The agent's id for it.
+    pub id: String,
+    /// What it does, as the agent put it.
+    pub what: Option<String>,
+    /// How long it had run before it was left running (ms).
+    pub ran: i64,
+    /// How long the agent's transcript was as it was reported (bytes).
+    pub from: u64,
 }
 
 /// A field that's there, even as null (missing ones get the default, None).
@@ -643,19 +689,38 @@ pub fn archive_question(s: &Session) -> String {
 }
 
 /// What deleting `s` for good asks: what stops, if it runs (a working one's
-/// turn, and its subagents, are cut short), and what goes and what stays.
-/// An archived one is stopped.
+/// turn, its subagents and the commands it left running are cut short), and
+/// what goes and what stays. An archived one is stopped.
 pub fn delete_question(s: &Session) -> String {
     let stops = if s.state == State::Stopped {
         String::new()
     } else {
-        let busy = match (s.state == State::Working, s.subagents.len()) {
-            (true, 0) => " (it's working)".to_string(),
-            (true, 1) => " (it's working, with a subagent)".to_string(),
-            (true, n) => format!(" (it's working, with {n} subagents)"),
-            (false, 0) => String::new(),
-            (false, 1) => " (a subagent of it is working)".to_string(),
-            (false, n) => format!(" ({n} subagents of it are working)"),
+        let count = |n: usize, one: &str, many: &str| match n {
+            0 => None,
+            1 => Some(one.to_string()),
+            n => Some(format!("{n} {many}")),
+        };
+        let at_work: Vec<String> = [
+            count(s.subagents.len(), "a subagent", "subagents"),
+            count(
+                s.shells.len(),
+                "a command it left running",
+                "commands it left running",
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let at_work = at_work.join(" and ");
+        let busy = match (s.state == State::Working, at_work.is_empty()) {
+            (true, true) => " (it's working)".to_string(),
+            (true, false) => format!(" (it's working, with {at_work})"),
+            (false, true) => String::new(),
+            (false, false) if s.shells.is_empty() => match s.subagents.len() {
+                1 => " (a subagent of it is working)".to_string(),
+                n => format!(" ({n} subagents of it are working)"),
+            },
+            (false, false) => format!(" (with {at_work})"),
         };
         format!("Its agent stops{busy}, and ")
     };

@@ -63,12 +63,12 @@ pub(super) fn group_prompts(app: &mut App, group: Group, rows: u16) -> HashMap<S
 /// What's read of the subagents cards show a line for: their tasks and
 /// models, each read once it's all there (`SubagentInfo::settled`), or for
 /// a while after it started; and what each is doing, each time. What no
-/// card shows any more is let go, and a card whose session has none at work
-/// any more folds.
+/// card shows any more is let go, and a card whose session has no subagent
+/// or shell at work any more folds.
 pub(super) fn read_subagents(app: &mut App) {
     let now = crate::util::now_ms();
     let busy: HashSet<String> = (app.sessions.iter())
-        .filter(|s| s.subagents_running(now) > 0)
+        .filter(|s| s.at_work(now) > 0)
         .map(|s| s.id.clone())
         .collect();
     app.unfolded.retain(|id| busy.contains(id));
@@ -78,7 +78,7 @@ pub(super) fn read_subagents(app: &mut App) {
     for s in app
         .sessions
         .iter()
-        .filter(|s| listed && app.subagents_shown(s, now))
+        .filter(|s| listed && app.at_work_shown(s, now))
     {
         let Some(path) = s.transcript_path.as_deref() else {
             continue;

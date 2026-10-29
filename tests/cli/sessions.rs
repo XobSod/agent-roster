@@ -99,6 +99,69 @@ fn session_lifecycle() {
     assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
     t.ok(&["read", "one"]);
 
+    // A turn that ends with a command left running in the background:
+    // working on, but unread, as it may be waiting for you too.
+    fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let left = |task: &str| {
+        json!({"session_id": "conv-1", "transcript_path": transcript,
+            "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "make", "description": "Build it", "run_in_background": true},
+            "tool_response": {"stdout": "", "backgroundTaskId": task}})
+        .to_string()
+    };
+    let shells = |t: &TestEnv| {
+        let s = t.session("one", false).unwrap();
+        (s["state"].clone(), s["unread"].clone(), s["shells"].clone())
+    };
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "working", &left("t1"));
+    t.report(&id, "idle", &payload);
+    assert_eq!(shells(&t), (json!("working"), json!(true), json!(1)));
+    t.ok(&["read", "one"]);
+    assert_eq!(shells(&t), (json!("working"), json!(false), json!(1)));
+    let notice = |task: &str| {
+        format!(
+            "<task-notification>\n<task-id>{task}</task-id>\n<status>completed</status>\n</task-notification>"
+        )
+    };
+    let append = |task: &str, at: Option<&str>| {
+        let mut enqueued =
+            json!({"type": "queue-operation", "operation": "enqueue", "content": notice(task)});
+        if let Some(at) = at {
+            enqueued["timestamp"] = json!(at);
+        }
+        let mut text = fs::read_to_string(&transcript).unwrap();
+        text.push_str(&format!("{enqueued}\n"));
+        fs::write(&transcript, text).unwrap();
+    };
+    // Its end told while it waited, with no turn reported on it (that
+    // report lost): taken from its transcript, which only says it.
+    append("t1", Some("2000-01-01T00:00:00Z"));
+    assert_eq!(shells(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "one"]);
+    // Ended mid-turn: no hook says, its transcript does; its turn's end is
+    // the end.
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "working", &left("t3"));
+    append("t3", None);
+    assert_eq!(shells(&t), (json!("working"), json!(false), json!(0)));
+    t.report(&id, "idle", &payload);
+    assert_eq!(shells(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "one"]);
+    // Told it ended as a prompt of its own: it goes on by itself, nothing
+    // to read till that turn ends.
+    t.report(&id, "prompt", &payload);
+    t.report(&id, "working", &left("t2"));
+    t.report(&id, "idle", &payload);
+    assert_eq!(shells(&t), (json!("working"), json!(true), json!(1)));
+    let woken = json!({"session_id": "conv-1", "transcript_path": transcript,
+        "hook_event_name": "UserPromptSubmit", "prompt": notice("t2")});
+    t.report(&id, "prompt", &woken.to_string());
+    assert_eq!(shells(&t), (json!("working"), json!(false), json!(0)));
+    t.report(&id, "idle", &payload);
+    assert_eq!(shells(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "one"]);
+
     // Stop keeps the session; start resumes the conversation once its transcript exists.
     fs::write(&transcript, "{}").unwrap();
     assert!(t.ok(&["stop", "one"]).starts_with("Stopped"));

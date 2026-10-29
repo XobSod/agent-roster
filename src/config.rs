@@ -21,8 +21,8 @@
 //!                                 # question would (written in their configs)
 //! group_by = "project"            # "attention" (default): the list on shelves, by what
 //!                                 # waits for you; "project": under each project
-//! card_subagents = "unfolded"     # a session's subagents at work, on its card:
-//!                                 # "folded" (default): how many, and a line each
+//! card_subagents = "unfolded"     # a session's subagents and shells at work, on its
+//!                                 # card: "folded" (default): how many, and a line each
 //!                                 # once unfolded (l); "unfolded": the lines always;
 //!                                 # "count": how many only
 //! memory_warning = "8G"           # a session whose processes use more is marked
@@ -113,8 +113,8 @@ pub struct Config {
     pub notes: Notes,
     /// How the session list is grouped (default: by attention, on shelves).
     pub group_by: Option<GroupBy>,
-    /// What a card says of its session's subagents at work (default: their
-    /// count, and a line each once unfolded).
+    /// What a card says of its session's subagents and shells at work
+    /// (default: their count, and a line each once unfolded).
     pub card_subagents: Option<CardSubagents>,
     /// Above how much memory a session's processes are said to use too much
     /// (default: a quarter of the machine's).
@@ -200,8 +200,9 @@ impl TryFrom<String> for MemoryWarning {
     }
 }
 
-/// What a card says of its session's subagents at work: their count only;
-/// that, and a line each when unfolded (`l`); or the lines always.
+/// What a card says of its session's subagents and shells at work: their
+/// count only; that, and a line each when unfolded (`l`); or the lines
+/// always.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CardSubagents {

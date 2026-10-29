@@ -2,7 +2,9 @@
 
 use super::*;
 
-pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
+/// `summary`: its top line, roster's name and what needs you, else shown
+/// elsewhere (the status line, attached).
+pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64, summary: bool) {
     let width = area.width as usize;
     // At the bottom, what the agents' accounts have used, once known.
     let usage = app
@@ -14,7 +16,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
         .filter(|s| app.over_memory(s).is_some())
         .count();
     let [top, warning, sub, list, bottom] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(u16::from(summary)),
         Constraint::Length(u16::from(over > 0)),
         Constraint::Length(1),
         Constraint::Min(0),
@@ -35,42 +37,10 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64) {
         f.render_widget(Paragraph::new(usage), bottom);
     }
 
-    let live: Vec<&Session> = app
-        .sessions
-        .iter()
-        .filter(|s| s.deleted_at.is_none())
-        .collect();
-    let needs = live
-        .iter()
-        .filter(|s| s.state == State::NeedsInput || (s.state == State::Idle && s.unread))
-        .count();
-    let working = live.iter().filter(|s| s.state == State::Working).count();
-    let mut summary = Vec::new();
-    if needs > 0 {
-        let verb = if needs == 1 { "needs" } else { "need" };
-        summary.push(Span::styled(
-            format!("{needs} {verb} input"),
-            Style::new().fg(UNREAD),
-        ));
+    if summary {
+        let line = summary_line(&app.sessions, width);
+        f.render_widget(Paragraph::new(Line::from(line)), top);
     }
-    if working > 0 {
-        if !summary.is_empty() {
-            summary.push(Span::styled(" · ", Style::new().fg(FAINT)));
-        }
-        summary.push(Span::styled(
-            format!("{working} working"),
-            Style::new().fg(WORKING),
-        ));
-    }
-    summary.push(Span::raw(" "));
-    f.render_widget(
-        Paragraph::new(Line::from(fit(
-            width,
-            vec![Span::raw(" "), "roster".bold()],
-            summary,
-        ))),
-        top,
-    );
 
     // The filters: by project and by text, and how many match.
     let mut filters = Vec::new();
@@ -463,4 +433,34 @@ fn note_mark(s: &Session) -> Vec<Span<'static>> {
 
 fn project_noted(app: &App, s: &Session) -> bool {
     app.project(s.project_id).is_some_and(|p| p.note.is_some())
+}
+
+/// The list's top line, `width` wide: roster's name, and how many sessions
+/// need input and work.
+pub(super) fn summary_line(sessions: &[Session], width: usize) -> Vec<Span<'static>> {
+    let live: Vec<&Session> = sessions.iter().filter(|s| s.deleted_at.is_none()).collect();
+    let needs = live
+        .iter()
+        .filter(|s| s.state == State::NeedsInput || (s.state == State::Idle && s.unread))
+        .count();
+    let working = live.iter().filter(|s| s.state == State::Working).count();
+    let mut summary = Vec::new();
+    if needs > 0 {
+        let verb = if needs == 1 { "needs" } else { "need" };
+        summary.push(Span::styled(
+            format!("{needs} {verb} input"),
+            Style::new().fg(UNREAD),
+        ));
+    }
+    if working > 0 {
+        if !summary.is_empty() {
+            summary.push(Span::styled(" · ", Style::new().fg(FAINT)));
+        }
+        summary.push(Span::styled(
+            format!("{working} working"),
+            Style::new().fg(WORKING),
+        ));
+    }
+    summary.push(Span::raw(" "));
+    fit(width, vec![Span::raw(" "), "roster".bold()], summary)
 }

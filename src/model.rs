@@ -560,9 +560,12 @@ impl Session {
     }
 
     /// The screen changed because roster resized the window: the agent's redraw
-    /// becomes what later screens are compared with, not activity.
-    pub fn redrawn(&mut self, hash: &str) {
+    /// becomes what later screens are compared with, not activity; the first
+    /// screen seen, as `observe_generic` takes one, still for as long as it's
+    /// been seen.
+    pub fn redrawn(&mut self, hash: &str, now: i64) {
         self.screen_hash = Some(hash.to_string());
+        self.screen_changed_at.get_or_insert(now);
     }
 
     /// True if the session claims to be working but no hook has reported anything
@@ -675,6 +678,13 @@ impl Session {
                 self.unread = true;
             }
         }
+    }
+
+    /// Watched as it goes (attached): what it does counts as seen, its
+    /// screen still telling what it's doing.
+    pub fn seen_as_it_goes(&mut self, now: i64) {
+        self.unread = false;
+        self.baseline_at = Some(self.baseline_at.map_or(now, |b| b.max(now)));
     }
 
     /// The user has just seen the session (detached from it, or marked it read):
@@ -1273,6 +1283,16 @@ pub mod tests {
         s.observe_generic("banner+prompt", 2000, 1000);
         assert_eq!(s.state, State::Working);
         s.observe_generic("banner+prompt", 3500, 1000);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+    }
+
+    #[test]
+    fn generic_startup_redrawn_for_a_new_size_ends_idle() {
+        // Its first screens seen only as redraws (resized as it started).
+        let mut s = generic(0);
+        s.redrawn("banner", 1000);
+        s.redrawn("banner+prompt", 1500);
+        s.observe_generic("banner+prompt", 2500, 1000);
         assert_eq!((s.state, s.unread), (State::Idle, false));
     }
 

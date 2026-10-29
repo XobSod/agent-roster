@@ -2,14 +2,14 @@
 //! tells it (`Adapter::usage`): each window (five hours, a week), how much of
 //! it is used, and when it starts over.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::util::{local_when, until};
 
 /// What's said where the accounts would be asked, but `account_limits` is off.
 pub const OFF: &str = "Roster doesn't ask your accounts: account_limits is off (`roster config set account_limits true`, or in the settings view)";
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     /// The account's plan, as the agent names it (pro, plus).
     pub plan: Option<String>,
@@ -22,7 +22,7 @@ pub struct Usage {
     pub at: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub minutes: u64,
     /// How much of it is used, in percent: at 100, the agent is stopped

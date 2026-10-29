@@ -118,6 +118,49 @@ pub fn processes(
     Ok(all)
 }
 
+/// Who the process `pid` (of this process's pid namespace) is, as `alive`
+/// reads it back: its pid and start, so another process given the pid later
+/// isn't taken for it, and the namespace.
+pub fn identity(pid: u32) -> Option<String> {
+    let start = started(pid.try_into().ok()?)?;
+    Some(format!(
+        "{pid}:{start}:{}",
+        pid_namespace().unwrap_or_default()
+    ))
+}
+
+/// Whether the process an `identity` names still runs; seen from another pid
+/// namespace (a sandbox's), where its pid isn't its own, taken for running.
+pub fn alive(identity: &str) -> bool {
+    let [pid, start, namespace] = identity.split(':').collect::<Vec<_>>()[..] else {
+        return false;
+    };
+    if namespace != pid_namespace().unwrap_or_default() {
+        return true;
+    }
+    pid.parse()
+        .ok()
+        .and_then(started)
+        .is_some_and(|at| start.parse() == Ok(at))
+}
+
+fn pid_namespace() -> Option<String> {
+    let link = fs::read_link("/proc/self/ns/pid").ok()?;
+    let inode = link.to_str()?.strip_prefix("pid:[")?.strip_suffix(']')?;
+    Some(inode.to_string())
+}
+
+/// When the process `pid` started, while it runs: not once it's ended,
+/// waiting to be reaped.
+fn started(pid: i32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state = stat[stat.rfind(')')? + 1..].split_whitespace().next()?;
+    if matches!(state, "Z" | "X") {
+        return None;
+    }
+    Some(parse_stat(pid, &stat, 1, 1)?.started)
+}
+
 /// `root` and every process under it.
 fn descendants(all: &[Process], root: i32) -> Vec<i32> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -409,6 +452,37 @@ mod tests {
             session: None,
             agent: false,
         }
+    }
+
+    #[test]
+    fn a_process_is_known_by_its_pid_start_and_namespace() {
+        let me = identity(std::process::id()).unwrap();
+        assert!(alive(&me));
+        // Its pid given to another, started later; none at all.
+        let [pid, start, namespace] = me.split(':').collect::<Vec<_>>()[..] else {
+            panic!("{me}");
+        };
+        let later = start.parse::<u64>().unwrap() + 1;
+        assert!(!alive(&format!("{pid}:{later}:{namespace}")));
+        assert!(!alive("1"));
+        assert!(!alive(""));
+        // Of another pid namespace: not to be told from here.
+        assert!(alive(&format!("{pid}:{later}:1")));
+        // Ended, not reaped yet: not running.
+        let mut child = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let its = identity(child.id()).unwrap();
+        assert!(alive(&its));
+        // Its input ended, it ends.
+        drop(child.stdin.take());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(&its) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!alive(&its));
+        child.wait().unwrap();
     }
 
     #[test]

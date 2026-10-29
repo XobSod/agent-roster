@@ -24,10 +24,16 @@ case " $* " in *" --input-format stream-json "*)
 esac
 if [ -e .fullscreen ]; then
   printf '\033[?1049h'
-  draw() { printf '\033[2J\033[Hfull screen %s\n' "$(stty size)"; }
+  draw() {
+    size=$(stty size)
+    printf '\033[2J\033[Hfull screen %s\n' "$size"
+    echo "$size" >> .sizes
+  }
   trap draw WINCH
   draw
-  while :; do sleep 0.1; done
+  # A trapped signal ends a wait at once, so each size is read as soon as
+  # it's told, one told for a moment too.
+  while :; do sleep 1 & wait $!; done
 fi
 echo "fake agent: $*"
 echo "TOKEN=${TOKEN-unset} GLOBAL=${GLOBAL-unset} SESSION=${ROSTER_SESSION-unset}"

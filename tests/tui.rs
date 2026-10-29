@@ -230,6 +230,131 @@ fn agents_drawing_full_screen_fit_the_preview() {
 }
 
 #[test]
+fn an_agent_attached_beside_the_list_is_seen_as_it_goes() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("listsees") else {
+        return;
+    };
+    let agent = t.path("generic-agent");
+    std::fs::write(&agent, include_str!("fakes/generic.sh")).unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = t.config_dir().join("config.toml");
+    let text = format!(
+        "fit_preview = \"always\"\n{}[agents.echo]\ncommand = \"{}\"\nidle_after = 2\n",
+        std::fs::read_to_string(&config).unwrap(),
+        agent.display()
+    );
+    std::fs::write(&config, text).unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--agent", "echo", "--name", "g"]);
+    t.wait_for("g idle", |t| {
+        t.session("g", false).unwrap()["state"] == "idle"
+    });
+    let target = format!(
+        "=r-{}:",
+        t.session("g", false).unwrap()["id"].as_str().unwrap()
+    );
+    let panes = || {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket, "list-panes", "-t", &target])
+            .args(["-F", "#{pane_width}"])
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let turns = t.session("g", false).unwrap()["turns"].as_i64().unwrap();
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("g selected", "demo / g ");
+    t.wait_for("g fitted", |_| panes() == "82");
+    term.keys(&["Enter"]);
+    t.wait_for("the list beside g", |_| panes() == "37\n82");
+    // Past the startup's grace, a turn while you're in it, told by the list
+    // beside it (nothing else looking meanwhile): working, then idle once
+    // its screen is still, and nothing to read.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    term.keys(&["hi", "Enter"]);
+    term.wait_for("g working, in the list", "Working (1)");
+    term.wait_for("g idle again, in the list", "Idle (1)");
+    let s = t.session("g", false).unwrap();
+    assert_eq!((&s["state"], &s["unread"]), (&"idle".into(), &false.into()));
+    assert_eq!(s["turns"].as_i64().unwrap(), turns + 1);
+    term.keys(&["C-q"]);
+    term.wait_for("the list again", "Enter attach");
+}
+
+#[test]
+fn the_list_beside_an_attached_agent_goes_with_its_roster() {
+    let Some(t) = TestEnv::new("listgoes") else {
+        return;
+    };
+    let config = t.config_dir().join("config.toml");
+    let text =
+        "fit_preview = \"always\"\n".to_string() + &std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, text).unwrap();
+    let full = t.path("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join(".fullscreen"), "").unwrap();
+    t.ok(&["project", "add", "full", full.to_str().unwrap()]);
+    t.ok(&["new", "full", "--name", "b"]);
+    t.wait_for("b idle", |t| {
+        t.session("b", false).unwrap()["state"] == "idle"
+    });
+    let tmux = |args: &[&str]| -> String {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket])
+            .args(args)
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let target = format!(
+        "=r-{}:",
+        t.session("b", false).unwrap()["id"].as_str().unwrap()
+    );
+    let panes = || {
+        tmux(&[
+            "list-panes",
+            "-t",
+            &target,
+            "-F",
+            "#{pane_width}x#{pane_height}",
+        ])
+    };
+    let sizes = full.join(".sizes");
+    let told = || std::fs::read_to_string(&sizes).unwrap();
+    let attach = || {
+        let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+        term.wait_for("the list", "Enter attach");
+        t.wait_for("b fitted", |_| panes() == "82x26");
+        std::fs::write(&sizes, "").unwrap();
+        term.keys(&["Enter"]);
+        t.wait_for("the list beside b", |_| panes() == "37x29\n82x29");
+        term
+    };
+    // Its terminal closed: the list closed, b left at the preview's size,
+    // never told another width.
+    let term = attach();
+    drop(term);
+    t.wait_for("the list gone", |_| panes() == "82x26");
+    t.wait_for("b told", |_| told().ends_with("26 82\n"));
+    assert!(told().lines().all(|l| l.ends_with(" 82")), "{}", told());
+    // Its roster killed: the list closes itself so, its roster gone.
+    let term = attach();
+    // Marked just after the split.
+    let mark = || tmux(&["list-panes", "-t", &target, "-F", "#{@roster_sidebar}"]);
+    t.wait_for("the list marked", |_| !mark().is_empty());
+    let owner: i32 = mark().split(':').next().unwrap().parse().unwrap();
+    // SAFETY: killing the roster this test started, by its pid.
+    assert_eq!(unsafe { libc::kill(owner, libc::SIGKILL) }, 0);
+    t.wait_for("the list gone", |_| panes() == "82x26");
+    t.wait_for("b told", |_| told().ends_with("26 82\n"));
+    assert!(told().lines().all(|l| l.ends_with(" 82")), "{}", told());
+    drop(term);
+}
+
+#[test]
 fn fitted_always_every_agent_keeps_the_previews_width() {
     let Some(t) = TestEnv::new("fitalways") else {
         return;
@@ -251,6 +376,8 @@ fn fitted_always_every_agent_keeps_the_previews_width() {
     t.ok(&["project", "add", "full", full.to_str().unwrap()]);
     t.ok(&["new", "classic", "--name", "a"]);
     t.ok(&["new", "full", "--name", "b"]);
+    t.ok(&["new", "classic", "--name", "z"]);
+    t.ok(&["archive", "z", "--yes"]);
     t.wait_for("the agents idle", |t| {
         ["a", "b"]
             .iter()
@@ -264,7 +391,7 @@ fn fitted_always_every_agent_keeps_the_previews_width() {
         let out = std::process::Command::new("tmux")
             .args(["-L", &t.socket, "display", "-p", "-t"])
             .arg(format!("=r-{id}:"))
-            .arg("#{window_width}x#{window_height}")
+            .arg("#{pane_width}x#{pane_height}")
             .env_remove("TMUX")
             .output()
             .unwrap();
@@ -276,21 +403,99 @@ fn fitted_always_every_agent_keeps_the_previews_width() {
     t.wait_for("both fitted", |_| {
         size("a") == "82x26" && size("b") == "82x26"
     });
-    // Attached: the preview's width kept, the terminal's height (less the
-    // line at the top) given; back, the preview's again.
+    // Archived, folded at first, unfolded in the TUI: so beside the agent.
+    let top = |screen: &str| screen.lines().next().unwrap_or_default().to_string();
     for _ in 0..10 {
-        if term.screen().contains("classic / a ") {
+        if top(&term.screen()).contains("Archived") {
             break;
         }
         term.keys(&["j"]);
     }
+    term.keys(&["l"]);
+    term.wait_for("archived unfolded", "classic / z ");
+    // Attached: the preview's width kept, the terminal's height (less the
+    // line at the top) given; back, the preview's again.
+    for _ in 0..10 {
+        if top(&term.screen()).contains("classic / a ") {
+            break;
+        }
+        term.keys(&["k"]);
+    }
     term.wait_for("a selected", "classic / a ");
+    let before = term.screen();
     term.keys(&["Enter"]);
     term.wait_for_gone("the agent full screen", "Enter attach");
     t.wait_for("a as wide as the preview", |_| size("a") == "82x29");
+    // The session list beside it, read only, where the TUI's is, the agent
+    // where its preview was.
+    term.wait_for("the list beside it", "Idle (");
+    let screen = term.screen();
+    let row = screen.lines().find(|l| l.contains("Idle (")).unwrap();
+    assert!(row.find("Idle (").unwrap() < 5, "{screen}");
+    // Every shelf on the row it had, the one at the bottom too, unfolded as
+    // it was: the list's top line in the line at the top, its divider where
+    // the list's is, the back key where the TUI's hints were.
+    term.wait_for("archived unfolded beside it", "classic / z ");
+    let screen = term.screen();
+    for text in ["Idle (", "Archived (", "classic / z "] {
+        let row_of = |screen: &str| screen.lines().position(|l| l.contains(text));
+        assert_eq!(row_of(&screen), row_of(&before), "{before}\n{screen}");
+    }
+    let divider = |screen: &str| top(screen).chars().position(|c| c == '│');
+    assert_eq!(divider(&screen), divider(&before), "{before}\n{screen}");
+    assert!(
+        top(&screen).starts_with(" roster") && top(&screen).contains("classic / a"),
+        "{screen}"
+    );
+    assert!(
+        screen.lines().last().unwrap().starts_with(" C-q back"),
+        "{screen}"
+    );
+    // Kept as it changes.
+    t.ok(&["edit", "a", "--title", "Shiny"]);
+    t.wait_for("the title at the top", |_| {
+        top(&term.screen()).contains("Shiny")
+    });
+    let panes = |t: &TestEnv| -> usize {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket, "list-panes", "-a"])
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    };
+    assert_eq!(panes(&t), 3);
     term.keys(&["C-q"]);
     term.wait_for("the list again", "Enter attach");
     t.wait_for("a fitted again", |_| size("a") == "82x26");
+    // The list's pane gone with the attach.
+    assert_eq!(panes(&t), 2);
+    // Told only the sizes it ends with, attaching and back, never the
+    // terminal's width between, which would wrap a history anew.
+    let sizes = full.join(".sizes");
+    std::fs::write(&sizes, "").unwrap();
+    for _ in 0..10 {
+        if term.screen().contains("full / b ") {
+            break;
+        }
+        term.keys(&["j"]);
+    }
+    term.wait_for("b selected", "full / b ");
+    term.keys(&["Enter"]);
+    term.wait_for("b full screen", "full screen 29 82");
+    assert_eq!(panes(&t), 3, "{}", term.screen());
+    // Past the quarter second tmux waits between telling a pane sizes,
+    // merging those told meanwhile: one between would be told.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    term.keys(&["C-q"]);
+    term.wait_for("the list again", "Enter attach");
+    // Told a moment after tmux sizes it.
+    let told = || std::fs::read_to_string(&sizes).unwrap();
+    t.wait_for("b fitted again", |_| told().ends_with("26 82\n"));
+    assert!(told().lines().all(|l| l.ends_with(" 82")), "{}", told());
+    assert!(told().contains("29 82"), "{}", told());
+    assert_eq!(panes(&t), 2);
+    term.keys(&["k"]);
     // Started from the CLI meanwhile: the preview's size, as the TUI said it.
     t.ok(&["new", "classic", "--name", "n"]);
     assert_eq!(size("n"), "82x26");

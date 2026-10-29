@@ -264,6 +264,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The session list, read only, beside the agent you're attached to (fit_preview = "always"): roster runs it itself
+    #[command(hide = true)]
+    Sidebar { session: String },
     /// Check roster's tmux server and database against each other, and show what each session's processes use
     Doctor {
         /// Kill orphaned tmux sessions
@@ -447,10 +450,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    // Roster's own, in the background: what they'd say goes nowhere.
+    // Roster's own, in the background or under the list's screen: what
+    // they'd say goes nowhere.
     let helper = matches!(
         cli.command,
-        Some(Cmd::Deliver { .. } | Cmd::Retitle { auto: true, .. })
+        Some(Cmd::Deliver { .. } | Cmd::Retitle { auto: true, .. } | Cmd::Sidebar { .. })
     );
     let opened = if helper {
         Roster::open_quietly()
@@ -985,6 +989,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             }
             None => print::settings(r),
         },
+        Cmd::Sidebar { session } => tui::run_sidebar(r, &session)?,
         Cmd::Doctor { fix, yes } => {
             let mut diagnosis = r.diagnose()?;
             if fix && !diagnosis.orphans.is_empty() {

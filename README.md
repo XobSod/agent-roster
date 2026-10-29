@@ -271,8 +271,9 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `chats_dir`: where chats run (default inside roster's state directory).
   - `status_line`: `false` drops the line at the top while you're attached (it takes
     a row from the agent). It's set as you attach, so a title the agent picks
-    meanwhile shows from the next attach. Turning it on or off changes sessions'
-    height by a row on their next attach.
+    meanwhile shows from the next attach; beside the session list (`fit_preview =
+    "always"`) it's kept current, the list's top line in it. Turning it on or off
+    changes sessions' height by a row on their next attach.
   - `account_limits`: `false`: roster never asks your Claude and Codex accounts
     what's left of their limits (no `claude -p`, no `codex app-server`); `v u` and
     `roster usage` say so.
@@ -318,11 +319,12 @@ All files are optional and live in `~/.config/agent-roster/`:
     under `[agents.<name>]`. Agents drawing on the normal screen, Claude's classic
     renderer among them, keep your terminal's size: resizing would garble their
     history in tmux. `"always"` sizes every agent to the preview's width and keeps it
-    there, while you're attached too (with your terminal's height; the rest of the
-    terminal left blank, and narrower only in a narrower terminal): the preview shows all
-    of each agent's screen, and copy mode its history as written, since its width changes
-    only with the preview's. New sessions start at the size the TUI last showed, from
-    the CLI too.
+    there, while you're attached too, with your terminal's height and the session list
+    beside it, read only, where the TUI's is, faint but for the session you're in, on a
+    background of its own (in a terminal too narrow for both, the agent alone, narrower
+    only in a narrower terminal): the preview shows all of each agent's screen, and copy
+    mode its history as written, since its width changes only with the preview's. New
+    sessions start at the size the TUI last showed, from the CLI too.
   - `[order]`: per shelf (`needs_input`, `idle`, `stopped`, `working`, `archived`),
     `"oldest"` or `"newest"` first; by default first come, first served, and the
     archive newest first.
@@ -403,10 +405,11 @@ All files are optional and live in `~/.config/agent-roster/`:
   `export TOKEN="$(token-cmd)"` hides the command's failure, so the agent starts
   with `TOKEN` empty. A `.agent-roster.env` in a project's directory is sourced after it.
 - `tmux.conf`: additions to roster's tmux, such as the scrolling setup below. By
-  default every key except Ctrl+Q goes to the agent, and pane borders are hidden (each
-  session has one pane, and with `fit_preview = "always"` tmux would draw a line at the
-  edge of a window narrower than your terminal); set a border style here to bring them
-  back, as `examples/tmux.conf` shows. It's read after roster's own settings, so yours
+  default every key except Ctrl+Q goes to the agent, and pane borders are hidden (with
+  `fit_preview = "always"`, tmux would draw a line at the edge of a window narrower
+  than your terminal, and another between the agent and the list beside it, which
+  draws its own); set a border style here to bring them back, as `examples/tmux.conf`
+  shows. It's read after roster's own settings, so yours
   win. Your own tmux, outside roster's, isn't touched.
 
 State lives in `~/.local/state/agent-roster/`. Uninstall: remove the binary and both

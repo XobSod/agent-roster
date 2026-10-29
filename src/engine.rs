@@ -130,6 +130,9 @@ pub struct Roster {
     /// Sessions whose window this process resized, and until when their screen
     /// changes are the agent redrawing.
     resized: HashMap<String, i64>,
+    /// The session only watched, attached (`watch_beside`): a refresh types
+    /// no first prompt in and asks no title, and what it does is seen.
+    watching: Option<String>,
     /// The panes `refresh` last listed, by tmux session, for what follows it
     /// (fitting screens, showing one) without listing them again.
     panes: Option<HashMap<String, Pane>>,
@@ -259,6 +262,7 @@ impl Roster {
             tmux,
             exe,
             resized: HashMap::new(),
+            watching: None,
             prompt_tries: HashMap::new(),
             undelivered: Vec::new(),
             notices,
@@ -329,7 +333,7 @@ impl Roster {
                             && let Some(hash) = self.screen_hash(&s)
                         {
                             if redrawing {
-                                s.redrawn(&hash);
+                                s.redrawn(&hash, now);
                             } else {
                                 s.observe_screen(&hash, now);
                                 s.correct_stale_working(
@@ -341,17 +345,24 @@ impl Roster {
                     } else if let Some(hash) = self.screen_hash(&s) {
                         let idle_after = agent::idle_after_ms(&s.agent, &self.config);
                         if redrawing {
-                            s.redrawn(&hash);
+                            s.redrawn(&hash, now);
                         } else {
                             s.observe_generic(&hash, now, idle_after);
                         }
                     }
-                    if s.pending_prompt.is_some() && self.ready_for_prompt(&s, now) {
+                    if self.watching.is_none()
+                        && s.pending_prompt.is_some()
+                        && self.ready_for_prompt(&s, now)
+                    {
                         ready.push((s.id.clone(), s.tmux_name()));
                     }
                 }
             }
-            if self.wants_auto_title(&s)
+            if self.watching.as_ref() == Some(&s.id) {
+                s.seen_as_it_goes(now);
+            }
+            if self.watching.is_none()
+                && self.wants_auto_title(&s)
                 && let Some(conversation) = &s.conversation_id
                 && self.db.claim_auto_title(&s.id, conversation)?
             {
@@ -496,11 +507,12 @@ impl Roster {
                 FitPreview::Always => true,
             };
             let key = format!("{name} {:?}", pane.pid);
-            // Attached elsewhere: fitted again once that's over.
-            if pane.clients > 0 {
+            // Attached elsewhere, or the list beside it not closed yet:
+            // fitted again once that's over.
+            if pane.clients > 0 || pane.beside {
                 fitted.remove(&key);
             }
-            if pane.dead || pane.clients > 0 || !fits {
+            if pane.dead || pane.clients > 0 || pane.beside || !fits {
                 continue;
             }
             if fitted.insert(key) && pane.size != size {
@@ -517,9 +529,18 @@ impl Roster {
 
     /// The TUI's preview size as it last fitted agents to it.
     fn preview_size(&self) -> Option<(u16, u16)> {
-        let size = self.db.meta(PREVIEW_SIZE).ok()??;
-        let (w, h) = size.split_once('x')?;
-        Some((w.parse().ok()?, h.parse().ok()?))
+        util::parse_size(&self.db.meta(PREVIEW_SIZE).ok()??)
+    }
+
+    /// For the read-only list beside the agent of session `id`, attached:
+    /// refreshing only reads, as what it'd start (typing a first prompt in,
+    /// asking a title) would die with the list's pane, left to the roster
+    /// that attached; what `id` does is seen as it does it; the agent's
+    /// redrawing for the size it was just given isn't a turn.
+    pub fn watch_beside(&mut self, id: &str) {
+        self.watching = Some(id.to_string());
+        self.resized
+            .insert(id.to_string(), now_ms() + RESIZE_GRACE_MS);
     }
 
     /// `refresh` for one-shot commands. The TUI polls anyway; a single command has
@@ -1323,13 +1344,13 @@ impl Roster {
     /// Returns whether you submitted a prompt while attached (for agents that
     /// report prompts: Claude, pi).
     pub fn attach(&mut self, id: &str) -> Result<bool> {
-        let since = self.attach_terminal(id)?;
+        let since = self.attach_terminal(id, None)?;
         self.detached(id, since)
     }
 
     /// `attach` up to the user detaching; returns when it attached, for
     /// `detached`. Apart so the TUI can draw itself again in between.
-    pub fn attach_terminal(&mut self, id: &str) -> Result<i64> {
+    pub fn attach_terminal(&mut self, id: &str, view: Option<&str>) -> Result<i64> {
         self.refresh()?;
         let s = self.live_session(id)?;
         if s.state == State::Stopped {
@@ -1340,28 +1361,76 @@ impl Roster {
         if self.db.session(id)?.pending_prompt.is_some() {
             self.deliver_in_background(id);
         }
+        let name = s.tmux_name();
+        // Not known (tmux not answering), no layout: the attach says why.
+        let pane = (self.tmux.panes().ok()).and_then(|panes| panes.get(&name).cloned());
+        // Attached elsewhere, or the list beside it not closed yet: laid out,
+        // and its status line set, for that terminal.
+        let elsewhere = pane.as_ref().is_some_and(|p| p.clients > 0 || p.beside);
         // The status line says where you are, drawn like the TUI's header. Only
         // a nicety: if tmux won't take it, attach anyway.
-        if self.config.status_line() {
+        if self.config.status_line() && !elsewhere {
             let (left, right) = crate::tui::status_line(&s, &self.config.keys.detach);
-            self.tmux.label(&s.tmux_name(), &left, &right).ok();
+            self.tmux.label(&name, &left, &right).ok();
         }
-        // Fitted always: the preview's width kept (narrower only in a
-        // narrower terminal, which would cut it), the terminal's height (less
-        // the status line) given, a height not wrapping its history. Fitted
-        // otherwise: a size kept from before, let go, so the terminal sizes it.
-        let name = s.tmux_name();
+        // Fitted always: the agent's width kept, the preview's, the terminal's
+        // height (less the status line) given, a height not wrapping its
+        // history; the session list beside it, read only, where the TUI's
+        // is, the agent where its preview was. Too narrow for both, the agent
+        // alone, as wide as the terminal allows. Fitted otherwise: a size
+        // kept from before, let go, so the terminal sizes it.
+        let mut beside = None;
         if agent::fit_mode(&s.agent, &self.config) != FitPreview::Always {
             self.tmux.release_size(&name).ok();
-        } else if let (Some((w, h)), Some(pane)) =
-            (util::terminal_size(), self.tmux.panes()?.get(&name))
+        } else if let (Some((w, h)), Some(pane)) = (util::terminal_size(), pane)
+            && !elsewhere
         {
-            let h = h - u16::from(self.config.status_line() && h > 1);
-            self.tmux.resize_fixed(&name, (pane.size.0.min(w), h))?;
+            let size = (
+                pane.size.0.min(w),
+                h - u16::from(self.config.status_line() && h > 1),
+            );
+            // The list gone, the agent at the preview's height, as the TUI
+            // would fit it: told once.
+            let after = (size.0, self.preview_size().map_or(size.1, |(_, h)| h));
+            let owner = procs::identity(std::process::id());
+            match (crate::tui::attached_list(w, size.0), owner) {
+                (Some(list), Some(owner)) => {
+                    let exe = self.exe.to_string_lossy().into_owned();
+                    let argv = [exe, "sidebar".to_string(), s.id.clone()];
+                    let owned = (owner.as_str(), after);
+                    let env = view
+                        .map(|view| (crate::tui::LIST_VIEW, view.to_string()))
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    let place = (s.workdir.as_path(), env.as_slice(), argv.as_slice());
+                    match (self.tmux).split_sidebar(&name, size, list, owned, place) {
+                        Ok(pane) => {
+                            // The list's top line over it, kept by the list.
+                            if self.config.status_line()
+                                && let Ok(sessions) = self.sessions(true)
+                            {
+                                let (left, right) =
+                                    crate::tui::status_line_beside(&sessions, &s, list);
+                                self.tmux.label(&name, &left, &right).ok();
+                            }
+                            beside = Some((pane, after));
+                        }
+                        // Only a nicety: without it, the agent alone.
+                        Err(_) => self.tmux.resize_fixed(&name, size)?,
+                    }
+                }
+                _ => self.tmux.resize_fixed(&name, size)?,
+            }
         }
         let since = now_ms();
-        let status = self.tmux.attach(&s.tmux_name())?;
-        if !status.success() {
+        let status = self.tmux.attach(&name);
+        // Ended mid-attach (its terminal closed), the list closes itself so.
+        if let Some((pane, after)) = beside {
+            self.tmux.close_sidebar(&name, &pane, after).ok();
+            self.resized
+                .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
+        }
+        if !status?.success() {
             bail!("couldn't attach to {}", s.label());
         }
         Ok(since)

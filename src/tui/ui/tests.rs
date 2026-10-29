@@ -21,6 +21,109 @@ fn render(app: &App, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+#[test]
+fn the_list_beside_an_attached_agent_is_the_tuis_a_row_up() {
+    let mut app = app();
+    still(&mut app);
+    let now = now_ms();
+    // Limits known: the TUI's sidebar gives them its last row.
+    app.limits.agents = vec![crate::tui::limits::Said {
+        agent: "claude".into(),
+        usage: Some(crate::usage::Usage {
+            plan: None,
+            windows: vec![crate::usage::Window {
+                minutes: 300,
+                used: 40.0,
+                resets_at: Some(now + 3_600_000),
+            }],
+            notes: Vec::new(),
+            at: now,
+        }),
+        error: None,
+    }];
+    let (width, height) = (120, 16);
+    let side = sidebar_width(width);
+    let drawn = |size: (u16, u16), draw: &dyn Fn(&mut Frame)| {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+        terminal.draw(|f| draw(f)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let tui = drawn((width, height), &|f| draw(f, &app));
+    // Under the status line, which shows the top line.
+    let attached = drawn((side + 1, height - 1), &|f| {
+        draw_attached_sidebar(f, &app, false, "C-q")
+    });
+    let row = |buffer: &ratatui::buffer::Buffer, y: u16, width: u16| {
+        (0..width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect::<String>()
+    };
+    // Every row of the TUI's sidebar but its top line, the limits' too, a
+    // row up; the back key where the TUI's hints are.
+    for y in 1..height - 1 {
+        assert_eq!(row(&attached, y - 1, side), row(&tui, y, side), "row {y}");
+    }
+    assert!(
+        row(&tui, height - 2, side).contains('%'),
+        "{}",
+        row(&tui, height - 2, side)
+    );
+    assert!(row(&attached, height - 2, side).starts_with(" C-q back"));
+}
+
+#[test]
+fn the_list_beside_an_attached_agent_is_faint_but_for_its_session() {
+    let mut app = app();
+    still(&mut app);
+    let (width, height) = (37, 12);
+    let drawn = |draw: &dyn Fn(&mut Frame)| {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f)).unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let normal = drawn(&|f| {
+        let area = Rect::new(0, 0, width - 1, height - 1);
+        draw_sidebar(f, &app, area, now_ms(), false);
+    });
+    let attached = drawn(&|f| draw_attached_sidebar(f, &app, false, "C-q"));
+    let row = |y: u16| {
+        (0..width)
+            .map(|x| attached[(x, y)].symbol().to_string())
+            .collect::<String>()
+    };
+    // Its top line left to the status line; the back key at the bottom.
+    assert!(!row(0).contains("roster"), "{}", row(0));
+    assert!(
+        row(height - 1).starts_with(" C-q back"),
+        "{}",
+        row(height - 1)
+    );
+    let mut selected = 0;
+    for y in 0..height - 1 {
+        for x in 0..width - 1 {
+            let (was, is) = (&normal[(x, y)], &attached[(x, y)]);
+            assert_eq!(was.symbol(), is.symbol());
+            if was.bg == SELECTED_BG {
+                selected += 1;
+                assert_eq!((is.fg, is.bg), (was.fg, ATTACHED_BG), "({x}, {y})");
+            } else {
+                assert_eq!(is.fg, faded(was.fg), "({x}, {y})");
+            }
+        }
+    }
+    assert!(selected > 0);
+}
+
+/// Nothing in `app` that moves between two draws a moment apart: a working
+/// card's spinner turns every 120 ms.
+fn still(app: &mut App) {
+    let mut sessions = app.sessions.clone();
+    for s in sessions.iter_mut().filter(|s| s.state == State::Working) {
+        s.state = State::Idle;
+    }
+    app.set_data(app.projects.clone(), sessions);
+}
+
 fn app() -> App {
     let agents = vec!["claude".to_string()];
     let mut app = App::new(Keymap::new(&Keys::default()).unwrap(), "/".into(), agents);

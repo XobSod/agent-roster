@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::model::{Project, Session, State};
 use crate::search::Hit;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Shelf {
     NeedsInput,
     Idle,
@@ -56,7 +56,7 @@ impl Shelf {
 }
 
 /// A foldable group: a shelf, or a project when grouped by project.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Group {
     Shelf(Shelf),
     Project(i64),

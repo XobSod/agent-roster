@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use note::*;
 use popups::*;
 use sidebar::*;
-pub use spans::status_line;
+pub use spans::{status_line, status_line_beside};
 // For the previews of sessions without a screen (app::texts).
 use spans::*;
 pub(crate) use spans::{agent_spans, badge, glyph};
@@ -35,8 +35,8 @@ use super::form::{Form, Kind};
 use super::list::{Entry, Group};
 use super::picker::Picker;
 use super::theme::{
-    self, ACCENT, ERROR, FAINT, INPUT, MUTED, PACE_EVEN, PACE_FAST, PACE_SLOW, SELECTED_BG, UNREAD,
-    WORKING,
+    self, ACCENT, ATTACHED_BG, ERROR, FAINT, INPUT, MUTED, PACE_EVEN, PACE_FAST, PACE_SLOW,
+    SELECTED_BG, UNREAD, WORKING,
 };
 use crate::keys::{Action, Menu};
 use crate::model::{Session, State};
@@ -62,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if app.mode == Mode::Usage {
         draw_usage(f, app, main);
     } else {
-        draw_sidebar(f, app, side, now);
+        draw_sidebar(f, app, side, now, true);
         f.render_widget(
             Paragraph::new(vec![Line::from("│"); divider.height as usize])
                 .style(Style::new().fg(FAINT)),
@@ -82,6 +82,59 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+/// The session list alone, read only, beside the attached agent, with its
+/// divider at the right edge (`tui::run_sidebar`): faint but for the session
+/// you're in, on a background of its own, as it takes no keys; its top line
+/// unless the status line shows
+/// it (`summary`); the back key (`back`) at the bottom, where the TUI's hints
+/// are.
+pub fn draw_attached_sidebar(f: &mut Frame, app: &App, summary: bool, back: &str) {
+    let [main, hints] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+    let [side, divider] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(main);
+    draw_sidebar(f, app, side, now_ms(), summary);
+    let buffer = f.buffer_mut();
+    for y in side.top()..side.bottom() {
+        for x in side.left()..side.right() {
+            let cell = &mut buffer[(x, y)];
+            if cell.bg == SELECTED_BG {
+                cell.bg = ATTACHED_BG;
+            } else {
+                cell.fg = faded(cell.fg);
+            }
+        }
+    }
+    f.render_widget(
+        Paragraph::new(vec![Line::from("│"); divider.height as usize])
+            .style(Style::new().fg(FAINT)),
+        divider,
+    );
+    let hint = vec![
+        Span::raw(" "),
+        Span::styled(back.to_string(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(" back", Style::new().fg(MUTED)),
+    ];
+    f.render_widget(Paragraph::new(Line::from(hint)), hints);
+}
+
+/// A colour halfway to faint: what it says still told apart, quieter.
+fn faded(color: ratatui::style::Color) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    let Color::Rgb(fr, fg, fb) = FAINT else {
+        return FAINT;
+    };
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            ((u16::from(r) + u16::from(fr)) / 2) as u8,
+            ((u16::from(g) + u16::from(fg)) / 2) as u8,
+            ((u16::from(b) + u16::from(fb)) / 2) as u8,
+        ),
+        // The terminal's own (a name, say): as muted text is.
+        _ => MUTED,
+    }
+}
+
 /// True while something on screen animates (a working session's spinner).
 pub fn animating(app: &App) -> bool {
     // Only the session list has spinners.
@@ -94,7 +147,7 @@ pub fn animating(app: &App) -> bool {
 
 /// The session list's width: 30% of the terminal, 34 to 40 columns (wider
 /// only spread cards out), the preview keeping 20.
-fn sidebar_width(total: u16) -> u16 {
+pub(crate) fn sidebar_width(total: u16) -> u16 {
     (total * 3 / 10)
         .clamp(34, 40)
         .min(total.saturating_sub(20).max(10))

@@ -101,6 +101,22 @@ pub struct Titling {
     pub asked_of: crate::title::AskedOf,
 }
 
+/// What the session list shows beyond its sessions, handed to the read-only
+/// list beside an attached agent, so it's the list the TUI showed.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct View {
+    grouped: bool,
+    filter: Option<i64>,
+    search: String,
+    folded: Vec<Group>,
+    search_folded: Vec<Group>,
+    unfolded: Vec<String>,
+    scroll: usize,
+    memory_marked: Vec<String>,
+    /// What the accounts last said, if the list shows it.
+    usage: Option<Vec<super::limits::Said>>,
+}
+
 pub struct App {
     pub keymap: Keymap,
     pub mode: Mode,
@@ -313,6 +329,35 @@ impl App {
                 CardSubagents::Folded => self.unfolded.contains(&s.id),
                 CardSubagents::Unfolded => true,
             }
+    }
+
+    /// What the list shows beyond its sessions (`View`).
+    pub fn view(&self) -> View {
+        View {
+            grouped: self.grouped,
+            filter: self.filter,
+            search: self.search.clone(),
+            folded: self.folded.iter().copied().collect(),
+            search_folded: self.search_folded.iter().copied().collect(),
+            unfolded: self.unfolded.iter().cloned().collect(),
+            scroll: self.scroll.get(),
+            memory_marked: self.memory_marked.iter().cloned().collect(),
+            usage: self.sidebar_usage.then(|| self.limits.agents.clone()),
+        }
+    }
+
+    /// The list as `view` says, before its sessions are set.
+    pub fn take_view(&mut self, view: View) {
+        self.grouped = view.grouped;
+        self.filter = view.filter;
+        self.search = view.search;
+        self.folded = view.folded.into_iter().collect();
+        self.search_folded = view.search_folded.into_iter().collect();
+        self.unfolded = view.unfolded.into_iter().collect();
+        self.scroll.set(view.scroll);
+        self.memory_marked = view.memory_marked.into_iter().collect();
+        self.sidebar_usage = view.usage.is_some();
+        self.limits.agents = view.usage.unwrap_or_default();
     }
 
     /// Grouped by project, or on shelves (`group_by` in config.toml).

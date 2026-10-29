@@ -50,6 +50,68 @@ fn app() -> App {
     app
 }
 
+#[test]
+fn the_list_is_handed_on_as_it_shows() {
+    let keys = |app: &App| app.entries.iter().map(Entry::key).collect::<Vec<_>>();
+    // `app`'s view handed on, to a list given the same sessions.
+    let handed = |app: &App| {
+        let view = serde_json::to_string(&app.view()).unwrap();
+        let mut beside = App::new(
+            Keymap::new(&Keys::default()).unwrap(),
+            "/work".into(),
+            vec!["claude".to_string()],
+        );
+        beside.take_view(serde_json::from_str(&view).unwrap());
+        beside.set_data(app.projects.clone(), app.sessions.clone());
+        beside
+    };
+    type Change = fn(&mut App);
+    let built = |change: Change| {
+        let mut app = app();
+        change(&mut app);
+        app.rebuild();
+        app
+    };
+    // Each part of it, changing what the list shows from what it shows
+    // without it, comes through.
+    let plain: Change = |_| {};
+    let searching: Change = |app| app.search = "s".into();
+    let cases: [(&str, Change, Change); 6] = [
+        ("grouped", plain, |app| app.grouped = true),
+        ("filtered", plain, |app| app.filter = Some(2)),
+        ("searched", plain, |app| app.search = "s4".into()),
+        ("a shelf folded", plain, |app| {
+            app.folded.insert(Group::Shelf(Shelf::Idle));
+        }),
+        ("archived unfolded", plain, |app| {
+            app.folded.remove(&Group::Shelf(Shelf::Archived));
+        }),
+        ("a shelf folded while searching", searching, |app| {
+            app.search = "s".into();
+            app.search_folded.insert(Group::Shelf(Shelf::Working));
+        }),
+    ];
+    for (what, without, with) in cases {
+        let (without, app) = (built(without), built(with));
+        assert_ne!(keys(&app), keys(&without), "{what}");
+        assert_eq!(keys(&handed(&app)), keys(&app), "{what}");
+    }
+    // What's drawn beyond which entries show.
+    let mut app = app();
+    app.unfolded.insert("s4".into());
+    app.memory_marked.insert("s4".into());
+    app.scroll.set(1);
+    let beside = handed(&app);
+    assert_eq!(
+        (&beside.unfolded, &beside.memory_marked, beside.scroll.get()),
+        (&app.unfolded, &app.memory_marked, 1)
+    );
+    // Its accounts' limits as the TUI last knew them, if it showed them.
+    assert!(beside.sidebar_usage);
+    app.sidebar_usage = false;
+    assert!(!handed(&app).sidebar_usage);
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

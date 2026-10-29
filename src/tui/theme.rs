@@ -10,6 +10,10 @@ pub const FAINT: Color = Color::Rgb(85, 89, 106);
 /// Selection bar and focus.
 pub const ACCENT: Color = Color::Rgb(140, 150, 255);
 pub const SELECTED_BG: Color = Color::Rgb(46, 48, 64);
+/// The card of the session you're in, in the list beside it: green, one of
+/// the 256 colours (22), so a terminal rounding 24-bit colours to those
+/// shows it as it is.
+pub const ATTACHED_BG: Color = Color::Rgb(0, 95, 0);
 pub const WORKING: Color = Color::Rgb(100, 160, 240);
 pub const INPUT: Color = Color::Rgb(240, 180, 80);
 pub const UNREAD: Color = Color::Rgb(90, 210, 150);

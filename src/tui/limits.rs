@@ -39,7 +39,7 @@ pub struct Limits {
 }
 
 /// What an agent last said of its account's limits.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Said {
     pub agent: String,
     /// The latest it said, from its service or its transcript.

@@ -17,7 +17,8 @@ use serde_json::Value;
 
 /// Stand-in for `claude`: shows its arguments and environment, then echoes what
 /// it's sent. In a directory with a `.fullscreen` file it draws full screen
-/// instead (the alternate screen), redrawing its size whenever it changes.
+/// instead (the alternate screen), redrawing its size whenever it changes,
+/// each size it's told kept in `.sizes` there, rows and columns.
 const FAKE_AGENT: &str = include_str!("../fakes/claude.sh");
 
 const TIMEOUT: Duration = Duration::from_secs(15);

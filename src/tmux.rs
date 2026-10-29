@@ -114,7 +114,7 @@ pub struct Pane {
     /// When it ended (ms).
     pub dead_at: Option<i64>,
     pub pid: Option<i32>,
-    /// The window's size.
+    /// Its size: its window's, but while the list's beside it.
     pub size: (u16, u16),
     /// Clients attached to its session.
     pub clients: u32,
@@ -123,6 +123,8 @@ pub struct Pane {
     pub alternate: bool,
     /// The terminal title the program set (tmux's default is the host name).
     pub title: String,
+    /// The read-only list is beside it: attached, or just detached.
+    pub beside: bool,
 }
 
 pub struct Tmux {
@@ -269,7 +271,10 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// Panes of roster's sessions by tmux session name; empty if the server isn't running.
+    /// Panes of roster's sessions by tmux session name, each session's
+    /// agent's (not the read-only list beside it while attached, which goes
+    /// once the roster that attached has: one that ended mid-attach left it);
+    /// empty if the server isn't running.
     pub fn panes(&self) -> Result<HashMap<String, Pane>> {
         let Some(out) = self.query(&[
             "list-panes".into(),
@@ -277,17 +282,19 @@ impl Tmux {
             "-F".into(),
             Arg::Format(
                 "#{session_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t\
-                 #{pane_dead_time}\t#{pane_pid}\t#{window_width}\t#{window_height}\t\
-                 #{session_attached}\t#{alternate_on}\t#{pane_title}",
+                 #{pane_dead_time}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t\
+                 #{session_attached}\t#{alternate_on}\t#{pane_id}\t#{@roster_agent}\t\
+                 #{@roster_sidebar}\t#{pane_title}",
             ),
         ])?
         else {
             return Ok(HashMap::new());
         };
         let mut panes = HashMap::new();
+        let mut beside = Vec::new();
         for line in out.lines() {
             // The title comes last and may itself contain tabs.
-            let fields: Vec<&str> = line.splitn(11, '\t').collect();
+            let fields: Vec<&str> = line.splitn(14, '\t').collect();
             if let [
                 name,
                 dead,
@@ -299,10 +306,28 @@ impl Tmux {
                 height,
                 clients,
                 alternate,
+                id,
+                agent,
+                sidebar,
                 title,
             ] = fields[..]
             {
-                panes.entry(name.to_string()).or_insert(Pane {
+                if !sidebar.is_empty() {
+                    let (owner, after) = sidebar.split_once(' ').unwrap_or((sidebar, ""));
+                    match crate::util::parse_size(after) {
+                        Some(size) if !crate::procs::alive(owner) => {
+                            self.close_sidebar(name, id, size).ok();
+                        }
+                        // Marked by an older roster, whose owner isn't to
+                        // be told: once no one's attached.
+                        None if clients == "0" => {
+                            self.kill_pane(id).ok();
+                        }
+                        _ => beside.push(name),
+                    }
+                    continue;
+                }
+                let pane = Pane {
                     dead: dead == "1",
                     dead_status: status.parse().ok(),
                     dead_signal: signal.parse().ok(),
@@ -312,7 +337,20 @@ impl Tmux {
                     clients: clients.parse().unwrap_or(0),
                     alternate: alternate == "1",
                     title: title.to_string(),
-                });
+                    beside: false,
+                };
+                // The agent's, marked as the list is split off beside it
+                // (listed before it), else the session's one pane.
+                if agent == "1" {
+                    panes.insert(name.to_string(), pane);
+                } else {
+                    panes.entry(name.to_string()).or_insert(pane);
+                }
+            }
+        }
+        for name in beside {
+            if let Some(pane) = panes.get_mut(name) {
+                pane.beside = true;
             }
         }
         Ok(panes)
@@ -358,7 +396,7 @@ impl Tmux {
     }
 
     pub fn pane_details(&self) -> Result<Vec<PaneDetail>> {
-        let format = "#{session_name}\t#{session_attached}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{history_size}";
+        let format = "#{session_name}\t#{session_attached}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_pid}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{history_size}\t#{@roster_sidebar}";
         let Some(out) = self.query(&[
             "list-panes".into(),
             "-a".into(),
@@ -384,6 +422,8 @@ impl Tmux {
                         width,
                         height,
                         history,
+                        // Not the list beside an attached agent.
+                        "",
                     ] => Some(PaneDetail {
                         session: session.to_string(),
                         clients: clients.parse().unwrap_or(0),
@@ -572,16 +612,7 @@ impl Tmux {
     /// Sizes the session's window for good: attaching doesn't size it to the
     /// terminal, which shows it in its corner (`fit_preview = "always"`).
     pub fn resize_fixed(&self, name: &str, size: (u16, u16)) -> Result<()> {
-        self.run(&[
-            "resize-window".into(),
-            "-t".into(),
-            Arg::Pane(name),
-            "-x".into(),
-            Arg::Number(size.0.into()),
-            "-y".into(),
-            Arg::Number(size.1.into()),
-        ])
-        .map(drop)
+        self.run(&resize_window(name, size)).map(drop)
     }
 
     /// Lets go of a size `resize_fixed` gave: the next attach sizes the
@@ -596,6 +627,103 @@ impl Tmux {
             "window-size".into(),
         ];
         match self.run(&unset) {
+            Err(e) if is_missing(&e) => Ok(()),
+            other => other.map(drop),
+        }
+    }
+
+    /// Lays the session out for an attach beside the read-only list (`argv`,
+    /// run in `workdir` with `env`): the list `list` columns wide on the left, the agent
+    /// `agent` (its width and height) right of the border between them,
+    /// keeping the keys; the list's pane id. The list is marked as `owner`'s
+    /// (`procs::identity`): once it's gone, the list is closed as
+    /// `close_sidebar` would, the agent left `after`.
+    pub fn split_sidebar(
+        &self,
+        name: &str,
+        agent: (u16, u16),
+        list: u16,
+        (owner, after): (&str, (u16, u16)),
+        (workdir, env, argv): (&Path, &[(&str, String)], &[String]),
+    ) -> Result<String> {
+        // The agent's marked, so it's never taken for the list's.
+        let mark = [
+            "set-option".into(),
+            "-p".into(),
+            "-t".into(),
+            Arg::Pane(name),
+            "@roster_agent".into(),
+            "1".into(),
+        ];
+        let window = (list + 1 + agent.0, agent.1);
+        let mut split = vec![
+            "split-window".into(),
+            "-h".into(),
+            "-b".into(),
+            "-d".into(),
+            "-l".into(),
+            Arg::Number(list.into()),
+            "-t".into(),
+            Arg::Pane(name),
+            "-P".into(),
+            "-F".into(),
+            Arg::Format("#{pane_id}"),
+        ];
+        // Not the session's own processes, as the session's variables would
+        // make it.
+        let env = [&[("ROSTER_SESSION", String::new())], env].concat();
+        split.extend(started(workdir, &env, argv));
+        let [taller, settled] = settling(name, window);
+        let id = (self.run_all(&[
+            &mark,
+            &resize_window(name, window),
+            &split,
+            &taller,
+            &settled,
+        ])?)
+        .trim()
+        .to_string();
+        // Unmarked, it's still closed as the attach ends.
+        let mark = format!("{owner} {}x{}", after.0, after.1);
+        self.run(&[
+            "set-option".into(),
+            "-p".into(),
+            "-t".into(),
+            Arg::Name(&id),
+            "@roster_sidebar".into(),
+            Arg::Name(&mark),
+        ])
+        .ok();
+        Ok(id)
+    }
+
+    /// Closes the list `split_sidebar` gave, pane `id`, the session's window
+    /// left `size`, the agent's. Gone already, it was closed so by whoever
+    /// took it for left behind.
+    pub fn close_sidebar(&self, name: &str, id: &str, size: (u16, u16)) -> Result<()> {
+        let kill = ["kill-pane".into(), "-t".into(), Arg::Name(id)];
+        let [taller, settled] = settling(name, size);
+        self.run_all(&[&kill, &taller, &settled]).map(drop)
+    }
+
+    /// The pane right of pane `id`, the list's, given the keys if a click or
+    /// a key of the user's gave them to the list.
+    pub fn give_back_keys(&self, id: &str) -> Result<()> {
+        let select = format!("select-pane -R -t {id}");
+        self.run(&[
+            "if-shell".into(),
+            "-F".into(),
+            "-t".into(),
+            Arg::Name(id),
+            Arg::Format("#{pane_active}"),
+            Arg::Name(&select),
+        ])
+        .map(drop)
+    }
+
+    /// Kills the pane `id` (`%3`), the session it's in staying.
+    pub fn kill_pane(&self, id: &str) -> Result<()> {
+        match self.run(&["kill-pane".into(), "-t".into(), Arg::Name(id)]) {
             Err(e) if is_missing(&e) => Ok(()),
             other => other.map(drop),
         }
@@ -734,6 +862,32 @@ fn started<'a>(
     args
 }
 
+fn resize_window(name: &str, size: (u16, u16)) -> [Arg<'_>; 7] {
+    [
+        "resize-window".into(),
+        "-t".into(),
+        Arg::Pane(name),
+        "-x".into(),
+        Arg::Number(size.0.into()),
+        "-y".into(),
+        Arg::Number(size.1.into()),
+    ]
+}
+
+/// Resizes the session's window to `size` at the end of a call that sized
+/// its agent otherwise between (giving it the list's columns, or taking
+/// them): tmux tells a pane only the size it ends with, but one ending as it
+/// started the size before that first, to have it redraw. Ended with a
+/// change of height alone, that's never the width between, which would
+/// wrap a history anew.
+fn settling(name: &str, size: (u16, u16)) -> [[Arg<'_>; 7]; 2] {
+    let other = if size.1 > 1 { size.1 - 1 } else { size.1 + 1 };
+    [
+        resize_window(name, (size.0, other)),
+        resize_window(name, size),
+    ]
+}
+
 /// Whether tmux said there's no such server or session: at the start of what
 /// it said, so a config file's mistake that mentions one isn't taken for it.
 /// A server that exited while answering (killed, or its last session gone)
@@ -807,8 +961,8 @@ set -g history-limit 50000
 set -g remain-on-exit on
 # A window kept narrower than the terminal (fit_preview = \"always\"): the rest
 # blank, not dotted (tmux before 3.4 doesn't know the option), and the line
-# tmux draws at its edge, a pane's border, hidden (a session's one pane has no
-# other border).
+# tmux draws at its edge, a pane's border, hidden (an agent's pane has no
+# other border but the one by the list beside it, which draws its own).
 set -gq fill-character ' '
 set -g pane-border-style hidden
 set -g pane-active-border-style hidden

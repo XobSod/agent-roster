@@ -26,6 +26,12 @@ pub fn terminal_size() -> Option<(u16, u16)> {
     None
 }
 
+/// A size written `WxH`, columns and rows.
+pub fn parse_size(text: &str) -> Option<(u16, u16)> {
+    let (w, h) = text.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
+}
+
 /// Quotes `s` for a POSIX shell.
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))

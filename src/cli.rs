@@ -100,6 +100,9 @@ pub enum Cmd {
         /// Kill it at once instead, asking it nothing: its agent and all it started (an archived session's too, what it left running)
         #[arg(long)]
         kill: bool,
+        /// With --kill, only this one of its processes and those under it; its agent goes on unless it's the one
+        #[arg(long, value_name = "PID", requires = "kill")]
+        pid: Option<i32>,
     },
     /// Stop and start a session, resuming its conversation
     Restart {
@@ -309,6 +312,12 @@ pub enum ConfigCmd {
         /// Take a whole table out without asking
         #[arg(short, long)]
         yes: bool,
+    },
+    /// Add an agent that runs this command and its arguments (`add-agent gemini --yolo`),
+    /// named after what it runs (`npx @xai/grok@latest` after the package: grok)
+    AddAgent {
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
     },
 }
 

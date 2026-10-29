@@ -112,7 +112,9 @@ impl crate::engine::Roster {
         let (command, args) = words.split_first().context("no command")?;
         let name = agent_name(command, args);
         if !agent_named(&name) {
-            bail!("{name:?} can't name an agent: letters, digits, '-' and '_'");
+            bail!(
+                "{name:?} can't name an agent: letters, digits, '-' and '_', from a letter or digit"
+            );
         }
         if agent::available(&self.config).contains(&name) {
             bail!("there's an agent {name:?} already");
@@ -229,7 +231,7 @@ pub enum Reloaded {
 
 /// Whether `name` can name an agent (it's written in config.toml as is).
 fn agent_named(name: &str) -> bool {
-    !name.is_empty()
+    name.starts_with(char::is_alphanumeric)
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
@@ -1726,6 +1728,8 @@ mod tests {
         assert_eq!(name("npx -y @xai/grok@latest"), "grok");
         assert_eq!(name("pipx run gpt-engineer"), "gpt-engineer");
         assert!(!agent_named("a b") && !agent_named("") && agent_named("my-agent_2"));
+        // A flag isn't a name.
+        assert!(!agent_named("-y") && !agent_named("--yolo"));
     }
 
     #[test]

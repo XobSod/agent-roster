@@ -9,6 +9,15 @@ pub fn config(r: &mut Roster, change: Option<ConfigCmd>, defaults: bool, edit: b
             r.change_setting(&setting, Some(&value))?;
             println!("Set {setting}");
         }
+        Some(ConfigCmd::AddAgent { command }) => {
+            // Each word as it was given, the settings view's line.
+            let line = command
+                .iter()
+                .map(|w| util::sh_quote(w))
+                .collect::<Vec<_>>();
+            let name = r.add_agent(&line.join(" "))?;
+            println!("Added the agent {name}: new sessions can run it");
+        }
         Some(ConfigCmd::Unset { setting, yes }) => {
             let question = r.unset_question(&setting);
             if let Some(question) = &question

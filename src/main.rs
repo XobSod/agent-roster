@@ -150,11 +150,13 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             session,
             yes,
             kill: true,
-        } => cmd::lifecycle::kill(r, session, yes)?,
+            pid,
+        } => cmd::lifecycle::kill(r, session, yes, pid)?,
         Cmd::Stop {
             session,
             yes,
             kill: false,
+            ..
         } => cmd::lifecycle::stop(r, session, yes)?,
         Cmd::Restart {
             session,

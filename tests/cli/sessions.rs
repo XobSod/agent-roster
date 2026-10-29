@@ -1209,6 +1209,52 @@ fn killing_a_session_ends_its_agent_and_all_it_started() {
 }
 
 #[test]
+fn one_process_of_a_session_is_killed_alone() {
+    let Some(t) = TestEnv::new("killone") else {
+        return;
+    };
+    // An agent with a child, its pid written where the test can read it.
+    fs::write(
+        t.config_dir().join("config.toml"),
+        "[agents.parent]\ncommand = \"sh\"\nargs = [\"-c\", \"sleep 600 & echo $! > child.pid; exec sleep 600\"]\n",
+    )
+    .unwrap();
+    let proj = t.path("proj");
+    t.ok(&["project", "add", "demo", proj.to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "parent", "--agent", "parent"]);
+    let processes = |t: &TestEnv| {
+        let list: serde_json::Value =
+            serde_json::from_str(&t.ok(&["ls", "--resources", "--json"])).unwrap();
+        list[0]["resources"]["processes"].as_u64()
+    };
+    let child = || fs::read_to_string(proj.join("child.pid")).unwrap_or_default();
+    t.wait_for("both running", |t| {
+        processes(t) == Some(2) && child().ends_with('\n')
+    });
+    let child = child();
+    let child = child.trim();
+    // Not one of its processes: refused, nothing killed.
+    let out = t.run(&["stop", "--kill", "--yes", "--pid", "1", "parent"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("process 1 isn't one of demo/parent's"),
+        "{err}"
+    );
+    // Named by what it runs.
+    let out = t.ok(&["stop", "--kill", "--yes", "--pid", child, "parent"]);
+    assert_eq!(
+        out,
+        format!("Killed process {child} (sleep) of demo/parent: 1 process\n")
+    );
+    // Its agent goes on.
+    t.wait_for("the agent alone", |t| processes(t) == Some(1));
+    assert_ne!(t.session("parent", false).unwrap()["state"], "stopped");
+    // Gone, it's not one any more.
+    let out = t.run(&["stop", "--kill", "--yes", "--pid", child, "parent"]);
+    assert!(!out.status.success());
+}
+
+#[test]
 fn a_session_can_kill_itself_from_inside() {
     let Some(t) = TestEnv::new("killself") else {
         return;

@@ -123,6 +123,37 @@ fn settings_change_config_toml_in_place() {
 }
 
 #[test]
+fn an_agent_is_added_from_its_command_line() {
+    let Some(t) = TestEnv::new("addagent") else {
+        return;
+    };
+    // Named after what it runs; each argument as given, spaces and all.
+    assert_eq!(
+        t.ok(&["config", "add-agent", "gemini", "--yolo"]),
+        "Added the agent gemini: new sessions can run it\n"
+    );
+    t.ok(&["config", "add-agent", "npx", "@xai/grok@latest"]);
+    t.ok(&["config", "add-agent", "aider", "--message", "two words"]);
+    let text = fs::read_to_string(t.config_dir().join("config.toml")).unwrap();
+    for table in [
+        "[agents.gemini]\ncommand = \"gemini\"\nargs = [\"--yolo\"]\n",
+        "[agents.grok]\ncommand = \"npx\"\nargs = [\"@xai/grok@latest\"]\n",
+        "[agents.aider]\ncommand = \"aider\"\nargs = [\"--message\", \"two words\"]\n",
+    ] {
+        assert!(text.contains(table), "{text}");
+    }
+    // One that runs no command isn't one, nor a flag one meant for roster.
+    assert!(!t.run(&["config", "add-agent"]).status.success());
+    assert!(
+        !t.run(&["config", "add-agent", "-y", "aider"])
+            .status
+            .success()
+    );
+    let text = fs::read_to_string(t.config_dir().join("config.toml")).unwrap();
+    assert!(!text.contains("[agents.-"), "{text}");
+}
+
+#[test]
 fn an_agents_model_and_effort_are_its_new_sessions() {
     let Some(t) = TestEnv::new("agent-model") else {
         return;

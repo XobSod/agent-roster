@@ -233,6 +233,7 @@ roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation
 roster stop --kill api                  # at once: its agent and all it started, left running too
+roster stop --kill --pid 4242 api       # one of its processes (a runaway build) and what's under it; the agent goes on
 roster archive api && roster restore api   # archived sessions keep their conversation
 roster rm api                           # delete one for good, archived or not (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
@@ -242,6 +243,7 @@ roster doctor                           # roster's tmux server and database, che
 roster config                           # every setting (but prices): its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
 roster config unset fit_preview         # back to its default
+roster config add-agent gemini --yolo   # an agent for new sessions, named after what it runs
 roster config --defaults                # a config.toml with every setting, prices' shape too, commented out
 roster config --edit                    # config.toml in $EDITOR (from those defaults if there's none)
 ```
@@ -389,7 +391,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
     quicker). pi names no task itself, so roster has it make a title after a
     conversation's first turn; `auto_title = false` turns that off. Any other
-    agent goes in its own table and is then offered for new sessions:
+    agent goes in its own table and is then offered for new sessions (`roster config
+    add-agent` makes one from a command line, as the settings view does):
 
     ```toml
     [agents.aider]          # runs `aider`; or set command = "..."

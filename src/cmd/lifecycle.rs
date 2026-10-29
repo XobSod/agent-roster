@@ -66,8 +66,9 @@ pub fn start(r: &mut Roster, session: String, yes: bool, again: PromptAgain) -> 
     Ok(())
 }
 
-/// `roster stop --kill`.
-pub fn kill(r: &mut Roster, session: String, yes: bool) -> Result<()> {
+/// `roster stop --kill`: the session's processes, or (`pid`) one of them
+/// and those under it.
+pub fn kill(r: &mut Roster, session: String, yes: bool, pid: Option<i32>) -> Result<()> {
     r.refresh()?;
     // A deleted session's id, still carried by what it left running.
     let (id, label) = match r.resolve_either(&session) {
@@ -77,7 +78,20 @@ pub fn kill(r: &mut Roster, session: String, yes: bool) -> Result<()> {
             _ => return Err(e),
         },
     };
-    let targets = r.kill_targets(&id, None)?;
+    // One of its processes as it is now, so a pid given to another since
+    // isn't taken for it; named by what it runs, the agent said to be.
+    let (process, label) = match pid {
+        None => (None, label),
+        Some(pid) => {
+            let tree = r.kill_targets(&id, None)?;
+            let p = (tree.iter().find(|p| p.pid == pid))
+                .with_context(|| format!("process {pid} isn't one of {label}'s, or has ended"))?;
+            let agent = if p.agent { ", its agent" } else { "" };
+            let label = format!("process {pid} ({}{agent}) of {label}", p.command);
+            (Some((p.pid, p.started)), label)
+        }
+    };
+    let targets = r.kill_targets(&id, process)?;
     if targets.is_empty() {
         println!("{label}: nothing running");
         return Ok(());
@@ -109,7 +123,7 @@ pub fn kill(r: &mut Roster, session: String, yes: bool) -> Result<()> {
         // SAFETY: setting a signal's disposition to ignore it.
         unsafe { libc::signal(signal, libc::SIG_IGN) };
     }
-    let said = r.kill(&id, None)?.said(&label);
+    let said = r.kill(&id, process)?.said(&label);
     // Its terminal may be gone by now.
     let _ = writeln!(io::stdout(), "{said}");
     Ok(())

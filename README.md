@@ -9,10 +9,11 @@ Claude Code is tracked through its hooks, [pi](#pi) through a small extension ro
 loads into it, [Codex](#codex) through hooks it hands each run it starts; any other
 CLI agent can be added as a generic agent, tracked by its screen.
 
-![roster: a finished turn read and given a follow-up, a question that came in meanwhile answered, and the follow-up coming back up](demo/gifs/roster.gif)
+![roster: going through the sessions that need you, the list staying beside the agent you're in, a question that came in meanwhile answered, and a follow-up coming back up](demo/gifs/overview.gif)
 
-<sub>The agents in the recording are a scripted stand-in for Claude Code
-([demo/](demo/)).</sub>
+<sub>The agents in the recordings are a scripted stand-in for Claude Code, pi and Codex
+([demo/](demo/)); `fit_preview = "always"` keeps the session list beside the agent
+you're in, and `memory_warning = "1G"` marks the runaway build.</sub>
 
 ## Install
 
@@ -60,13 +61,7 @@ Everything else is in three menus, which pop up their keys:
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage |
 
-The server view (`v t`) lists each session's tmux session with what its processes
-use together: memory, CPU lately, how many. `j`/`k` move the cursor; on a session, `l`
-unfolds it to its process tree (`h` folds), each process with its own memory, CPU and
-pid: the agent and all it started, and anything started in the session that left the
-agent or outlived it (an archived or deleted session's, in a section of their own).
-There the session menu's keys work without `s`: `x` stops the cursor's session, `X` kills
-it, or on a process, that one and all under it (a runaway build), the agent going on.
+### Sessions and shelves
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
 (questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
@@ -81,6 +76,20 @@ resumes its conversation. For a stopped one whose agent exited with an error, it
 also shows how the agent's screen ended (`roster show` prints all of it). A shelf's
 or a project's heading previews its sessions at a glance: what each is waiting for
 and since when, its last prompt, and its note's line.
+
+Under the preview's header is what roster knows of the session: when it was made, its
+prompts, the time it worked, and from its agent's conversation, the context used,
+output tokens (its subagents' too), cost and lines changed.
+
+### Finding your way
+
+![roster: the list filtered as you type, one project shown alone, then the sessions grouped by project in the settings view](demo/gifs/finding.gif)
+
+Beside `/`, `p f` shows only the selected session's project (again, all of them), and
+the settings view (`v s`) changes a setting at once: `group_by`, say, to put the
+sessions under their projects.
+
+### New sessions, chats and adopting
 
 New and edit open a form (`Tab`/`↑↓` move, `←→` change, `Enter` submits). Projects
 carry a default agent, model and effort for their sessions, and each agent its own
@@ -102,18 +111,22 @@ else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--eff
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
 Roster can tell when one is open in Claude, but not in pi or Codex.
 
-A Claude or Codex session whose own turn ended with subagents still at work (in the
-background) stays working until the last one is done, and its card says how many, on
-its second line: `↳2 ›`. `l` on the card unfolds a line for each, the model it runs,
+### Subagents
+
+![roster: a card counting its session's subagents at work, unfolded to what each is doing, folding as they finish](demo/gifs/subagents.gif)
+
+A Claude or Codex session's card says how many subagents it has at work, on its second
+line: `↳2 ›`; one whose own turn ended with subagents still at work (in the background)
+stays working until the last one is done. `l` on the card unfolds a line for each, the model it runs,
 what it's doing (its latest step, in the manner of its agent's own screen; what it was
 given to do till its first) and how long it's been at it; `h` folds it again (`card_subagents` keeps
 them unfolded, the lines then saying how many, or shows the count only). One unheard of
 for fifteen minutes is taken for gone. Sessions started before roster knew this (before
 it was updated) don't say when their subagents start: restart them.
 
-Under the preview's header is what roster knows of the session: when it was made, its
-prompts, the time it worked, and from its agent's conversation, the context used,
-output tokens (its subagents' too), cost and lines changed.
+### Notes
+
+![roster: a session's note written in the editor under the preview's header, a line pinned for the preview, and its project's note](demo/gifs/notes.gif)
 
 Each session can have a note, what's left to do in it, say. `s o` opens it under the
 preview's header, the agent's screen still below, in an editor with vim's keys: normal,
@@ -161,6 +174,22 @@ do. In the editor too, the pinned line is
 marked `▤` in the project's note. `▤` after a project's name marks it having a note,
 on cards and headings and in the projects view. It goes when the project is removed.
 
+### Processes
+
+![roster: the server view, a session unfolded to its processes, a runaway build marked as it passes the memory warning and killed alone, its agent going on](demo/gifs/processes.gif)
+
+The server view (`v t`) lists each session's tmux session with what its processes
+use together: memory, CPU lately, how many. `j`/`k` move the cursor; on a session, `l`
+unfolds it to its process tree (`h` folds), each process with its own memory, CPU and
+pid: the agent and all it started, and anything started in the session that left the
+agent or outlived it (an archived or deleted session's, in a section of their own).
+There the session menu's keys work without `s`: `x` stops the cursor's session, `X` kills
+it, or on a process, that one and all under it (a runaway build), the agent going on.
+
+### Usage and spending
+
+![roster: what's left of the Claude and Codex accounts' limits, then what the agents spent over 24 hours, 7 and 30 days](demo/gifs/usage.gif)
+
 `v u` shows what's left of your Claude and Codex accounts' limits: the 5-hour and the
 weekly window, each as a bar, full while none of it is used and shrinking as you use
 it, with a mark where as much of the window's time is left (a bar ending short of it
@@ -203,6 +232,8 @@ roster may update how it's kept, once, as it first opens the database: a few sec
 for a million calls (it says so), during which hooks' reports are lost and the file
 takes up to twice its room, then gives back what it no longer needs, a little at a
 time.
+
+### The CLI
 
 Everything is also available from the CLI:
 
@@ -556,6 +587,7 @@ cargo test     # unit tests, plus end-to-end tests that need tmux
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a
 development build apart from your real sessions.
 
-`demo/render.sh` records the GIF above from `demo/tapes/` with
+`demo/render.sh` records the GIFs above from `demo/tapes/` with
 [VHS](https://github.com/charmbracelet/vhs) in Docker, in a home of its own, with
-`demo/env/fake-claude` as every agent.
+`demo/env/fake-agent` standing in for Claude Code, pi and Codex, and draws on the keys
+each tape presses with what they do (its `#:` comments).

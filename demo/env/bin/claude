@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The demo's stand-in (../fake-agent) run as the agent this is named after (claude, pi,
+# codex), by that name: tmux lists a session's agent by it. Python, which would take
+# that name for where it is, is told where it really is.
+name=$(basename "$0")
+here=$(dirname "$(readlink -f "$0")")
+FAKE_AGENT=$name FAKE_AGENT_PYTHON=$(command -v python3) exec -a "$name" python3 "$here/../fake-agent" "$@"

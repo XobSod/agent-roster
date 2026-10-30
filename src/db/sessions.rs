@@ -8,7 +8,7 @@ pub(super) const SESSION_COLUMNS: &str =
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
     s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting, s.shells,
-    s.started_at, s.session_at, s.conversation_begun, s.note, s.note_pin, s.note_at";
+    s.started_at, s.session_at, s.conversation_begun, s.note, s.note_pin, s.note_at, s.worktree";
 
 impl Db {
     /// The names of a project's live sessions.
@@ -141,10 +141,12 @@ impl Db {
             subagents,
             shells,
             awaiting,
+            worktree,
         } = after;
         let state_name = state.as_str();
         let subagents_text = subagents_text(subagents);
         let shells_text = shells_text(shells);
+        let worktree_text = worktree_text(worktree);
         let mut set: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
         if before.state != *state {
             set.push(("state", &state_name));
@@ -154,6 +156,9 @@ impl Db {
         }
         if before.shells != *shells {
             set.push(("shells", &shells_text));
+        }
+        if before.worktree != *worktree {
+            set.push(("worktree", &worktree_text));
         }
         macro_rules! changed {
             ($($field:ident),*) => {$(
@@ -417,7 +422,8 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              given_prompt = :given_prompt,
              subagents = :subagents,
              shells = :shells,
-             awaiting = :awaiting
+             awaiting = :awaiting,
+             worktree = :worktree
          WHERE id = :id",
         named_params! {
             ":id": s.id,
@@ -451,6 +457,7 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":subagents": subagents_text(&s.subagents),
             ":shells": shells_text(&s.shells),
             ":awaiting": s.awaiting,
+            ":worktree": worktree_text(&s.worktree),
         },
     )
     .map_err(|e| {
@@ -508,7 +515,14 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
             .unwrap_or_default(),
         awaiting: r.get("awaiting")?,
         note: note_from_row(r)?,
+        worktree: (r.get::<_, Option<String>>("worktree")?)
+            .and_then(|text| serde_json::from_str(&text).ok()),
     })
+}
+
+/// A session's worktree as kept: JSON; nothing for none.
+pub(super) fn worktree_text(worktree: &Option<crate::model::Worktree>) -> Option<String> {
+    (worktree.as_ref()).map(|w| serde_json::to_string(w).unwrap_or_default())
 }
 
 /// What's found of a session's shells in its agent's transcript

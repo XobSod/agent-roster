@@ -118,6 +118,7 @@ impl Roster {
             None => ran_on,
         };
         let request = NewSession {
+            works_in: Default::default(),
             project: project.name.clone(),
             name: req.name,
             agent: Some(c.agent.clone()),

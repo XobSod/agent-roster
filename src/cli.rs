@@ -29,6 +29,8 @@ pub enum Cmd {
         project: String,
         #[command(flatten)]
         session: SessionArgs,
+        #[command(flatten)]
+        works_in: WorksInArgs,
     },
     /// Start a chat: a session that needs no project (it runs in the built-in chats project)
     Chat {
@@ -123,6 +125,8 @@ pub enum Cmd {
         session: String,
         #[arg(short, long)]
         yes: bool,
+        #[command(flatten)]
+        leaving: LeavingArgs,
     },
     /// Restore an archived session
     Restore {
@@ -242,7 +246,25 @@ pub enum ProjectCmd {
         name: String,
         #[arg(short, long)]
         yes: bool,
+        #[command(flatten)]
+        leaving: LeavingArgs,
     },
+}
+
+/// What deleting sessions for good does with the worktrees roster made for
+/// them and their branches, answered here, else asked: `--yes` keeps a
+/// worktree with changes, and answers nothing of a branch.
+#[derive(clap::Args)]
+pub struct LeavingArgs {
+    /// Remove a worktree with changes not committed too (without it, asked; with --yes or no terminal, such a worktree stays)
+    #[arg(long)]
+    pub discard_changes: bool,
+    /// Delete the branch of a worktree that's removed
+    #[arg(long, alias = "delete-branches", conflicts_with = "keep_branch")]
+    pub delete_branch: bool,
+    /// Keep the branch of a worktree that's removed
+    #[arg(long, alias = "keep-branches")]
+    pub keep_branch: bool,
 }
 
 /// Whether a start gives again the first prompt its agent exited before
@@ -294,6 +316,7 @@ impl SessionArgs {
             (None, None)
         };
         let request = NewSession {
+            works_in: Default::default(),
             project: p.name,
             name: self.name,
             agent: self.agent,
@@ -302,6 +325,35 @@ impl SessionArgs {
             prompt: self.prompt,
         };
         (request, self.attach)
+    }
+}
+
+/// Where a new session works: its project's checkout (the default), or a
+/// git worktree.
+#[derive(clap::Args)]
+pub struct WorksInArgs {
+    /// Work in a new git worktree, on this branch (default: the session's name); a branch that exists is checked out as it is
+    #[arg(long, value_name = "BRANCH", num_args = 0..=1, default_missing_value = "", conflicts_with = "in_worktree")]
+    pub worktree: Option<String>,
+    /// What a new branch starts from: a branch, a tag or a commit (default: the checkout's HEAD)
+    #[arg(long, value_name = "REF", requires = "worktree")]
+    pub base: Option<String>,
+    /// Work in a worktree there is: a directory in it, or a session that works in it
+    #[arg(long = "in", value_name = "WORKTREE")]
+    pub in_worktree: Option<String>,
+}
+
+impl WorksInArgs {
+    pub fn works_in(self) -> crate::engine::WorksIn {
+        use crate::engine::WorksIn;
+        match (self.worktree, self.in_worktree) {
+            (Some(branch), _) => WorksIn::New {
+                branch: Some(branch).filter(|b| !b.is_empty()),
+                base: self.base,
+            },
+            (None, Some(at)) => WorksIn::Existing(at),
+            (None, None) => WorksIn::Checkout,
+        }
     }
 }
 

@@ -40,7 +40,6 @@ pub fn run(args: &[String]) -> ! {
 
 fn report(args: &[String]) -> Result<()> {
     let kind = args.first().context("no event kind")?;
-    let session = std::env::var("ROSTER_SESSION").context("ROSTER_SESSION not set")?;
     let mut payload = String::new();
     // Hooks get JSON on stdin; when run by hand from a terminal, don't wait for it.
     if !std::io::stdin().is_terminal() {
@@ -48,7 +47,13 @@ fn report(args: &[String]) -> Result<()> {
             .take(MAX_PAYLOAD)
             .read_to_string(&mut payload)?;
     }
-    let payload = payload.trim();
+    record(kind, payload.trim())
+}
+
+/// Records a report of `kind` with `payload` for the session this runs in
+/// (`ROSTER_SESSION`), in its database (`ROSTER_DB`).
+pub fn record(kind: &str, payload: &str) -> Result<()> {
+    let session = std::env::var("ROSTER_SESSION").context("ROSTER_SESSION not set")?;
     let db = match std::env::var_os("ROSTER_DB") {
         Some(path) => PathBuf::from(path),
         None => Paths::from_env()?.db(),

@@ -1,7 +1,7 @@
 //! Sessions' lives: attaching, starting, stopping, killing, restarting, archiving, deleting and restoring them.
 
 use crate::*;
-use engine::{StartCheck, Starting};
+use engine::{Deleting, Leaving, StartCheck, Starting};
 
 /// `roster attach`.
 pub fn attach(r: &mut Roster, session: String, yes: bool, again: PromptAgain) -> Result<()> {
@@ -162,17 +162,53 @@ pub fn archive(r: &mut Roster, session: String, yes: bool) -> Result<()> {
 }
 
 /// `roster rm`.
-pub fn delete(r: &mut Roster, session: String, yes: bool) -> Result<()> {
+pub fn delete(r: &mut Roster, session: String, yes: bool, args: LeavingArgs) -> Result<()> {
     // What its hooks said since, in the question: a turn or a subagent
     // it would cut short.
     r.refresh()?;
     let s = r.resolve_either(&session)?;
-    if !confirm(&agent::delete_question(&s), yes)? {
+    let leaving = r.leaving(std::slice::from_ref(&s.id))?;
+    let question = agent::delete_question(&s) + &engine::staying_said(&leaving);
+    if !confirm(&question, yes)? {
         return Ok(());
     }
-    r.delete(&s.id)?;
+    let how = deleting(&leaving, yes, &args)?;
+    let (_, said) = r.delete(&s.id, how)?;
     println!("Deleted {} ({}) for good", s.label(), s.id);
+    for line in said {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// What deleting for good does with the worktrees and branches `leaving`:
+/// as `args` say, else asked (with a terminal to ask in). `yes` answers
+/// that worktrees with changes not committed stay; nothing answers for a
+/// branch but its own option.
+pub(crate) fn deleting(leaving: &[Leaving], yes: bool, args: &LeavingArgs) -> Result<Deleting> {
+    let terminal = io::stdin().is_terminal();
+    let ask = |question: &str| -> Result<bool> {
+        eprint!("{question} [y/N] ");
+        io::stderr().flush()?;
+        let mut answer = String::new();
+        io::stdin().lock().read_line(&mut answer)?;
+        Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+    };
+    let mut how = Deleting::default();
+    if let Some(question) = engine::changes_question(leaving) {
+        how.discard_changes = args.discard_changes || (!yes && terminal && ask(&question)?);
+    }
+    if let Some(question) = engine::branches_question(leaving, how.discard_changes) {
+        how.delete_branches = match (args.delete_branch, args.keep_branch) {
+            (true, _) => true,
+            (_, true) => false,
+            _ if !terminal => {
+                bail!("{question} Pass --delete-branch or --keep-branch.")
+            }
+            _ => ask(&question)?,
+        };
+    }
+    Ok(how)
 }
 
 /// `roster restore`.

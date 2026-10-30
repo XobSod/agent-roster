@@ -106,6 +106,57 @@ pub(super) fn trust(file: &Path, dir: &Path) -> Result<bool> {
     crate::agent::locked::update(file, |text| trusted(file, text, dir))
 }
 
+/// Whether the config at `file` trusts `dir`, as Claude's question would
+/// find: its entry, or one above it, up to its git repository's root.
+pub(super) fn trusted_at(file: &Path, dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let top = crate::git::toplevel(dir);
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    for at in dir.ancestors() {
+        let entry = &config["projects"][at.to_string_lossy().as_ref()];
+        if entry["hasTrustDialogAccepted"] == Value::Bool(true) {
+            return true;
+        }
+        if top.as_deref().is_none_or(|top| at == top) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Takes back the trust of every folder at or under `root` (a worktree
+/// roster made, removed): their entries go, as they're of a directory
+/// that's gone. Whether any did.
+pub(super) fn untrust_under(file: &Path, root: &Path) -> Result<bool> {
+    if !file.exists() {
+        return Ok(false);
+    }
+    crate::agent::locked::update(file, |text| untrusted(file, text, root))
+}
+
+fn untrusted(file: &Path, text: &str, root: &Path) -> Result<Option<String>> {
+    let unlike = || format!("{} isn't laid out as Claude's config", file.display());
+    let mut config = Object::parse(text).with_context(unlike)?;
+    let Some(raw) = config.raw("projects") else {
+        return Ok(None);
+    };
+    let mut projects = Object::parse(raw.get()).with_context(unlike)?;
+    let before = projects.0.len();
+    projects
+        .0
+        .retain(|(key, _)| !Path::new(key).starts_with(root));
+    if projects.0.len() == before {
+        return Ok(None);
+    }
+    config.set("projects", Member::Object(projects));
+    Ok(Some(serde_json::to_string_pretty(&config)?))
+}
+
 /// The config `text` with `dir` trusted; None if it's trusted already.
 fn trusted(file: &Path, text: &str, dir: &Path) -> Result<Option<String>> {
     let unlike = || format!("{} isn't laid out as Claude's config", file.display());

@@ -107,7 +107,7 @@ impl App {
                 }
                 None => self.no_project(),
             },
-            Action::RemoveProject => self.remove_project(),
+            Action::RemoveProject => return self.remove_project(),
             Action::ProjectNote => return self.project_note(),
             Action::NewSession => self.new_session(),
             Action::NewChat => return Some(Op::NewChat),
@@ -412,10 +412,59 @@ impl App {
         None
     }
 
-    /// Asks whether to delete `s` for good.
+    /// Asks whether to delete `s` for good; what it leaves of a worktree is
+    /// asked about as it is now (`Op::AskDelete`).
     fn delete(&mut self, s: Session) -> Option<Op> {
-        self.confirm(crate::agent::delete_question(&s), Op::Delete(s.id));
+        if s.worktree.is_some() {
+            return Some(Op::AskDelete {
+                id: s.id,
+                discard: None,
+            });
+        }
+        let question = crate::agent::delete_question(&s);
+        self.confirm(question, Op::Delete(s.id, Default::default()));
         None
+    }
+
+    /// What deleting for good asks of the worktrees in `leaving`, after
+    /// `question`: before the changes in them are decided (`discard` None),
+    /// whether to remove those with changes, and then their branches; `go`
+    /// does it as decided, `again` asks the next question.
+    pub(crate) fn ask_leaving(
+        &mut self,
+        question: String,
+        leaving: &[crate::engine::Leaving],
+        discard: Option<bool>,
+        go: impl Fn(crate::engine::Deleting) -> Op,
+        again: impl Fn(bool) -> Op,
+    ) {
+        use crate::engine::{Deleting, branches_question, changes_question, staying_said};
+        let how = |discard_changes, delete_branches| Deleting {
+            discard_changes,
+            delete_branches,
+        };
+        let question = question + &staying_said(leaving);
+        let changes = discard
+            .is_none()
+            .then(|| changes_question(leaving))
+            .flatten();
+        let discard = discard.unwrap_or(false);
+        match (changes, branches_question(leaving, discard)) {
+            // y: removed with them, and then its branch; n: it stays.
+            (Some(changes), _) => {
+                let then = |discard| match branches_question(leaving, discard) {
+                    Some(_) => again(discard),
+                    None => go(how(discard, false)),
+                };
+                self.ask(format!("{question} {changes}"), then(true), then(false));
+            }
+            (None, Some(branches)) => self.ask(
+                format!("{question} {branches}"),
+                go(how(discard, true)),
+                go(how(discard, false)),
+            ),
+            (None, None) => self.confirm(question, go(how(discard, false))),
+        }
     }
 
     /// `p o`: the selected project's note, opened beside the selected
@@ -543,10 +592,10 @@ impl App {
         self.rebuild();
     }
 
-    pub(super) fn remove_project(&mut self) {
+    pub(super) fn remove_project(&mut self) -> Option<Op> {
         let Some(p) = self.selected_project() else {
             self.no_project();
-            return;
+            return None;
         };
         let (archived, live): (Vec<&Session>, Vec<&Session>) = self
             .sessions
@@ -559,10 +608,18 @@ impl App {
                 "{} still has sessions; archive them first ({archive})",
                 p.name
             ));
-            return;
+            return None;
+        }
+        // What it leaves of their worktrees, asked about as they are now.
+        if archived.iter().any(|s| s.worktree.is_some()) {
+            return Some(Op::AskRemoveProject {
+                name: p.name.clone(),
+                discard: None,
+            });
         }
         let question = crate::engine::project_removal_question(&p, archived);
-        self.confirm(question, Op::RemoveProject(p.name));
+        self.confirm(question, Op::RemoveProject(p.name, Default::default()));
+        None
     }
 
     /// Whether a live session in `s`'s project has its name.

@@ -385,7 +385,10 @@ fn archive_and_working_stop_or_restart_ask_first() {
             && question.contains("for good? Its agent stops, and roster forgets it"),
         "{question}"
     );
-    assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s1".into())));
+    assert_eq!(
+        keys(&mut app, "y"),
+        Some(Op::Delete("s1".into(), Default::default()))
+    );
     assert_eq!(keys(&mut app, "sr"), Some(Op::Restart("s1".into())));
     select(&mut app, "s4");
     // A working one says so.
@@ -455,7 +458,10 @@ fn archived_sessions_restore_or_go_for_good() {
         question.contains("for good? Roster forgets it"),
         "{question}"
     );
-    assert_eq!(keys(&mut app, "y"), Some(Op::Delete("s3".into())));
+    assert_eq!(
+        keys(&mut app, "y"),
+        Some(Op::Delete("s3".into(), Default::default()))
+    );
 }
 
 #[test]
@@ -1179,6 +1185,7 @@ fn the_settings_view_changes_settings() {
     let env = crate::settings::Env {
         shell: "/bin/sh",
         chats_dir: "~/chats",
+        worktrees_dir: "~/worktrees",
         agents: &agents,
     };
     app.set_settings(crate::settings::sections(
@@ -1500,4 +1507,76 @@ fn news_that_comes_on_its_own_doesnt_hide_an_error() {
     app.on_key(key(KeyCode::Down));
     app.notice("a title came");
     assert_eq!(app.message().unwrap().text, "a title came");
+}
+
+#[test]
+fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
+    use crate::engine::{Branch, Deleting, Leaving};
+    let mut app = app();
+    let leaving = |changed, unmerged| Leaving {
+        root: "/w/demo/fix".into(),
+        repo: "/r".into(),
+        trusted_in: Vec::new(),
+        stays: None,
+        changed,
+        branch: Some(Branch {
+            name: "fix".into(),
+            base: Some("main".into()),
+            unmerged: Some(unmerged),
+        }),
+    };
+    let go = |how| Op::Delete("s1".into(), how);
+    let again = |discard| Op::AskDelete {
+        id: "s1".into(),
+        discard: Some(discard),
+    };
+    // Changes first: y removes them and asks of the branch next; n keeps
+    // the worktree, so there's no branch to ask of.
+    app.ask_leaving("Delete it?".into(), &[leaving(3, 2)], None, go, again);
+    let Some(Dialog::Ask { question, yes, no }) = app.dialog.take() else {
+        panic!("no question")
+    };
+    assert!(
+        question.contains("has 3 files changed, not committed"),
+        "{question}"
+    );
+    assert_eq!(yes, again(true));
+    assert_eq!(no, go(Deleting::default()));
+    app.ask_leaving("Delete it?".into(), &[leaving(3, 2)], Some(true), go, again);
+    let Some(Dialog::Ask { question, yes, no }) = app.dialog.take() else {
+        panic!("no question")
+    };
+    assert!(
+        question.contains("Its branch fix has 2 commits main doesn't, which deleting it loses"),
+        "{question}"
+    );
+    let how = |delete_branches| Deleting {
+        discard_changes: true,
+        delete_branches,
+    };
+    assert_eq!((yes, no), (go(how(true)), go(how(false))));
+    // Clean and merged: the branch asked of with the deletion itself.
+    app.ask_leaving("Delete it?".into(), &[leaving(0, 0)], None, go, again);
+    let Some(Dialog::Ask { question, .. }) = app.dialog.take() else {
+        panic!("no question")
+    };
+    assert!(
+        question.starts_with("Delete it? Its branch fix is merged into main: delete it too?"),
+        "{question}"
+    );
+    // One that stays: said, and nothing else asked.
+    let stays = Leaving {
+        stays: Some("demo/b works in it".into()),
+        branch: None,
+        ..leaving(0, 0)
+    };
+    app.ask_leaving("Delete it?".into(), &[stays], None, go, again);
+    let Some(Dialog::Confirm { question, op }) = app.dialog.take() else {
+        panic!("no confirmation")
+    };
+    assert_eq!(
+        question,
+        "Delete it? Its worktree, /w/demo/fix, stays: demo/b works in it."
+    );
+    assert_eq!(op, go(Deleting::default()));
 }

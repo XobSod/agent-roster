@@ -35,7 +35,7 @@ pub mod codex;
 pub(crate) mod locked;
 pub mod pi;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer};
@@ -260,6 +260,24 @@ pub trait Adapter: Sync {
     /// Whether it trusts folders roster can trust for it (`trust_folder`).
     fn trusts_folders(&self) -> bool {
         false
+    }
+
+    /// Whether it trusts the folder `dir`, as its own question would find:
+    /// for a worktree's folder to be trusted as its checkout's is. Its config
+    /// is found as `trust_folder` finds it.
+    fn folder_trusted(&self, _dir: &Path) -> bool {
+        false
+    }
+
+    /// The config `trust_folder` writes in, found as it finds it.
+    fn trust_config(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// Takes back, in its config `file`, the trust of the folders at or
+    /// under `root` (a worktree removed): whether any was.
+    fn untrust_folders_under(&self, _file: &Path, _root: &Path) -> Result<bool> {
+        Ok(false)
     }
 
     /// Its command line `argv` with roster's own hooks in it (roster run as
@@ -612,13 +630,14 @@ pub fn trust_and_run(args: &[String]) -> ! {
     let flags = args
         .iter()
         .take_while(|a| a.starts_with("--") && *a != "--");
-    let (mut folder, mut hooks) = (false, false);
+    let (mut folder, mut hooks, mut like) = (false, false, None);
     for flag in flags.clone() {
         match flag.as_str() {
             "--folder" => folder = true,
             "--hooks" => hooks = true,
+            _ if flag.starts_with("--like=") => like = Some(PathBuf::from(&flag[7..])),
             _ => {
-                eprintln!("roster: trust takes --folder or --hooks, not {flag}");
+                eprintln!("roster: trust takes --folder, --hooks or --like=<dir>, not {flag}");
                 std::process::exit(2);
             }
         }
@@ -632,12 +651,27 @@ pub fn trust_and_run(args: &[String]) -> ! {
     };
     let name = crate::util::capitalize(agent);
     // The working directory as the agent will see it: links resolved.
+    let a = adapter(agent);
+    // A worktree's (`--like` its checkout): what's written is said, to be
+    // taken back as it's removed.
+    let like_trusted = like
+        .as_deref()
+        .is_some_and(|checkout| a.folder_trusted(checkout));
     match std::env::current_dir() {
-        Ok(dir) if folder => {
-            if let Err(e) = adapter(agent).trust_folder(&dir) {
-                eprintln!("roster: couldn't trust {} in {name}: {e:#}", dir.display());
+        Ok(dir) if folder || like_trusted => match a.trust_folder(&dir) {
+            Ok(true) if like.is_some() => {
+                let said = crate::model::WorktreeReport {
+                    set_up: false,
+                    trusted_in: a.trust_config(),
+                };
+                let said = serde_json::to_string(&said).unwrap_or_default();
+                if let Err(e) = crate::report::record(crate::model::WORKTREE, &said) {
+                    eprintln!("roster: couldn't record {}'s trust: {e:#}", dir.display());
+                }
             }
-        }
+            Ok(_) => {}
+            Err(e) => eprintln!("roster: couldn't trust {} in {name}: {e:#}", dir.display()),
+        },
         Ok(_) => {}
         Err(e) => eprintln!("roster: can't tell which folder to trust: {e}"),
     }

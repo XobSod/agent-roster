@@ -148,7 +148,17 @@ impl Roster {
         s.effort = effort;
         s.pending_prompt = prompt;
         customize(&mut s);
-        self.db.insert_session(&s)?;
+        // Made last, once nothing else is left to refuse it.
+        if let Some((dir, worktree)) = self.place(&project, &name, &req.works_in)? {
+            s.workdir = dir;
+            s.worktree = Some(worktree);
+        }
+        if let Err(e) = self.db.insert_session(&s) {
+            if let Some(w) = s.worktree.as_ref().filter(|w| w.made) {
+                undo_worktree(w);
+            }
+            return Err(e);
+        }
         self.start(&s.id)?;
         self.db.session(&s.id)
     }
@@ -185,6 +195,24 @@ impl Roster {
         if let StartCheck::Refused(why) = start_check(&s, Starting::Start) {
             bail!(why);
         }
+        // Its worktree gone: made again where it was (asked about first),
+        // and set up again, being new.
+        if let Some(w) = s.worktree.as_mut().filter(|w| !w.root.exists()) {
+            crate::git::prune_worktrees(&w.repo)?;
+            if let Some(parent) = w.root.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("can't make {}", parent.display()))?;
+            }
+            crate::git::add_worktree(&w.repo, &w.root, &w.branch, None)?;
+            let project = (self.db.projects()?.into_iter()).find(|p| p.id == s.project_id);
+            w.set_up = !project.is_some_and(|p| p.origin.join(WORKTREE_SETUP).is_file());
+            // Kept, though the start fails: the worktree is there now.
+            let remade = Session {
+                worktree: s.worktree.clone(),
+                ..before.clone()
+            };
+            self.db.save_changes(&before, &remade)?;
+        }
         // One its agent no longer has (asked about first) begins anew on its
         // id: nothing of it said yet, and no copy of the one it came from.
         if agent::conversation_lost(&s) {
@@ -213,20 +241,36 @@ impl Roster {
         let adapter = agent::adapter(&s.agent);
         let folder = self.config.trust_project_folders() && adapter.trusts_folders();
         let hooks = self.config.trusts_hooks(&s.agent) && adapter.trusts_hooks();
-        if folder || hooks {
+        // A worktree's folder trusted as its project's checkout is.
+        let checkout = (s.worktree.is_some() && adapter.trusts_folders())
+            .then(|| self.db.projects())
+            .transpose()?
+            .and_then(|ps| ps.into_iter().find(|p| p.id == s.project_id))
+            .map(|p| p.origin);
+        if folder || hooks || checkout.is_some() {
             let mut head = vec![self.exe.to_string_lossy().into_owned(), "trust".into()];
             head.extend(folder.then(|| "--folder".to_string()));
             head.extend(hooks.then(|| "--hooks".to_string()));
+            head.extend((checkout.as_ref()).map(|c| format!("--like={}", c.display())));
             head.extend([s.agent.clone(), "--".into()]);
             command.splice(0..0, head);
         }
-        let argv = self.wrapped(&s, prompt.as_deref(), &command)?;
-        // What an agent's hooks need to report (`roster report`).
-        let env = [
+        let argv = self.wrapped(&s, prompt.as_deref(), true, &command)?;
+        // What an agent's hooks need to report (`roster report`); for a
+        // worktree's setup script, where its project's checkout is.
+        let mut env = vec![
             ("ROSTER_SESSION", s.id.clone()),
             ("ROSTER_DB", self.paths.db().to_string_lossy().into_owned()),
             ("ROSTER_EXE", self.exe.to_string_lossy().into_owned()),
         ];
+        if s.worktree.is_some()
+            && let Some(project) = (self.db.projects()?.into_iter()).find(|p| p.id == s.project_id)
+        {
+            env.push((
+                "ROSTER_CHECKOUT",
+                project.origin.to_string_lossy().into_owned(),
+            ));
+        }
         let name = s.tmux_name();
         // No panes, no server: tmux exits with its last session (unless the
         // user's tmux.conf turns exit-empty off; checking then finds nothing).
@@ -308,11 +352,13 @@ impl Roster {
     }
 
     /// `argv` run by roster's shell for `s`, after it sources the env files:
-    /// the global one, then that of `s`'s project.
+    /// the global one, then that of `s`'s project; with `set_up`, a worktree
+    /// not set up yet is set up first, by its project's script.
     pub(crate) fn wrapped(
         &self,
         s: &Session,
         prompt: Option<&Path>,
+        set_up: bool,
         argv: &[String],
     ) -> Result<Vec<String>> {
         let project = self
@@ -320,13 +366,21 @@ impl Roster {
             .projects()?
             .into_iter()
             .find(|p| p.id == s.project_id);
-        let project_env = project.map_or_else(PathBuf::new, |p| p.origin.join(PROJECT_ENV));
+        let origin = project.map(|p| p.origin);
+        let project_env = origin
+            .as_ref()
+            .map_or_else(PathBuf::new, |o| o.join(PROJECT_ENV));
+        let setup = (origin.as_ref())
+            .filter(|_| set_up && s.worktree.as_ref().is_some_and(|w| !w.set_up))
+            .map(|o| o.join(WORKTREE_SETUP))
+            .filter(|script| script.is_file());
         let shell = launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
         Ok(launch::wrap(
             &shell,
             &self.paths.global_env(),
             &project_env,
             prompt,
+            setup.as_deref(),
             argv,
         ))
     }
@@ -407,15 +461,18 @@ impl Roster {
     /// does archiving, and roster forgets it and its events. The conversation
     /// stays where the agent keeps it (one of Claude, Codex or pi can be adopted
     /// again).
-    pub fn delete(&mut self, id: &str) -> Result<Session> {
+    pub fn delete(&mut self, id: &str, how: Deleting) -> Result<(Session, Vec<String>)> {
         self.db.fold_events(now_ms())?;
         let s = self.db.session(id)?;
         if s.deleted_at.is_none() {
             self.stop(id)?;
         }
         self.tmux.kill_session(&s.tmux_name())?;
+        // As it is now, its agent gone: not what was asked about.
+        let leaving = self.leaving(&[id.to_string()])?;
         self.db.delete_session(id)?;
-        Ok(s)
+        let said = self.let_go(leaving, how);
+        Ok((s, said))
     }
 
     /// Brings back an archived session (stopped), optionally under a new name.
@@ -513,6 +570,8 @@ pub struct NewSession {
     pub effort: Option<String>,
     /// Typed into the agent once it's ready.
     pub prompt: Option<String>,
+    /// Its project's checkout, or a worktree.
+    pub works_in: WorksIn,
 }
 
 pub(super) fn validate_name(what: &str, name: &str) -> Result<()> {

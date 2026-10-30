@@ -45,6 +45,45 @@ pub fn start_check(s: &Session, how: Starting) -> StartCheck {
         Starting::Attach if !stopped => return StartCheck::Go,
         _ => {}
     }
+    let check = agents_check(s);
+    // Its worktree gone (removed by hand, or with roster's directories):
+    // made again from its branch where it was, so its conversation, kept
+    // by its directory, resumes; asked, as something removed it.
+    let Some(w) = s.worktree.as_ref().filter(|w| !w.root.exists()) else {
+        return check;
+    };
+    let gone = format!(
+        "The worktree of {}, {}, is gone",
+        s.label(),
+        w.root.display()
+    );
+    if !crate::git::branch_exists(&w.repo, &w.branch) {
+        return StartCheck::Refused(format!(
+            "{gone}, and so is its branch {}: it can't start",
+            w.branch
+        ));
+    }
+    let again = format!(
+        "{gone}: it's made again from branch {}, where it was.",
+        w.branch
+    );
+    match check {
+        StartCheck::Go => StartCheck::Confirm(format!(
+            "{gone}. Make it again from branch {}, where it was, and start?",
+            w.branch
+        )),
+        StartCheck::Confirm(question) => StartCheck::Confirm(format!("{again} {question}")),
+        StartCheck::PromptAgain { question, unasked } => StartCheck::PromptAgain {
+            question: format!("{again} {question}"),
+            unasked,
+        },
+        refused @ StartCheck::Refused(_) => refused,
+    }
+}
+
+/// What starting `s` asks first for its agent's sake: its first prompt
+/// again, a conversation it can't go on with, a turn it cuts short.
+fn agents_check(s: &Session) -> StartCheck {
     // Its agent exited first, or is still at a screen it showed first: a new
     // conversation either way, as its agent never said which.
     if s.given_prompt.is_some() {
@@ -148,5 +187,55 @@ mod tests {
         s.state = Stopped;
         let new_one = StartCheck::Confirm(agent::new_conversation_question(&s));
         assert_eq!(start_check(&s, Start), new_one);
+    }
+
+    #[test]
+    fn a_worktree_gone_is_asked_about_or_refused_with_its_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::git::tests::repo(&repo);
+        let mut s = session("s");
+        s.state = State::Stopped;
+        s.conversation_id = Some("c-1".into());
+        s.worktree = Some(crate::model::Worktree {
+            root: tmp.path().join("gone"),
+            repo: repo.clone(),
+            branch: "main".into(),
+            base: None,
+            made: true,
+            set_up: true,
+            trusted_in: None,
+        });
+        let StartCheck::Confirm(question) = start_check(&s, Starting::Start) else {
+            panic!()
+        };
+        assert!(
+            question.ends_with("is gone. Make it again from branch main, where it was, and start?")
+        );
+        // With what else it asks, in one question.
+        s.conversation_id = None;
+        let StartCheck::Confirm(question) = start_check(&s, Starting::Start) else {
+            panic!()
+        };
+        assert!(
+            question.contains("made again from branch main, where it was. "),
+            "{question}"
+        );
+        assert!(question.ends_with("Start a new one?"), "{question}");
+        // Attached to while it runs, nothing.
+        s.state = State::Idle;
+        assert_eq!(start_check(&s, Starting::Attach), StartCheck::Go);
+        // Its branch gone too.
+        s.state = State::Stopped;
+        if let Some(w) = &mut s.worktree {
+            w.branch = "nope".into();
+        }
+        let StartCheck::Refused(why) = start_check(&s, Starting::Start) else {
+            panic!()
+        };
+        assert!(
+            why.ends_with("and so is its branch nope: it can't start"),
+            "{why}"
+        );
     }
 }

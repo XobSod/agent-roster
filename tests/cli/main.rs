@@ -13,3 +13,4 @@ mod pi;
 mod sessions;
 mod tokens;
 mod usage;
+mod worktrees;

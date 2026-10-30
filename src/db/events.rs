@@ -39,6 +39,7 @@ impl Db {
             if let Some(s) = touched.get_mut(&e.session_id) {
                 let report = match e.kind.as_str() {
                     // roster's own, in its own terms.
+                    crate::model::WORKTREE => Default::default(),
                     crate::model::AUTO_TITLE => e
                         .payload
                         .as_deref()

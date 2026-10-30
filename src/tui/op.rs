@@ -29,8 +29,16 @@ pub enum Op {
     },
     Restart(String),
     Archive(String),
-    /// A session, for good, archived or not.
-    Delete(String),
+    /// A session, for good, archived or not, and what it leaves of a
+    /// worktree as decided.
+    Delete(String, crate::engine::Deleting),
+    /// What deleting a session for good asks of the worktree it works in,
+    /// as it is now: first whether to delete it (`discard` None), then, the
+    /// changes in it decided, its branch.
+    AskDelete {
+        id: String,
+        discard: Option<bool>,
+    },
     Restore {
         id: String,
         name: Option<String>,
@@ -107,7 +115,13 @@ pub enum Op {
         model: Option<Option<String>>,
         effort: Option<Option<String>>,
     },
-    RemoveProject(String),
+    RemoveProject(String, crate::engine::Deleting),
+    /// `AskDelete` for removing a project, for its archived sessions'
+    /// worktrees.
+    AskRemoveProject {
+        name: String,
+        discard: Option<bool>,
+    },
     KillOrphans,
     Quit,
 }

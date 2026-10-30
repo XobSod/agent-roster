@@ -119,17 +119,36 @@ pub(super) fn perform(
                 .archive(&id)
                 .map(|()| format!("Archived {label}; it's under Archived"))
         }
-        Op::Delete(id) => {
+        Op::Delete(id, how) => {
             // A live one's agent stops first, which can take a moment.
             busy(
                 terminal,
                 app,
                 format!("Deleting {}…", app.session_label(&id)),
             )?;
-            roster
-                .delete(&id)
-                .map(|s| format!("Deleted {} for good", s.label()))
+            roster.delete(&id, how).map(|(s, said)| {
+                [format!("Deleted {} for good", s.label())]
+                    .into_iter()
+                    .chain(said)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
         }
+        Op::AskDelete { id, discard } => roster.db.session(&id).and_then(|s| {
+            let leaving = roster.leaving(std::slice::from_ref(&id))?;
+            let question = crate::agent::delete_question(&s);
+            app.ask_leaving(
+                question,
+                &leaving,
+                discard,
+                |how| Op::Delete(id.clone(), how),
+                |discard| Op::AskDelete {
+                    id: id.clone(),
+                    discard: Some(discard),
+                },
+            );
+            Ok(String::new())
+        }),
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
             app.select(EntryKey::Session(s.id.clone()));
             format!("Restored {} (stopped)", s.label())
@@ -146,6 +165,7 @@ pub(super) fn perform(
             busy(terminal, app, format!("Starting {agent} in {project}…"))?;
             let prompted = prompt.is_some();
             let request = NewSession {
+                works_in: Default::default(),
                 project,
                 name,
                 agent: Some(agent),
@@ -321,9 +341,34 @@ pub(super) fn perform(
         Op::KillOrphans => roster
             .kill_orphans()
             .map(|n| format!("Killed {n} orphaned tmux session(s)")),
-        Op::RemoveProject(name) => roster
-            .remove_project(&name)
-            .map(|_| format!("Removed project {name}")),
+        Op::RemoveProject(name, how) => roster.remove_project(&name, how).map(|(_, said)| {
+            [format!("Removed project {name}")]
+                .into_iter()
+                .chain(said)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }),
+        Op::AskRemoveProject { name, discard } => {
+            roster.removal_question(&name).and_then(|question| {
+                let project =
+                    (roster.db.project(&name)?).with_context(|| format!("no project {name:?}"))?;
+                let ids: Vec<String> = (roster.db.purged_with(&project)?.into_iter())
+                    .map(|s| s.id)
+                    .collect();
+                let leaving = roster.leaving(&ids)?;
+                app.ask_leaving(
+                    question,
+                    &leaving,
+                    discard,
+                    |how| Op::RemoveProject(name.clone(), how),
+                    |discard| Op::AskRemoveProject {
+                        name: name.clone(),
+                        discard: Some(discard),
+                    },
+                );
+                Ok(String::new())
+            })
+        }
         Op::Quit => Ok(String::new()),
     };
     match outcome {

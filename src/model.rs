@@ -28,6 +28,28 @@ pub struct Subagent {
     pub heard: i64,
 }
 
+/// The git worktree a session works in, in place of its project's checkout.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Worktree {
+    /// Its root, git's (the session's directory is it, or a directory in
+    /// it as its project is in its repository).
+    pub root: PathBuf,
+    /// The checkout of the repository it's a worktree of: where git is
+    /// asked about it once it's gone.
+    pub repo: PathBuf,
+    pub branch: String,
+    /// What its branch was made from, to count against (a branch, a ref, a
+    /// commit); None for a branch that was there.
+    pub base: Option<String>,
+    /// Made by roster, which removes it once no session works in it.
+    pub made: bool,
+    /// Set up by its project's setup script, or needing none.
+    pub set_up: bool,
+    /// The agent's config its folder's trust was written in
+    /// (`roster trust --like`), to take it back as it's removed.
+    pub trusted_in: Option<PathBuf>,
+}
+
 /// A command a session's agent left running in the background (Claude's
 /// shells, codex's background terminals), as its agent said it did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -205,12 +227,28 @@ pub struct Session {
     /// What the user wrote about it (saved apart from the rest, so a save of
     /// the session doesn't overwrite a note saved meanwhile).
     pub note: Option<Note>,
+    /// The worktree it works in; None for its project's checkout.
+    pub worktree: Option<Worktree>,
 }
 
 /// The kind of event roster records with a title it made for a session's
 /// conversation (`Roster::auto_title`), in roster's own terms (`Report`):
 /// folded in with the agents' reports, so no save of the session overwrites it.
 pub const AUTO_TITLE: &str = "auto-title";
+
+/// The kind of event a session's own launch records of its worktree, run
+/// in the session's environment: its setup script done (`{"set_up":
+/// true}`), its folder's trust written in the agent's config
+/// (`{"trusted_in": <file>}`).
+pub const WORKTREE: &str = "worktree";
+
+/// What a `WORKTREE` event says.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeReport {
+    #[serde(default)]
+    pub set_up: bool,
+    pub trusted_in: Option<PathBuf>,
+}
 
 /// A status change reported by an agent hook through `roster report <kind>`.
 #[derive(Clone, Debug)]
@@ -264,6 +302,7 @@ impl Session {
             shells: BTreeMap::new(),
             awaiting: false,
             note: None,
+            worktree: None,
         }
     }
 
@@ -420,6 +459,18 @@ impl Session {
     /// Applies a reported event, with what its payload says (`report`).
     pub fn apply(&mut self, e: &Event, report: &crate::agent::Report) {
         if self.deleted_at.is_some() {
+            return;
+        }
+        if e.kind == WORKTREE {
+            let said: WorktreeReport = (e.payload.as_deref())
+                .and_then(|p| serde_json::from_str(p).ok())
+                .unwrap_or_default();
+            if let Some(w) = &mut self.worktree {
+                w.set_up |= said.set_up;
+                if said.trusted_in.is_some() {
+                    w.trusted_in = said.trusted_in;
+                }
+            }
             return;
         }
         if e.kind == AUTO_TITLE {

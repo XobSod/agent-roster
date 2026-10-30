@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 19;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -56,7 +56,8 @@ CREATE TABLE sessions (
     shells            TEXT,
     started_at        INTEGER,
     session_at        INTEGER,
-    conversation_begun INTEGER NOT NULL DEFAULT 0
+    conversation_begun INTEGER NOT NULL DEFAULT 0,
+    worktree          TEXT
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -249,6 +250,7 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
         Sql("ALTER TABLE note_versions ADD COLUMN removed INTEGER;
          ALTER TABLE note_versions ADD COLUMN added INTEGER;"),
     ),
+    (19, Sql("ALTER TABLE sessions ADD COLUMN worktree TEXT;")),
 ];
 
 /// Schema 12: what was spent refers to its file and model by number, and to

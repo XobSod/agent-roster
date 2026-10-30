@@ -26,16 +26,23 @@ mod projects;
 mod prompts;
 mod sessions;
 mod starting;
+mod worktrees;
 
+#[cfg(test)]
+pub use self::worktrees::Branch;
 pub use self::{
     notes::NoteSaved,
     prompts::Undelivered,
     sessions::{Defaults, NewSession},
     starting::{StartCheck, Starting, start_check},
+    worktrees::{
+        Deleting, Leaving, WORKTREE_SETUP, WorksIn, branches_question, changes_question,
+        staying_said,
+    },
 };
 
 // What one job has that the others use.
-use self::{processes::*, prompts::*, sessions::*};
+use self::{processes::*, prompts::*, sessions::*, worktrees::*};
 
 /// What's said of a config roster's tmux didn't take: what tmux said first
 /// (a long message is cut at its end), and that roster goes on.

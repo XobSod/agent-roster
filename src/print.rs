@@ -449,6 +449,10 @@ pub fn list_sessions(r: &Roster, query: &str, options: &ListOptions) -> Result<(
                     "shells": s.shells.len(),
                     "note": s.note.as_ref().map(|n| &n.text),
                     "note_pin": s.note.as_ref().and_then(|n| n.pin),
+                    "worktree": s.worktree.as_ref().map(|w| json!({
+                        "path": w.root, "branch": w.branch, "base": w.base,
+                        "made_by_roster": w.made, "set_up": w.set_up,
+                    })),
                 });
                 // Asked for: null for a session with no processes.
                 if let Some(usage) = usage {

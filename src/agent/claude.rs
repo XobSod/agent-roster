@@ -208,6 +208,18 @@ impl Adapter for Claude {
         }
     }
 
+    fn folder_trusted(&self, dir: &Path) -> bool {
+        trust::config_file().is_some_and(|file| trust::trusted_at(&file, dir))
+    }
+
+    fn trust_config(&self) -> Option<std::path::PathBuf> {
+        trust::config_file()
+    }
+
+    fn untrust_folders_under(&self, file: &Path, root: &Path) -> Result<bool> {
+        trust::untrust_under(file, root)
+    }
+
     fn subagent_info(&self, transcript: &Path, id: &str) -> super::SubagentInfo {
         subagents::info(transcript, id)
     }

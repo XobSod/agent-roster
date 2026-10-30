@@ -10,9 +10,15 @@ use anyhow::{Context, Result, bail};
 use crate::config::Config;
 
 /// Run as `$SHELL -c SCRIPT roster-launch <global env> <project env> <prompt
-/// file, or ""> <agent argv…>`. The prompt file's text goes last in the
-/// agent's argv, and the file is removed; it's read first, so neither an env
-/// file nor `set -a` makes it a variable the agent gets.
+/// file, or ""> <shell> <worktree setup script, or ""> <its record> <agent
+/// argv…>`. The prompt file's text goes last in the agent's argv, and the
+/// file is removed; it's read first, so neither an env file nor `set -a`
+/// makes it a variable the agent gets. A setup script runs after the env
+/// files, by `<shell>`, in the environment they made, unless its record says
+/// the worktree is set up: one session at a time (a lock beside the record,
+/// where `flock` is there, which what the script leaves running doesn't
+/// hold), so a session started in it meanwhile waits for it rather than
+/// setting it up too. Done, it's recorded, and reported (`model::WORKTREE`).
 /// Each `.` must stay the last command of its `&&` list: on the left of `&&`/`||`
 /// the shell ignores `set -e`, also inside the sourced file.
 const SCRIPT: &str = r#"trap 'echo "roster: preparing the environment failed (exit $?)" >&2' EXIT
@@ -27,7 +33,20 @@ set -ae
 [ -f "$2" ] && . "$2"
 set +ae
 trap - EXIT
-shift 3
+if [ -n "$5" ]; then
+  trap 'echo "roster: setting up the worktree failed (exit $?)" >&2' EXIT
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$6.lock" && flock 9 || exit
+  fi
+  if [ ! -e "$6" ]; then
+    "$4" "$5" 9>&- || exit
+    : > "$6" || exit
+  fi
+  exec 9>&-
+  trap - EXIT
+  [ -n "$ROSTER_EXE" ] && printf '{"set_up":true}' | "$ROSTER_EXE" report worktree
+fi
+shift 6
 exec "$@""#;
 
 /// Shells that can source the env files with the script above.
@@ -59,8 +78,10 @@ pub fn wrap(
     global_env: &Path,
     project_env: &Path,
     prompt: Option<&Path>,
+    setup: Option<(&Path, &Path)>,
     agent_argv: &[String],
 ) -> Vec<String> {
+    let path = |p: Option<&Path>| p.map_or_else(String::new, |p| p.to_string_lossy().into_owned());
     let mut argv = vec![
         shell.to_string(),
         "-c".to_string(),
@@ -68,7 +89,10 @@ pub fn wrap(
         "roster-launch".to_string(),
         global_env.to_string_lossy().into_owned(),
         project_env.to_string_lossy().into_owned(),
-        prompt.map_or_else(String::new, |p| p.to_string_lossy().into_owned()),
+        path(prompt),
+        shell.to_string(),
+        path(setup.map(|(script, _)| script)),
+        path(setup.map(|(_, record)| record)),
     ];
     argv.extend(agent_argv.iter().cloned());
     argv
@@ -293,7 +317,7 @@ pub fn environment(
     let argv: Vec<String> = ["/bin/sh", "-c", script, "roster-environment", &mark]
         .map(String::from)
         .into();
-    let argv = wrap(shell, global_env, Path::new(""), None, &argv);
+    let argv = wrap(shell, global_env, Path::new(""), None, None, &argv);
     let mut cmd = std::process::Command::new(&argv[0]);
     // Nothing to read for the file: what reads (`ssh` without -n) gets none.
     cmd.args(&argv[1..])
@@ -536,7 +560,7 @@ mod tests {
         std::fs::write(&global, "A=1\nB=\"$(echo two)\"\n").unwrap();
         std::fs::write(&project, "A=override\n").unwrap();
         let agent = ["sh", "-c", r#"echo "$A $B $1""#, "x", "arg with spaces"].map(String::from);
-        let argv = wrap("/bin/sh", &global, &project, None, &agent);
+        let argv = wrap("/bin/sh", &global, &project, None, None, &agent);
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
@@ -564,6 +588,7 @@ mod tests {
             &global,
             &dir.path().join("none"),
             Some(&file),
+            None,
             &agent,
         );
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
@@ -580,11 +605,78 @@ mod tests {
             &global,
             &dir.path().join("none"),
             Some(&file),
+            None,
             &agent,
         );
         let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
         assert!(!out.status.success() && out.stdout.is_empty());
         assert!(String::from_utf8_lossy(&out.stderr).contains("preparing the environment failed"));
+    }
+
+    #[test]
+    fn a_worktree_is_set_up_in_the_env_files_environment_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("env");
+        std::fs::write(&global, "A=from-env\n").unwrap();
+        let setup = dir.path().join("setup");
+        std::fs::write(&setup, "echo \"set up with $A\" > done\n").unwrap();
+        // Roster's report of it, standing in.
+        let report = dir.path().join("report");
+        std::fs::write(&report, "#!/bin/sh\ncat > reported\n").unwrap();
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&report)
+            .status()
+            .unwrap();
+        let agent = ["sh", "-c", "cat done reported"].map(String::from);
+        let record = dir.path().join("record");
+        let argv = wrap(
+            "/bin/sh",
+            &global,
+            &dir.path().join("none"),
+            None,
+            Some((&setup, &record)),
+            &agent,
+        );
+        let run = |argv: &[String]| {
+            Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(dir.path())
+                .env("ROSTER_EXE", &report)
+                .output()
+                .unwrap()
+        };
+        let out = run(&argv);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "set up with from-env\n{\"set_up\":true}"
+        );
+        // Recorded: not again, whichever session starts there next.
+        assert!(record.exists());
+        std::fs::write(&setup, "echo again > done\n").unwrap();
+        let out = run(&argv);
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "set up with from-env\n{\"set_up\":true}"
+        );
+        // One that fails stops the start, and says so; nothing's reported.
+        std::fs::remove_file(&record).unwrap();
+        std::fs::remove_file(dir.path().join("reported")).unwrap();
+        std::fs::write(&setup, "exit 3\n").unwrap();
+        let out = run(&argv);
+        assert!(!out.status.success() && out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("roster: setting up the worktree failed (exit 3)")
+        );
+        assert!(!dir.path().join("reported").exists());
+        assert!(!record.exists());
     }
 
     #[test]
@@ -597,6 +689,7 @@ mod tests {
             "/bin/sh",
             &global,
             &dir.path().join("missing"),
+            None,
             None,
             &agent,
         );

@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod doctor;
 mod engine;
+mod git;
 mod keys;
 mod launch;
 mod model;
@@ -133,8 +134,14 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             defaults,
         }) => cmd::projects::edit(r, project, name, path, defaults)?,
         Cmd::Project(ProjectCmd::Ls) => list_projects(r)?,
-        Cmd::Project(ProjectCmd::Rm { name, yes }) => cmd::projects::remove(r, name, yes)?,
-        Cmd::New { project, session } => cmd::sessions::new(r, project, session)?,
+        Cmd::Project(ProjectCmd::Rm { name, yes, leaving }) => {
+            cmd::projects::remove(r, name, yes, leaving)?
+        }
+        Cmd::New {
+            project,
+            session,
+            works_in,
+        } => cmd::sessions::new(r, project, session, works_in)?,
         Cmd::Chat { session } => cmd::sessions::chat(r, session)?,
         Cmd::Ls {
             words,
@@ -173,7 +180,11 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
             again,
         } => cmd::lifecycle::restart(r, session, yes, again)?,
         Cmd::Archive { session, yes } => cmd::lifecycle::archive(r, session, yes)?,
-        Cmd::Rm { session, yes } => cmd::lifecycle::delete(r, session, yes)?,
+        Cmd::Rm {
+            session,
+            yes,
+            leaving,
+        } => cmd::lifecycle::delete(r, session, yes, leaving)?,
         Cmd::Restore { session, name } => cmd::lifecycle::restore(r, session, name)?,
         Cmd::Edit {
             session,

@@ -133,12 +133,26 @@ impl Roster {
 
     /// Removes a project that has no live sessions; returns the archived sessions
     /// purged with it.
-    pub fn remove_project(&mut self, name: &str) -> Result<Vec<Session>> {
+    pub fn remove_project(
+        &mut self,
+        name: &str,
+        how: Deleting,
+    ) -> Result<(Vec<Session>, Vec<String>)> {
         let project = self
             .db
             .project(name)?
             .with_context(|| format!("no project {name:?}"))?;
-        self.db.remove_project(&project)
+        let going = self.db.purged_with(&project)?;
+        let ids: Vec<String> = going.iter().map(|s| s.id.clone()).collect();
+        let leaving = self.leaving(&ids)?;
+        // Their worktrees' trust, to another project's sessions still in them.
+        for s in &going {
+            self.hand_over_trust(s, &ids)?;
+        }
+        // Refused, and nothing removed, if one was restored meanwhile.
+        let purged = self.db.remove_project(&project)?;
+        let said = self.let_go(leaving, how);
+        Ok((purged, said))
     }
 }
 

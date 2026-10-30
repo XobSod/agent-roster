@@ -107,7 +107,7 @@ impl App {
                 }
                 None => self.no_project(),
             },
-            Action::RemoveProject => self.remove_project(),
+            Action::RemoveProject => return self.remove_project(),
             Action::ProjectNote => return self.project_note(),
             Action::NewSession => self.new_session(),
             Action::NewChat => return Some(Op::NewChat),
@@ -412,9 +412,64 @@ impl App {
         None
     }
 
-    /// Asks whether to delete `s` for good.
+    /// Asks whether to delete `s` for good; what it leaves of a worktree is
+    /// asked about as it is now (`Op::AskDelete`).
     fn delete(&mut self, s: Session) -> Option<Op> {
-        self.confirm(crate::agent::delete_question(&s), Op::Delete(s.id));
+        if s.worktree.is_some() {
+            return Some(Op::AskDelete {
+                id: s.id,
+                step: None,
+            });
+        }
+        let question = crate::agent::delete_question(&s);
+        self.confirm(question, Op::Delete(s.id, Default::default()));
+        None
+    }
+
+    /// What deleting for good asks of the worktrees in `leaving`, one thing
+    /// at a time: whether to (`question`, with what stays), then whether
+    /// those with changes not committed go too, then their branches; `go`
+    /// does it as decided, `again` asks the next. The op to do at once if
+    /// nothing is left to ask.
+    pub(crate) fn ask_leaving(
+        &mut self,
+        question: String,
+        leaving: &[crate::engine::Leaving],
+        step: Option<op::LeavingStep>,
+        go: impl Fn(crate::engine::Deleting) -> Op,
+        again: impl Fn(op::LeavingStep) -> Op,
+    ) -> Option<Op> {
+        use crate::engine::{Deleting, branches_question, changes_question, staying_said};
+        use op::LeavingStep::{Branches, Changes};
+        let how = |discard_changes, delete_branches| Deleting {
+            discard_changes,
+            delete_branches,
+        };
+        // The branches' question next, if there's one, those changes decided.
+        let then = |discard| match branches_question(leaving, discard) {
+            Some(_) => again(Branches { discard }),
+            None => go(how(discard, false)),
+        };
+        match step {
+            None => {
+                let next = match changes_question(leaving) {
+                    Some(_) => again(Changes),
+                    None => then(false),
+                };
+                self.confirm(question + &staying_said(leaving), next);
+            }
+            Some(Changes) => match changes_question(leaving) {
+                // y: removed with them; n: it stays, and its branch with it.
+                Some(changes) => self.ask(changes, then(true), then(false)),
+                None => return Some(then(false)),
+            },
+            Some(Branches { discard }) => match branches_question(leaving, discard) {
+                Some(branches) => {
+                    self.ask(branches, go(how(discard, true)), go(how(discard, false)))
+                }
+                None => return Some(go(how(discard, false))),
+            },
+        }
         None
     }
 
@@ -543,10 +598,10 @@ impl App {
         self.rebuild();
     }
 
-    pub(super) fn remove_project(&mut self) {
+    pub(super) fn remove_project(&mut self) -> Option<Op> {
         let Some(p) = self.selected_project() else {
             self.no_project();
-            return;
+            return None;
         };
         let (archived, live): (Vec<&Session>, Vec<&Session>) = self
             .sessions
@@ -559,10 +614,18 @@ impl App {
                 "{} still has sessions; archive them first ({archive})",
                 p.name
             ));
-            return;
+            return None;
+        }
+        // What it leaves of their worktrees, asked about as they are now.
+        if archived.iter().any(|s| s.worktree.is_some()) {
+            return Some(Op::AskRemoveProject {
+                name: p.name.clone(),
+                step: None,
+            });
         }
         let question = crate::engine::project_removal_question(&p, archived);
-        self.confirm(question, Op::RemoveProject(p.name));
+        self.confirm(question, Op::RemoveProject(p.name, Default::default()));
+        None
     }
 
     /// Whether a live session in `s`'s project has its name.

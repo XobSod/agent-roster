@@ -38,11 +38,20 @@ pub fn edit(
 }
 
 /// `roster project rm`.
-pub fn remove(r: &mut Roster, name: String, yes: bool) -> Result<()> {
-    if !confirm(&r.removal_question(&name)?, yes)? {
+pub fn remove(r: &mut Roster, name: String, yes: bool, args: LeavingArgs) -> Result<()> {
+    let question = r.removal_question(&name)?;
+    let project =
+        r.db.project(&name)?
+            .with_context(|| format!("no project {name:?}"))?;
+    let ids: Vec<String> = (r.db.purged_with(&project)?.into_iter())
+        .map(|s| s.id)
+        .collect();
+    let leaving = r.leaving(&ids)?;
+    if !confirm(&(question + &engine::staying_said(&leaving)), yes)? {
         return Ok(());
     }
-    let purged = r.remove_project(&name)?;
+    let how = cmd::lifecycle::deleting(&leaving, yes, &args)?;
+    let (purged, said) = r.remove_project(&name, how)?;
     println!("Removed project {name}");
     for s in purged {
         let conversation = s.conversation_id.as_deref().unwrap_or("none");
@@ -55,6 +64,9 @@ pub fn remove(r: &mut Roster, name: String, yes: bool) -> Result<()> {
             "  with archived session {} (conversation {conversation}){note}",
             s.name
         );
+    }
+    for line in said {
+        println!("{line}");
     }
     Ok(())
 }

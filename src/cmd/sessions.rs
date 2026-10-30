@@ -3,12 +3,18 @@
 use crate::*;
 
 /// `roster new`.
-pub fn new(r: &mut Roster, project: String, session: SessionArgs) -> Result<()> {
+pub fn new(
+    r: &mut Roster,
+    project: String,
+    session: SessionArgs,
+    works_in: WorksInArgs,
+) -> Result<()> {
     let p = r
         .db
         .project(&project)?
         .with_context(|| format!("no project {project:?} (add it with `roster project add`)"))?;
-    let (request, attach) = session.request(p, r.config.default_agent());
+    let (mut request, attach) = session.request(p, r.config.default_agent());
+    request.works_in = works_in.works_in();
     start_session(r, request, attach)?;
     Ok(())
 }

@@ -110,7 +110,58 @@ for its directory. It goes on with the model and effort it last ran on (as far a
 agent recorded them), the defaults (the project's, if the project runs the same agent,
 else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--effort` on
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
-Roster can tell when one is open in Claude, but not in pi or Codex.
+Roster can tell when one is open in Claude, but not in pi or Codex. One that ran in a
+git worktree goes to the project of that worktree's repository, as a session in the
+worktree; if it was one of roster's and is gone, it's made again from its branch first.
+
+### Worktrees
+
+A session can work in a git worktree of its own instead of the project's checkout, so
+several agents work on one repository without touching each other's files.
+`roster new myproj --worktree` makes one on a new branch named after the session, from
+the commit the checkout is on (`--worktree fix-auth --base main` names both; a branch
+that exists is checked out as it is, counted against the default branch, and one
+checked out elsewhere can't be twice).
+`--in <session or directory>` starts a session in a worktree there is, another
+session's say, which they then share. In the new-session form (`s n`), *Works in*
+does the same for a project in git: the checkout, a new worktree (its branch and
+what it's made from; a branch that's there, or the checkout's changes not committed,
+noted as you go), or one that exists. Worktrees go in roster's state directory, a
+folder per project (`directory` under `[worktrees]` puts them elsewhere). Roster only
+makes the place and says how it stands: committing, merging and rebasing are the
+agents' work, when you ask them. A session's directory is fixed: to go on in another
+worktree, start a session there and tell it what it needs to know.
+
+A worktree session's card has a line of its own between its title and its agent,
+`⎇ fix-auth ← main`, and once there's something to say, `3 ahead · 1 behind · 5
+changed` (commits its base doesn't have and the other way round, files changed and not
+committed), read in the background when a turn ends, every 30 s while it works, and
+when you select it; the preview adds what changed against the base (`+120 −30`), and
+`roster info` says it whole (`+120 −30 in 5 files`). `stopped_cards =
+"unfolded"` shows stopped and archived sessions as cards too, line and all.
+
+A fresh worktree has only what git tracks, no `.env`, no `node_modules`, no build
+cache. `.agent-roster.worktree` beside the project's `.agent-roster.env` runs once in
+each new worktree, in its pane, before its agent starts, after the env files, with
+`$ROSTER_CHECKOUT` the project's directory in the checkout:
+
+```sh
+cp "$ROSTER_CHECKOUT/.env" .
+npm ci
+```
+
+If it fails the start stops, its error on screen, and the next start runs it again.
+If Claude trusts the checkout, roster trusts the worktree for it as it starts (it's
+the same repository), and takes that back when it removes the worktree. A worktree
+that's gone when its session starts is made again from its branch where it was, so
+the conversation resumes, asked first (`--yes`).
+
+Deleting a session for good removes its worktree if roster made it, no other session
+works in it and nothing in it is uncommitted; changes not committed are said, and go
+only with `--discard-changes` or `y` when asked (`--yes` keeps them). Its branch is asked
+about each time, saying whether it's merged: `--delete-branch` or `--keep-branch`,
+which `--yes` doesn't answer. Removing a project asks the same once for all of its
+archived sessions. Archiving keeps the worktree.
 
 ### Subagents and shells
 
@@ -275,6 +326,9 @@ roster note api --restore 2             # bring one back; the note it replaces i
 roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
 roster note api --project               # api's project's
 roster note --append "- [x] tests pass" # inside an agent: its own session's note; --project alone, its project's
+roster new myproj --worktree --prompt "fix the flaky test"   # in a git worktree of its own; --worktree fix --base main
+roster new myproj --in api              # in api's worktree, beside it (or a directory in one)
+roster rm api --yes --keep-branch       # its worktree goes if clean (--discard-changes: anyway); --delete-branch
 roster adopt --list                     # Claude, pi and Codex conversations started elsewhere (--all: not only in your projects)
 roster adopt 3f2a --name api            # continue one here; --fork adopts a copy instead
 roster project edit myproj --effort default
@@ -374,6 +428,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     quickly: at most this many milliseconds from one to the next (default 300). Typed
     slower, they're just text. `lines`, how many of each note's lines the preview
     shows, from the pinned one (default 2, at most 10).
+  - `[worktrees]`: `directory`, where new git worktrees for sessions go, a folder per
+    project in it (default: roster's state directory, so uninstalling takes them): a
+    whole path (or `~/…`), outside the project's repository.
   - `fit_preview` (default `"auto"`): agents drawing full screen (in the terminal's
     alternate screen, as Claude Code's fullscreen renderer does) are sized to the
     preview while you're not attached, so it shows all of their screen; `"never"`
@@ -478,7 +535,9 @@ All files are optional and live in `~/.config/agent-roster/`:
   win. Your own tmux, outside roster's, isn't touched.
 
 State lives in `~/.local/state/agent-roster/`. Uninstall: remove the binary and both
-directories, and `tmux -L agent-roster kill-server`.
+directories (roster's worktrees in the state directory go too, with what's not committed
+in them; their commits stay in the repositories), and `tmux -L agent-roster
+kill-server`.
 
 ## pi
 

@@ -46,6 +46,10 @@
 //! escape_ms = 300                 # how quickly: at most this long between the keys
 //! lines = 2                       # of each note the preview shows, from the pinned one
 //!
+//! [worktrees]                     # git worktrees sessions work in
+//! directory = "~/worktrees"       # where new ones go, a folder per project (default:
+//!                                 # roster's state directory)
+//!
 //! [keys]                          # TUI keys: one, a list, or "" to disable
 //! detach = "C-q"                  # back to roster while attached (a tmux key)
 //! down = ["j", "Down"]
@@ -118,6 +122,7 @@ pub struct Config {
     /// The agent new sessions get unless the project or the user picks one.
     pub default_agent: Option<String>,
     pub notes: Notes,
+    pub worktrees: Worktrees,
     /// How the session list is grouped (default: by attention, on shelves).
     pub group_by: Option<GroupBy>,
     /// What a card says of its session's subagents and shells at work
@@ -230,6 +235,14 @@ pub enum StoppedCards {
     #[default]
     Folded,
     Unfolded,
+}
+
+/// The git worktrees sessions work in.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Worktrees {
+    /// Where new ones go, a folder per project in it.
+    pub directory: Option<String>,
 }
 
 /// Sessions' and projects' notes: where they open, and the editor's keys.

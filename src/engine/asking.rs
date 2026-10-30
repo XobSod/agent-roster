@@ -128,6 +128,7 @@ impl Asker {
                     &self.global_env,
                     Path::new(""),
                     None,
+                    None,
                     &question.argv,
                 );
                 let mut cmd = std::process::Command::new(&argv[0]);

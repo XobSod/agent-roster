@@ -22,7 +22,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 use crate::agent::{self, locked};
 use crate::config::{
     AgentConfig, CardSubagents, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor,
-    Notes, Order, ProjectKeys, SessionKeys, StoppedCards, ViewKeys,
+    Notes, Order, ProjectKeys, SessionKeys, StoppedCards, ViewKeys, Worktrees,
 };
 
 impl crate::engine::Roster {
@@ -30,10 +30,12 @@ impl crate::engine::Roster {
     pub fn settings(&self) -> Vec<Section> {
         let shell = crate::launch::shell(&self.config, std::env::var("SHELL").ok().as_deref());
         let chats = crate::util::short_path(&self.chats_dir());
+        let worktrees = crate::util::short_path(&self.worktrees_dir());
         let agents = agent::available(&self.config);
         let env = Env {
             shell: &shell,
             chats_dir: &chats,
+            worktrees_dir: &worktrees,
             agents: &agents,
         };
         sections(&self.config, &self.config_text, &env)
@@ -432,6 +434,7 @@ pub struct Section {
 pub struct Env<'a> {
     pub shell: &'a str,
     pub chats_dir: &'a str,
+    pub worktrees_dir: &'a str,
     pub agents: &'a [String],
 }
 
@@ -489,6 +492,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         trust_project_folders,
         default_agent,
         notes,
+        worktrees,
         group_by,
         card_subagents,
         stopped_cards,
@@ -663,6 +667,19 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         ],
     };
 
+    let Worktrees { directory } = worktrees;
+    let worktrees = Section {
+        title: "Worktrees".into(),
+        agent: None,
+        table: Some(path(&["worktrees"])),
+        settings: vec![text_setting(
+            &["worktrees", "directory"],
+            directory.as_deref(),
+            cx.worktrees_dir,
+            "where new git worktrees for sessions go, a folder per project in it",
+        )],
+    };
+
     let Order {
         needs_input,
         idle,
@@ -694,7 +711,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         ],
     };
 
-    let mut sections = vec![general, notes, shelves];
+    let mut sections = vec![general, notes, worktrees, shelves];
     for name in agents {
         let adapter = agent::adapter(name);
         let agent = configured.get(name).cloned().unwrap_or_default();
@@ -1484,6 +1501,7 @@ mod tests {
         Env {
             shell: "/bin/zsh",
             chats_dir: "~/chats",
+            worktrees_dir: "~/.local/state/agent-roster/worktrees",
             agents: AGENTS.get_or_init(|| vec!["claude".into(), "pi".into(), "aider".into()]),
         }
     }

@@ -29,14 +29,23 @@ pub enum Op {
     },
     Restart(String),
     Archive(String),
-    /// A session, for good, archived or not.
-    Delete(String),
+    /// A session, for good, archived or not, and what it leaves of a
+    /// worktree as decided.
+    Delete(String, crate::engine::Deleting),
+    /// What deleting a session for good asks, the worktree it works in as
+    /// it is now: whether to (`step` None), then the worktree's questions,
+    /// one at a time.
+    AskDelete {
+        id: String,
+        step: Option<LeavingStep>,
+    },
     Restore {
         id: String,
         name: Option<String>,
     },
     SetUnread(String, bool),
     NewSession {
+        works_in: crate::engine::WorksIn,
         project: String,
         agent: String,
         name: Option<String>,
@@ -107,7 +116,13 @@ pub enum Op {
         model: Option<Option<String>>,
         effort: Option<Option<String>>,
     },
-    RemoveProject(String),
+    RemoveProject(String, crate::engine::Deleting),
+    /// `AskDelete` for removing a project, for its archived sessions'
+    /// worktrees.
+    AskRemoveProject {
+        name: String,
+        step: Option<LeavingStep>,
+    },
     KillOrphans,
     Quit,
 }
@@ -124,4 +139,14 @@ pub struct NoteSave {
     /// `force`d, not another saved meanwhile).
     pub base: Option<crate::note::Note>,
     pub force: bool,
+}
+
+/// What deleting for good asks next of the worktrees it leaves, once it's
+/// to be done (`Op::AskDelete`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeavingStep {
+    /// Whether those with changes not committed go too, with them.
+    Changes,
+    /// Whether their branches go too, those changes decided.
+    Branches { discard: bool },
 }

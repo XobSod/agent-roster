@@ -26,12 +26,20 @@ mod projects;
 mod prompts;
 mod sessions;
 mod starting;
+mod worktrees;
 
+#[cfg(test)]
+pub use self::worktrees::Branch;
 pub use self::{
     notes::NoteSaved,
     prompts::Undelivered,
     sessions::{Defaults, NewSession},
     starting::{StartCheck, Starting, start_check},
+    worktrees::{
+        ByWorktree, Deleting, Leaving, Standing, WORKTREE_SETUP, WorksIn, base_said,
+        branches_question, changes_question, standing, standing_brief, standing_said,
+        standing_short, staying_said,
+    },
 };
 
 // What one job has that the others use.

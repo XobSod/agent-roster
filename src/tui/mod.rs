@@ -16,6 +16,7 @@ mod theme;
 mod tokens;
 mod transcripts;
 mod ui;
+mod worktrees;
 
 pub use beside::{attached_list, run_sidebar};
 pub use ui::{status_line, status_line_beside};
@@ -428,6 +429,8 @@ fn reload(roster: &mut Roster, app: &mut App) {
         app.limits.read_transcripts(&app.sessions);
     }
     read_subagents(app);
+    let selected = app.selected_session().map(|s| s.id.clone());
+    (app.worktrees).tick(&app.sessions, selected.as_deref(), Instant::now());
     // Only the session list shows the preview.
     if app.mode == Mode::Sessions {
         fit(roster, app);

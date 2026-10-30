@@ -119,16 +119,40 @@ pub(super) fn perform(
                 .archive(&id)
                 .map(|()| format!("Archived {label}; it's under Archived"))
         }
-        Op::Delete(id) => {
+        Op::Delete(id, how) => {
             // A live one's agent stops first, which can take a moment.
             busy(
                 terminal,
                 app,
                 format!("Deleting {}…", app.session_label(&id)),
             )?;
-            roster
-                .delete(&id)
-                .map(|s| format!("Deleted {} for good", s.label()))
+            roster.delete(&id, how).map(|(s, said)| {
+                [format!("Deleted {} for good", s.label())]
+                    .into_iter()
+                    .chain(said)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        }
+        Op::AskDelete { id, step } => {
+            let asked = roster.db.session(&id).and_then(|s| {
+                let leaving = roster.leaving(std::slice::from_ref(&id))?;
+                Ok(app.ask_leaving(
+                    crate::agent::delete_question(&s),
+                    &leaving,
+                    step,
+                    |how| Op::Delete(id.clone(), how),
+                    |step| Op::AskDelete {
+                        id: id.clone(),
+                        step: Some(step),
+                    },
+                ))
+            });
+            match asked {
+                Ok(Some(op)) => return perform(terminal, roster, app, op),
+                Ok(None) => Ok(String::new()),
+                Err(e) => Err(e),
+            }
         }
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
             app.select(EntryKey::Session(s.id.clone()));
@@ -136,6 +160,7 @@ pub(super) fn perform(
         }),
         Op::SetUnread(id, unread) => roster.set_unread(&id, unread).map(|()| String::new()),
         Op::NewSession {
+            works_in,
             project,
             agent,
             name,
@@ -146,6 +171,7 @@ pub(super) fn perform(
             busy(terminal, app, format!("Starting {agent} in {project}…"))?;
             let prompted = prompt.is_some();
             let request = NewSession {
+                works_in,
                 project,
                 name,
                 agent: Some(agent),
@@ -321,9 +347,38 @@ pub(super) fn perform(
         Op::KillOrphans => roster
             .kill_orphans()
             .map(|n| format!("Killed {n} orphaned tmux session(s)")),
-        Op::RemoveProject(name) => roster
-            .remove_project(&name)
-            .map(|_| format!("Removed project {name}")),
+        Op::RemoveProject(name, how) => roster.remove_project(&name, how).map(|(_, said)| {
+            [format!("Removed project {name}")]
+                .into_iter()
+                .chain(said)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }),
+        Op::AskRemoveProject { name, step } => {
+            let asked = roster.removal_question(&name).and_then(|question| {
+                let project =
+                    (roster.db.project(&name)?).with_context(|| format!("no project {name:?}"))?;
+                let ids: Vec<String> = (roster.db.purged_with(&project)?.into_iter())
+                    .map(|s| s.id)
+                    .collect();
+                let leaving = roster.leaving(&ids)?;
+                Ok(app.ask_leaving(
+                    question,
+                    &leaving,
+                    step,
+                    |how| Op::RemoveProject(name.clone(), how),
+                    |step| Op::AskRemoveProject {
+                        name: name.clone(),
+                        step: Some(step),
+                    },
+                ))
+            });
+            match asked {
+                Ok(Some(op)) => return perform(terminal, roster, app, op),
+                Ok(None) => Ok(String::new()),
+                Err(e) => Err(e),
+            }
+        }
         Op::Quit => Ok(String::new()),
     };
     match outcome {

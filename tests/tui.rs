@@ -130,6 +130,27 @@ fn tui_walkthrough() {
 }
 
 #[test]
+fn a_project_saved_in_its_form_keeps_what_was_changed_meanwhile() {
+    let Some(t) = TestEnv::new("project") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "No sessions yet");
+    term.keys(&["p", "e"]);
+    term.wait_for("the form", "Edit project demo");
+    // Its effort changed from the CLI while the form is open; its model
+    // typed in the form.
+    t.ok(&["project", "edit", "demo", "--effort", "high"]);
+    term.keys(&["Down", "Down", "Down"]);
+    term.text("sonnet");
+    term.keys(&["Enter"]);
+    term.wait_for("the save", "Saved project demo");
+    let projects = t.ok(&["project", "ls"]);
+    assert!(projects.contains("claude · sonnet · high"), "{projects}");
+}
+
+#[test]
 fn agents_drawing_full_screen_fit_the_preview() {
     let Some(t) = TestEnv::new("fit") else { return };
     // A generic agent too: tracked by its screen, its redraw mustn't look like work.

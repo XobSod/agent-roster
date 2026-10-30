@@ -42,22 +42,38 @@ impl Db {
         })
     }
 
-    pub fn save_project(&self, p: &Project) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE projects SET name = ?2, origin = ?3, agent = ?4, model = ?5, effort = ?6
-                 WHERE id = ?1",
-                params![
-                    p.id,
-                    p.name,
-                    path_str(&p.origin)?,
-                    p.agent,
-                    p.model,
-                    p.effort
-                ],
+    /// Changes project `id` as `change` says, given the project as it is
+    /// now: read and saved in one transaction, which no other process writes
+    /// in meanwhile, so what another saved since a form was opened on it
+    /// stays unless `change` changes it too. Its note is saved apart
+    /// (`set_note`), and kept.
+    pub fn change_project(
+        &self,
+        id: i64,
+        change: impl FnOnce(&Project) -> Result<Project>,
+    ) -> Result<Project> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"),
+                [id],
+                project_from_row,
             )
-            .map_err(|e| constraint(e, || format!("project {:?} already exists", p.name)))?;
-        Ok(())
+            .optional()?
+            .context("the project was removed meanwhile")?;
+        let p = change(&current)?;
+        tx.execute(
+            "UPDATE projects SET name = ?2, origin = ?3, agent = ?4, model = ?5, effort = ?6
+             WHERE id = ?1",
+            params![id, p.name, path_str(&p.origin)?, p.agent, p.model, p.effort],
+        )
+        .map_err(|e| constraint(e, || format!("project {:?} already exists", p.name)))?;
+        tx.commit()?;
+        Ok(Project {
+            id,
+            note: current.note,
+            ..p
+        })
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {

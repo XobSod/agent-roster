@@ -8,26 +8,35 @@ impl Roster {
         self.db.add_project(&project, now_ms())
     }
 
-    /// Renames, moves or changes the defaults of a project. Its existing sessions
-    /// keep their directory.
+    /// Renames, moves or changes the defaults of a project; each None stays
+    /// as it is, so what another roster changed meanwhile does too, and a
+    /// default's Some(None) leaves the project none of its own. What it comes
+    /// to is checked whole, as a new project is. Its existing sessions keep
+    /// their directory.
     pub fn update_project(
         &self,
         id: i64,
-        name: &str,
-        path: &Path,
-        defaults: Defaults,
+        name: Option<&str>,
+        path: Option<&Path>,
+        agent: Option<Option<String>>,
+        model: Option<Option<String>>,
+        effort: Option<Option<String>>,
     ) -> Result<Project> {
-        let mut project = self.checked_project(id, name, path, defaults)?;
-        let current = self.db.projects()?.into_iter().find(|p| p.id == id);
-        if self.chat_project_id()? == Some(id)
-            && current.as_ref().is_some_and(|p| p.origin != project.origin)
-        {
-            bail!("the chats project's directory is set by `chats_dir` in config.toml");
-        }
-        // Its note is saved apart (`save_note`), and kept.
-        project.note = current.and_then(|p| p.note);
-        self.db.save_project(&project)?;
-        Ok(project)
+        let chats = self.chat_project_id()? == Some(id);
+        self.db.change_project(id, |current| {
+            let defaults = Defaults {
+                agent: agent.unwrap_or_else(|| current.agent.clone()),
+                model: model.unwrap_or_else(|| current.model.clone()),
+                effort: effort.unwrap_or_else(|| current.effort.clone()),
+            };
+            let name = name.unwrap_or(&current.name);
+            let project =
+                self.checked_project(id, name, path.unwrap_or(&current.origin), defaults)?;
+            if chats && project.origin != current.origin {
+                bail!("the chats project's directory is set by `chats_dir` in config.toml");
+            }
+            Ok(project)
+        })
     }
 
     pub(super) fn checked_project(
@@ -94,13 +103,15 @@ impl Roster {
         if let Some(id) = self.chat_project_id()?
             && let Some(p) = projects.iter().find(|p| p.id == id)
         {
-            let mut p = p.clone();
             // `chats_dir` changed: new chats run there; older ones keep theirs.
             if p.origin != origin {
-                p.origin = origin;
-                self.db.save_project(&p)?;
+                return self.db.change_project(id, |p| {
+                    let mut p = p.clone();
+                    p.origin = origin;
+                    Ok(p)
+                });
             }
-            return Ok(p);
+            return Ok(p.clone());
         }
         let taken: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         let name = new_project_name(Path::new("chats"), &taken);

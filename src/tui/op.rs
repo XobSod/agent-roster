@@ -90,13 +90,15 @@ pub enum Op {
         model: Option<String>,
         effort: Option<String>,
     },
+    /// Only what was changed in the form: None stays as it is.
     EditProject {
         id: i64,
-        name: String,
-        path: String,
-        agent: Option<String>,
-        model: Option<String>,
-        effort: Option<String>,
+        name: Option<String>,
+        path: Option<String>,
+        /// Some(None): the default.
+        agent: Option<Option<String>>,
+        model: Option<Option<String>>,
+        effort: Option<Option<String>>,
     },
     RemoveProject(String),
     KillOrphans,

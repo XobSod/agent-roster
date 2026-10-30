@@ -815,14 +815,22 @@ impl Form {
                 model: model(),
                 effort: effort(),
             },
-            Purpose::EditProject(id) => Op::EditProject {
-                id: *id,
-                name: required(Id::Name, "The name")?,
-                path: expand_tilde(&required(Id::Directory, "The directory")?),
-                agent: agent(),
-                model: model(),
-                effort: effort(),
-            },
+            Purpose::EditProject(id) => {
+                // Only what was changed here changes; changed to an agent
+                // that takes no model or effort, it has neither.
+                let changed = |id: Id| self.field(id).is_some_and(|f| f.edited);
+                let name = required(Id::Name, "The name")?;
+                let path = expand_tilde(&required(Id::Directory, "The directory")?);
+                let none_taken = changed(Id::Agent) && !takes;
+                Op::EditProject {
+                    id: *id,
+                    name: changed(Id::Name).then_some(name),
+                    path: changed(Id::Directory).then_some(path),
+                    agent: changed(Id::Agent).then(agent),
+                    model: (changed(Id::Model) || none_taken).then(model),
+                    effort: (changed(Id::Effort) || none_taken).then(effort),
+                }
+            }
             Purpose::NewSession => Op::NewSession {
                 project: required(Id::Project, "The project")?,
                 agent: self.value(Id::Agent).to_string(),
@@ -1279,6 +1287,38 @@ mod tests {
         );
         form.on_key(key(KeyCode::Right)); // codex
         assert_eq!(placeholder(&form), "optional: it starts with it");
+    }
+
+    #[test]
+    fn edit_project_saves_only_what_was_changed() {
+        let mut form = Form::edit_project(&project("api", None), &agents(), false);
+        form.focus = 3; // model
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(
+            submit(&mut form),
+            Op::EditProject {
+                id: 7,
+                name: None,
+                path: None,
+                agent: None,
+                model: Some(Some("opus".into())),
+                effort: None
+            }
+        );
+        // Changed to an agent that takes no model or effort: neither.
+        form.focus = 2;
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(
+            submit(&mut form),
+            Op::EditProject {
+                id: 7,
+                name: None,
+                path: None,
+                agent: Some(Some("aider".into())),
+                model: Some(None),
+                effort: Some(None)
+            }
+        );
     }
 
     #[test]

@@ -561,12 +561,14 @@ fn a_note_is_saved_apart_from_the_rest() {
     assert_eq!(db.session(&s.id).unwrap().note, None);
     assert!(db.set_note(&nobody, None).is_err());
 
-    // A project's, the same way; an edit of the project leaves it.
+    // A project's, the same way; an edit of the project, as it was read
+    // before, leaves it.
     let p = db.project(&s.project).unwrap().unwrap();
     let whose = Whose::Project(p.id);
     assert!(db.set_note_if(&whose, None, Some(&note)).unwrap());
     assert!(!db.set_note_if(&whose, None, Some(&newer)).unwrap());
-    db.save_project(&p).unwrap();
+    let edited = db.change_project(p.id, |_| Ok(p.clone())).unwrap();
+    assert_eq!(edited.note, Some(note.clone()));
     let p = db.project(&s.project).unwrap().unwrap();
     assert_eq!(p.note, Some(note));
     assert_eq!(db.session(&s.id).unwrap().note, None);
@@ -630,21 +632,53 @@ fn an_upgraded_databases_project_ids_arent_given_again() {
 }
 
 #[test]
-fn project_defaults_round_trip() {
+fn a_project_is_changed_as_it_is_now() {
     let db = Db::open_in_memory().unwrap();
     let mut p = project("demo");
     p.model = Some("opus".into());
     p.effort = Some("high".into());
-    let mut p = db.add_project(&p, 0).unwrap();
+    let p = db.add_project(&p, 0).unwrap();
     assert_eq!(
         db.project("demo").unwrap().unwrap().model.as_deref(),
         Some("opus")
     );
-    p.name = "renamed".into();
-    p.effort = None;
-    db.save_project(&p).unwrap();
+    // Its effort changed by another since `p` was read: kept.
+    db.change_project(p.id, |now| {
+        Ok(Project {
+            effort: Some("low".into()),
+            ..now.clone()
+        })
+    })
+    .unwrap();
+    let rename = |now: &Project| {
+        Ok(Project {
+            name: "renamed".into(),
+            model: None,
+            ..now.clone()
+        })
+    };
+    let changed = db.change_project(p.id, rename).unwrap();
     let saved = db.project("renamed").unwrap().unwrap();
-    assert_eq!((saved.model.as_deref(), saved.effort), (Some("opus"), None));
+    assert_eq!((saved.model, saved.effort.as_deref()), (None, Some("low")));
+    assert_eq!(changed.effort.as_deref(), Some("low"));
+    // A name taken, or the project gone: nothing changed.
+    db.add_project(&project("other"), 0).unwrap();
+    let taken = db.change_project(p.id, |now| {
+        Ok(Project {
+            name: "other".into(),
+            ..now.clone()
+        })
+    });
+    assert_eq!(
+        taken.unwrap_err().to_string(),
+        "project \"other\" already exists"
+    );
+    assert!(db.project("renamed").unwrap().is_some());
+    let gone = db.change_project(99, |now| Ok(now.clone()));
+    assert_eq!(
+        gone.unwrap_err().to_string(),
+        "the project was removed meanwhile"
+    );
 }
 
 #[test]

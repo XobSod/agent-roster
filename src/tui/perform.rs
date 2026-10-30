@@ -213,13 +213,11 @@ pub(super) fn perform(
         } => roster
             .update_project(
                 id,
-                &name,
-                Path::new(&path),
-                Defaults {
-                    agent,
-                    model,
-                    effort,
-                },
+                name.as_deref(),
+                path.as_deref().map(Path::new),
+                agent,
+                model,
+                effort,
             )
             .map(|p| {
                 app.select_project(&p.name);

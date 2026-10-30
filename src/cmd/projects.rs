@@ -24,13 +24,15 @@ pub fn edit(
 ) -> Result<()> {
     let p = r.projects()?.into_iter().find(|p| p.name == project);
     let p = p.with_context(|| format!("no project {project:?}"))?;
-    let updated = Defaults {
-        agent: setting(defaults.agent).unwrap_or(p.agent.clone()),
-        model: setting(defaults.model).unwrap_or(p.model.clone()),
-        effort: setting(defaults.effort).unwrap_or(p.effort.clone()),
-    };
-    let name = name.unwrap_or(p.name.clone());
-    let p = r.update_project(p.id, &name, &path.unwrap_or(p.origin.clone()), updated)?;
+    // Only what's given changes.
+    let p = r.update_project(
+        p.id,
+        name.as_deref(),
+        path.as_deref(),
+        setting(defaults.agent),
+        setting(defaults.model),
+        setting(defaults.effort),
+    )?;
     println!("Updated project {} ({})", p.name, p.origin.display());
     Ok(())
 }

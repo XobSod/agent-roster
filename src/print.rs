@@ -114,6 +114,17 @@ pub fn print_info(r: &Roster, s: &Session) {
         ("state", state),
         ("directory", s.workdir.display().to_string()),
         (
+            "worktree",
+            s.worktree.as_ref().map_or("-".into(), |w| {
+                let standing = crate::engine::standing(w);
+                let made = if w.made { "" } else { " (not roster's)" };
+                format!(
+                    "{}{made}",
+                    crate::engine::standing_said(w, standing.as_ref())
+                )
+            }),
+        ),
+        (
             "conversation",
             s.conversation_id.clone().unwrap_or_else(|| "-".into()),
         ),

@@ -245,12 +245,58 @@ pub fn changed_files(dir: &Path) -> Result<usize> {
     Ok(text.lines().filter(|l| !l.is_empty()).count())
 }
 
+/// How many commits `dir`'s HEAD has that `base` hasn't, and the other way
+/// round.
+pub fn ahead_behind(dir: &Path, base: &str) -> Result<(usize, usize)> {
+    let text = git(
+        dir,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("HEAD...{base}"),
+        ],
+    )?;
+    let mut counts = text.split_whitespace().map(str::parse::<usize>);
+    match (counts.next(), counts.next()) {
+        (Some(Ok(ahead)), Some(Ok(behind))) => Ok((ahead, behind)),
+        _ => bail!("git rev-list said {text:?}"),
+    }
+}
+
 /// How many commits `branch` has that `base` hasn't: none if it's merged.
 pub fn unmerged(repo: &Path, branch: &str, base: &str) -> Result<usize> {
     let text = git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])?;
     text.trim()
         .parse()
         .with_context(|| format!("git rev-list said {text:?}"))
+}
+
+/// What the worktree at `dir` changed against `base`, committed or not:
+/// files, lines added and lines removed (untracked files aside).
+pub fn diff_stat(dir: &Path, base: &str) -> Result<(usize, usize, usize)> {
+    let from = git(dir, &["merge-base", base, "HEAD"])?;
+    let text = git(dir, &["diff", "--shortstat", from.trim()])?;
+    Ok(parse_shortstat(&text))
+}
+
+fn parse_shortstat(text: &str) -> (usize, usize, usize) {
+    let (mut files, mut added, mut removed) = (0, 0, 0);
+    for part in text.split(',') {
+        let mut words = part.split_whitespace();
+        let (Some(n), Some(what)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let Ok(n) = n.parse() else { continue };
+        if what.starts_with("file") {
+            files = n;
+        } else if what.starts_with("insertion") {
+            added = n;
+        } else if what.starts_with("deletion") {
+            removed = n;
+        }
+    }
+    (files, added, removed)
 }
 
 /// Deletes `branch`; with `force`, though it isn't merged.
@@ -332,7 +378,9 @@ pub(crate) mod tests {
         sh(&wt, &["commit", "-q", "-m", "b"]);
         std::fs::write(wt.join("c.txt"), "c\n").unwrap();
         assert_eq!(changed_files(&wt).unwrap(), 1);
+        assert_eq!(ahead_behind(&wt, "main").unwrap(), (1, 0));
         assert_eq!(unmerged(&main, "fix", "main").unwrap(), 1);
+        assert_eq!(diff_stat(&wt, "main").unwrap(), (1, 2, 0));
         assert_eq!(branches(&main).len(), 2);
         // Not with what's not committed, unless forced.
         assert!(remove_worktree(&main, &wt, false).is_err());
@@ -349,6 +397,16 @@ pub(crate) mod tests {
         assert_eq!(worktrees(&main).unwrap().len(), 1);
         add_worktree(&main, &wt, "other", None).unwrap();
         assert_eq!(current_branch(&wt).as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn git_says_how_much_changed_in_a_line() {
+        assert_eq!(
+            parse_shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)"),
+            (3, 10, 2)
+        );
+        assert_eq!(parse_shortstat(" 1 file changed, 1 deletion(-)"), (1, 0, 1));
+        assert_eq!(parse_shortstat(""), (0, 0, 0));
     }
 
     #[test]

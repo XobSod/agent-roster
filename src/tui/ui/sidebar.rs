@@ -159,7 +159,17 @@ pub(super) fn list_lines(
                     CardSubagents::Unfolded => Vec::new(),
                 };
                 let mark = [memory_mark(app, s), mark].concat();
-                let mut rows = card(s, hit(app, s), with_project, noted, mark, content, now);
+                let standing = app.worktrees.standing.get(&s.id);
+                let mut rows = card(
+                    s,
+                    hit(app, s),
+                    with_project,
+                    noted,
+                    mark,
+                    standing,
+                    content,
+                    now,
+                );
                 if shown {
                     rows.extend(subagent_rows(app, s, content, now));
                     rows.extend(shell_rows(s, content, now));
@@ -277,13 +287,17 @@ pub(super) fn marked(text: &str, marks: &[usize], style: Style) -> Vec<Span<'sta
 
 /// A session's lines: its project (badge and name, and `project_noted`, its
 /// note's mark) unless the project's heading is right above; the title and
-/// state; name, model and effort, age and agent, and its note's mark.
+/// state; for one in a worktree, its branch and how it stands (`standing`,
+/// as last read); name, model and effort, age and agent, and its note's
+/// mark.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn card(
     s: &Session,
     hit: Option<&Hit>,
     with_project: bool,
     project_noted: bool,
     subagents: Vec<Span<'static>>,
+    standing: Option<&crate::engine::Standing>,
     width: usize,
     now: i64,
 ) -> Vec<Vec<Span<'static>>> {
@@ -319,6 +333,26 @@ pub(super) fn card(
         [status(s, now), vec![Span::raw(" ")]].concat(),
     );
     let meta_style = Style::new().fg(meta_color);
+    lines.push(first);
+    if let Some(w) = &s.worktree {
+        let mut left = vec![
+            Span::raw("   "),
+            Span::styled("⎇ ", meta_style),
+            Span::styled(w.branch.clone(), meta_style),
+        ];
+        if let Some(base) = &w.base {
+            let base = crate::engine::base_said(base).to_string();
+            left.push(Span::styled(format!(" ← {base}"), Style::new().fg(FAINT)));
+        }
+        let brief = standing
+            .map(crate::engine::standing_brief)
+            .unwrap_or_default();
+        let right = match brief.is_empty() {
+            true => Vec::new(),
+            false => vec![Span::styled(format!("{} ", brief.join(" · ")), meta_style)],
+        };
+        lines.push(fit(width, left, right));
+    }
     let second = fit(
         width,
         [vec![Span::raw("   ")], details(s, &hit.name, meta_style)].concat(),
@@ -332,7 +366,7 @@ pub(super) fn card(
         ]
         .concat(),
     );
-    lines.extend([first, second]);
+    lines.push(second);
     lines
 }
 

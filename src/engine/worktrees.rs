@@ -413,14 +413,7 @@ pub fn branches_question(leaving: &[Leaving], discard: bool) -> Option<String> {
         .filter(|l| l.stays.is_none() && (discard || l.changed == 0))
         .filter_map(|l| l.branch.as_ref())
         .collect();
-    // A commit it was made from, named short.
-    let base = |b: &Branch| {
-        let base = b.base.as_deref().unwrap_or("its base");
-        match base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit()) {
-            true => base[..7].to_string(),
-            false => base.to_string(),
-        }
-    };
+    let base = |b: &Branch| base_said(b.base.as_deref().unwrap_or("its base")).to_string();
     let commits = |n: usize| match n {
         1 => "1 commit".to_string(),
         n => format!("{n} commits"),
@@ -455,6 +448,93 @@ pub fn branches_question(leaving: &[Leaving], discard: bool) -> Option<String> {
             ))
         }
     }
+}
+
+/// How a worktree stands against its base, as read now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Standing {
+    /// Commits its branch has that its base hasn't, and the other way.
+    pub ahead: usize,
+    pub behind: usize,
+    /// Files changed and not committed, untracked ones included.
+    pub changed: usize,
+    /// What changed against its base, committed or not: files, lines added
+    /// and removed; None without a base to tell.
+    pub diff: Option<(usize, usize, usize)>,
+}
+
+/// How the worktree `w` stands now; None if it can't be read (gone, say).
+pub fn standing(w: &Worktree) -> Option<Standing> {
+    if !w.root.is_dir() {
+        return None;
+    }
+    let changed = git::changed_files(&w.root).ok()?;
+    let base = w.base.as_deref();
+    let (ahead, behind) = base
+        .and_then(|b| git::ahead_behind(&w.root, b).ok())
+        .unwrap_or_default();
+    let diff = base.and_then(|b| git::diff_stat(&w.root, b).ok());
+    Some(Standing {
+        ahead,
+        behind,
+        changed,
+        diff,
+    })
+}
+
+/// A base as said: a commit it was made from, short.
+pub fn base_said(base: &str) -> &str {
+    match base.len() == 40 && base.chars().all(|c| c.is_ascii_hexdigit()) {
+        true => &base[..7],
+        false => base,
+    }
+}
+
+/// How `standing` is said briefly, on a card: what there's something to
+/// say of, each.
+pub fn standing_brief(standing: &Standing) -> Vec<String> {
+    [
+        (standing.ahead, "ahead"),
+        (standing.behind, "behind"),
+        (standing.changed, "changed"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect()
+}
+
+/// How the worktree `w` stands, said whole: its branch and base, how far
+/// ahead and behind, what's changed not committed, and what changed against
+/// its base.
+pub fn standing_said(w: &Worktree, standing: Option<&Standing>) -> String {
+    let mut parts = vec![match &w.base {
+        Some(base) => format!("{} ← {}", w.branch, base_said(base)),
+        None => w.branch.clone(),
+    }];
+    if let Some(st) = standing {
+        if w.base.is_some() {
+            parts.push(match (st.ahead, st.behind) {
+                (0, 0) => "even with it".into(),
+                (a, 0) => format!("{a} ahead"),
+                (0, b) => format!("{b} behind"),
+                (a, b) => format!("{a} ahead, {b} behind"),
+            });
+        }
+        if st.changed > 0 {
+            let files = if st.changed == 1 { "file" } else { "files" };
+            parts.push(format!("{} {files} changed, not committed", st.changed));
+        }
+        if let Some((files, added, removed)) = st.diff.filter(|d| d.0 > 0) {
+            let in_files = if files == 1 {
+                "1 file".into()
+            } else {
+                format!("{files} files")
+            };
+            parts.push(format!("+{added} −{removed} in {in_files}"));
+        }
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]

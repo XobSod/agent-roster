@@ -339,6 +339,56 @@ fn stopped_and_archived_sessions_can_be_whole_cards() {
 }
 
 #[test]
+fn a_worktree_sessions_card_says_its_branch_and_how_it_stands() {
+    let mut app = app();
+    let mut sessions = app.sessions.clone();
+    sessions[0].worktree = Some(crate::model::Worktree {
+        root: "/w/roster/fix-auth".into(),
+        repo: "/r".into(),
+        branch: "fix-auth".into(),
+        base: Some("main".into()),
+        made: true,
+        set_up: true,
+        trusted_in: None,
+    });
+    app.set_data(app.projects.clone(), sessions);
+    // Nothing to say yet: its branch alone, between its title and its agent.
+    let screen = render(&app, 120, 24);
+    // The list's side of each line.
+    let lines: Vec<&str> = (screen.lines())
+        .map(|l| l.split('│').next().unwrap_or(""))
+        .collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains("⎇ fix-auth ← main"))
+        .unwrap();
+    assert!(lines[at - 1].contains("Fix scrollback"), "{screen}");
+    assert!(lines[at + 1].contains("api"), "{screen}");
+    assert!(!lines[at].contains("ahead"), "{screen}");
+    // Once read: how far ahead, what's changed; the preview says it whole.
+    app.worktrees.standing.insert(
+        "a1".into(),
+        crate::engine::Standing {
+            ahead: 3,
+            behind: 0,
+            changed: 2,
+            diff: Some((4, 120, 30)),
+        },
+    );
+    app.selected = (app.entries.iter())
+        .position(|e| matches!(e, Entry::Card(s) if s.id == "a1"))
+        .unwrap();
+    let screen = render(&app, 160, 24);
+    assert!(screen.contains("3 ahead · 2 changed"), "{screen}");
+    assert!(
+        screen.contains(
+            "⎇ fix-auth ← main · 3 ahead · 2 files changed, not committed · +120 −30 in 4 files"
+        ),
+        "{screen}"
+    );
+}
+
+#[test]
 fn rows_keep_their_projects_note_mark_with_a_long_name() {
     let mut app = app();
     let mut projects = app.projects.clone();

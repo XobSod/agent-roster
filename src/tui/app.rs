@@ -211,6 +211,8 @@ pub struct App {
     pub card_subagents: crate::config::CardSubagents,
     /// Stopped and archived sessions as whole cards, not a line each.
     stopped_cards: bool,
+    /// How the worktrees sessions work in stand, as last read.
+    pub worktrees: crate::tui::worktrees::Reads,
     /// Above how much memory a session's processes are said to use too
     /// much; None: not said.
     pub memory_limit: Option<u64>,
@@ -287,6 +289,7 @@ impl App {
             sidebar_usage: true,
             card_subagents: Default::default(),
             stopped_cards: false,
+            worktrees: Default::default(),
             memory_limit: None,
             resources: HashMap::new(),
             resources_read: None,

@@ -59,6 +59,7 @@ pub(super) fn sidebar_loop(
             app.set_data(projects, sessions);
         }
         read_subagents(app);
+        (app.worktrees).tick(&app.sessions, Some(id), Instant::now());
         // What codex wrote of its limits since, which costs nothing to read.
         if app.sidebar_usage {
             app.limits.read_transcripts(&app.sessions);

@@ -129,6 +129,14 @@ makes the place and says how it stands: committing, merging and rebasing are the
 agents' work, when you ask them. A session's directory is fixed: to go on in another
 worktree, start a session there and tell it what it needs to know.
 
+A worktree session's card has a line of its own between its title and its agent,
+`⎇ fix-auth ← main`, and once there's something to say, `3 ahead · 1 behind · 5
+changed` (commits its base doesn't have and the other way round, files changed and not
+committed), read in the background when a turn ends, every 30 s while it works, and
+when you select it; the preview adds what changed against the base (`+120 −30`), and
+`roster info` says it whole (`+120 −30 in 5 files`). `stopped_cards =
+"unfolded"` shows stopped and archived sessions as cards too, line and all.
+
 A fresh worktree has only what git tracks, no `.env`, no `node_modules`, no build
 cache. `.agent-roster.worktree` beside the project's `.agent-roster.env` runs once in
 each new worktree, in its pane, before its agent starts, after the env files, with

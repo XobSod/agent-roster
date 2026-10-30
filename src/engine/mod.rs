@@ -36,8 +36,8 @@ pub use self::{
     sessions::{Defaults, NewSession},
     starting::{StartCheck, Starting, start_check},
     worktrees::{
-        Deleting, Leaving, WORKTREE_SETUP, WorksIn, branches_question, changes_question,
-        staying_said,
+        Deleting, Leaving, Standing, WORKTREE_SETUP, WorksIn, base_said, branches_question,
+        changes_question, standing, standing_brief, standing_said, staying_said,
     },
 };
 

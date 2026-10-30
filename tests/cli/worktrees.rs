@@ -110,6 +110,12 @@ fn a_session_works_in_a_worktree_made_for_it_or_shared() {
     );
     fs::remove_file(root.join("from-setup")).unwrap();
 
+    // Its details say how it stands.
+    let info = t.ok(&["info", "one"]);
+    assert!(
+        info.contains("worktree     one ← main · even with it"),
+        "{info}"
+    );
     // Another in it, by the session's name: set up already.
     t.ok(&[
         "new", "demo", "--agent", "echo", "--name", "two", "--in", "one",

@@ -1,6 +1,7 @@
 //! What the TUI's actions do: in the session list and the views.
 
 use super::*;
+use crate::engine::{StartCheck, Starting};
 
 impl App {
     pub(super) fn act(&mut self, action: Action) -> Option<Op> {
@@ -326,24 +327,12 @@ impl App {
                 None
             }
             Entry::Card(s) | Entry::Row(s) if s.deleted_at.is_some() => self.restore(s),
-            Entry::Card(s) | Entry::Row(s) => {
-                // Its first prompt not seen taken: given again, or not.
-                if s.state == State::Stopped && s.given_prompt.is_some() {
-                    let question = crate::agent::prompt_again_question(&s);
-                    self.ask(
-                        question,
-                        Op::AttachPromptAgain(s.id.clone()),
-                        Op::Attach(s.id),
-                    );
-                    return None;
-                }
-                // Starting an agent that can't resume loses its conversation: ask.
-                if s.state == State::Stopped && !crate::agent::resumes(&s) {
-                    self.confirm(self.new_conversation_question(&s), Op::Attach(s.id));
-                    return None;
-                }
-                Some(Op::Attach(s.id))
-            }
+            Entry::Card(s) | Entry::Row(s) => self.starting(
+                &s,
+                Starting::Attach,
+                Op::Attach(s.id.clone()),
+                Op::AttachPromptAgain(s.id.clone()),
+            ),
         }
     }
 
@@ -377,35 +366,18 @@ impl App {
                 self.open_form(Form::edit_session(&s));
                 None
             }
-            // Its first prompt not seen taken (its agent exited first, or
-            // is still at a screen it showed first): given again, or not.
-            // A new conversation either way, as its agent never said which.
-            // A working one's restart asks this alone, which says it's cut
-            // short.
-            Action::Start if s.state == State::Stopped && s.given_prompt.is_some() => {
-                let question = crate::agent::prompt_again_question(&s);
-                self.ask(question, Op::PromptAgain(s.id.clone()), Op::Start(s.id));
-                None
-            }
-            Action::Restart if s.given_prompt.is_some() => {
-                let question = crate::agent::prompt_again_question(&s);
-                self.ask(
-                    question,
-                    Op::RestartPromptAgain(s.id.clone()),
-                    Op::Restart(s.id),
-                );
-                None
-            }
-            Action::Start | Action::Restart if !crate::agent::resumes(&s) => {
-                let op = if action == Action::Start {
-                    Op::Start(s.id.clone())
-                } else {
-                    Op::Restart(s.id.clone())
-                };
-                self.confirm(self.new_conversation_question(&s), op);
-                None
-            }
-            Action::Start => Some(Op::Start(s.id)),
+            Action::Start => self.starting(
+                &s,
+                Starting::Start,
+                Op::Start(s.id.clone()),
+                Op::PromptAgain(s.id.clone()),
+            ),
+            Action::Restart => self.starting(
+                &s,
+                Starting::Restart,
+                Op::Restart(s.id.clone()),
+                Op::RestartPromptAgain(s.id.clone()),
+            ),
             // Stopping a working session cuts its turn short, as restarting
             // one does: both ask.
             Action::Stop if s.state == State::Working => {
@@ -416,14 +388,6 @@ impl App {
                 None
             }
             Action::Stop => Some(Op::Stop(s.id)),
-            Action::Restart if s.state == State::Working => {
-                self.confirm(
-                    format!("{} is working. Restart it?", s.label()),
-                    Op::Restart(s.id),
-                );
-                None
-            }
-            Action::Restart => Some(Op::Restart(s.id)),
             Action::Archive => {
                 self.confirm(crate::agent::archive_question(&s), Op::Archive(s.id));
                 None
@@ -433,6 +397,19 @@ impl App {
             Action::Retitle => Some(Op::RetitleSession(s.id)),
             _ => None,
         }
+    }
+
+    /// `op`, starting `s` (`how`), once what that asks first is answered
+    /// (`again` if its first prompt is to be given again), or why it can't
+    /// be (`engine::start_check`).
+    fn starting(&mut self, s: &Session, how: Starting, op: Op, again: Op) -> Option<Op> {
+        match crate::engine::start_check(s, how) {
+            StartCheck::Go => return Some(op),
+            StartCheck::Confirm(question) => self.confirm(question, op),
+            StartCheck::PromptAgain { question, .. } => self.ask(question, again, op),
+            StartCheck::Refused(why) => self.fail(why),
+        }
+        None
     }
 
     /// Asks whether to delete `s` for good.

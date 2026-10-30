@@ -590,6 +590,19 @@ fn agents_that_cant_resume_ask_before_a_new_conversation() {
     }
     assert_eq!(app.on_key(key(KeyCode::Enter)), None);
     assert_eq!(keys(&mut app, "y"), Some(Op::Attach("g1".into())));
+    // Running, it isn't started again: said at once, nothing asked first.
+    let mut sessions = app.sessions.clone();
+    if let Some(g) = sessions.iter_mut().find(|s| s.id == "g1") {
+        g.state = State::Idle;
+    }
+    app.set_data(app.projects.clone(), sessions);
+    select(&mut app, "g1");
+    assert_eq!(keys(&mut app, "ss"), None);
+    assert!(app.dialog.is_none());
+    assert!(
+        app.message()
+            .is_some_and(|m| m.error && m.text.contains("is already running"))
+    );
 }
 
 #[test]

@@ -25,11 +25,13 @@ mod processes;
 mod projects;
 mod prompts;
 mod sessions;
+mod starting;
 
 pub use self::{
     notes::NoteSaved,
     prompts::Undelivered,
     sessions::{Defaults, NewSession},
+    starting::{StartCheck, Starting, start_check},
 };
 
 // What one job has that the others use.

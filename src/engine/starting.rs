@@ -1,0 +1,152 @@
+//! What starting a session asks first, or why it can't: decided here once,
+//! for the CLI and the TUI to say.
+
+use super::*;
+
+/// How a session is started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Starting {
+    /// Started, if it's stopped.
+    Start,
+    /// Attached to, started first if it's stopped.
+    Attach,
+    /// Stopped if it runs, then started.
+    Restart,
+}
+
+/// What starting a session asks first, or why it can't.
+#[derive(Debug, PartialEq)]
+pub enum StartCheck {
+    /// Nothing: it goes ahead.
+    Go,
+    /// Whether to go ahead, asked so.
+    Confirm(String),
+    /// Whether to give its agent again the first prompt it hasn't said it
+    /// took (`Session::given_prompt`), asked so, never on its own, as given
+    /// twice it would be acted on twice; either way it starts a new
+    /// conversation. `unasked`: what to confirm before going ahead on an
+    /// answer given without the question (on the command line), which says
+    /// a working one is cut short.
+    PromptAgain {
+        question: String,
+        unasked: Option<String>,
+    },
+    /// It can't, for this reason.
+    Refused(String),
+}
+
+/// What starting `s` (`how`) asks first, or why it can't.
+pub fn start_check(s: &Session, how: Starting) -> StartCheck {
+    let stopped = s.state == State::Stopped;
+    match how {
+        Starting::Start if !stopped => {
+            return StartCheck::Refused(format!("{} is already running", s.label()));
+        }
+        Starting::Attach if !stopped => return StartCheck::Go,
+        _ => {}
+    }
+    // Its agent exited first, or is still at a screen it showed first: a new
+    // conversation either way, as its agent never said which.
+    if s.given_prompt.is_some() {
+        return StartCheck::PromptAgain {
+            question: agent::prompt_again_question(s),
+            unasked: (s.state == State::Working).then(|| working(s)),
+        };
+    }
+    if !agent::resumes(s) {
+        return StartCheck::Confirm(agent::new_conversation_question(s));
+    }
+    // Restarting a working one cuts its turn short.
+    if s.state == State::Working {
+        return StartCheck::Confirm(working(s));
+    }
+    StartCheck::Go
+}
+
+fn working(s: &Session) -> String {
+    format!("{} is working. Restart it?", s.label())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::tests::session;
+
+    #[test]
+    fn starting_asks_one_thing_first_or_refuses() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Asks {
+            Go,
+            Confirm,
+            PromptAgain { unasked: bool },
+            Refused,
+        }
+        let asks = |state, prompt: bool, resumes: bool, how| {
+            let mut s = session("s");
+            s.state = state;
+            s.conversation_id = resumes.then(|| "c-1".to_string());
+            s.given_prompt = prompt.then(|| "fix it".to_string());
+            match start_check(&s, how) {
+                StartCheck::Go => Asks::Go,
+                StartCheck::Confirm(_) => Asks::Confirm,
+                StartCheck::PromptAgain { unasked, .. } => Asks::PromptAgain {
+                    unasked: unasked.is_some(),
+                },
+                StartCheck::Refused(_) => Asks::Refused,
+            }
+        };
+        use {Starting::*, State::*};
+        // Whether to give its first prompt again; with what a working one
+        // asks too, answered without it.
+        let (again, cut) = (
+            Asks::PromptAgain { unasked: false },
+            Asks::PromptAgain { unasked: true },
+        );
+        let cases = [
+            // Stopped: what it'd lose asked about, the first prompt first.
+            (Stopped, false, true, Start, Asks::Go),
+            (Stopped, false, false, Start, Asks::Confirm),
+            (Stopped, true, true, Start, again),
+            (Stopped, true, false, Start, again),
+            (Stopped, false, true, Attach, Asks::Go),
+            (Stopped, false, false, Attach, Asks::Confirm),
+            (Stopped, true, true, Attach, again),
+            (Stopped, false, true, Restart, Asks::Go),
+            (Stopped, false, false, Restart, Asks::Confirm),
+            (Stopped, true, true, Restart, again),
+            // Running: not started again; attached to as it is.
+            (Idle, false, false, Start, Asks::Refused),
+            (Working, true, true, Start, Asks::Refused),
+            (Working, true, false, Attach, Asks::Go),
+            // A restart cuts a turn short: asked, once.
+            (Idle, false, true, Restart, Asks::Go),
+            (NeedsInput, false, true, Restart, Asks::Go),
+            (Working, false, true, Restart, Asks::Confirm),
+            (Working, false, false, Restart, Asks::Confirm),
+            (Idle, true, true, Restart, again),
+            (NeedsInput, true, true, Restart, again),
+            (Working, true, true, Restart, cut),
+        ];
+        for (state, prompt, resumes, how, expected) in cases {
+            assert_eq!(
+                asks(state, prompt, resumes, how),
+                expected,
+                "{state:?}, prompt {prompt}, resumes {resumes}, {how:?}"
+            );
+        }
+        // Said as each question has it; a working one's restart that would
+        // lose its conversation asks about that.
+        let mut s = session("s");
+        s.conversation_id = Some("c-1".into());
+        let StartCheck::Confirm(question) = start_check(&s, Restart) else {
+            panic!()
+        };
+        assert!(question.ends_with("is working. Restart it?"), "{question}");
+        s.conversation_id = None;
+        let new_one = StartCheck::Confirm(agent::new_conversation_question(&s));
+        assert_eq!(start_check(&s, Restart), new_one);
+        s.state = Stopped;
+        let new_one = StartCheck::Confirm(agent::new_conversation_question(&s));
+        assert_eq!(start_check(&s, Start), new_one);
+    }
+}

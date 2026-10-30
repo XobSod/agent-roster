@@ -1,22 +1,16 @@
 //! Sessions' lives: attaching, starting, stopping, killing, restarting, archiving, deleting and restoring them.
 
 use crate::*;
+use engine::{StartCheck, Starting};
 
 /// `roster attach`.
 pub fn attach(r: &mut Roster, session: String, yes: bool, again: PromptAgain) -> Result<()> {
     r.refresh()?;
     let s = r.resolve(&session, false)?;
+    let Some(give) = asked(&s, Starting::Attach, yes, &again)? else {
+        return Ok(());
+    };
     if s.state == State::Stopped {
-        // Its first prompt not seen taken asks that instead: a new
-        // conversation either way.
-        let give = match s.given_prompt {
-            Some(_) => match give_prompt_again(&s, &again)? {
-                Some(give) => give,
-                None => return Ok(()),
-            },
-            None if !confirm_new_conversation(r, &s, yes)? => return Ok(()),
-            None => false,
-        };
         // Here, so what starting says comes before tmux takes the
         // terminal; unless another roster started it while asking.
         r.refresh()?;
@@ -43,15 +37,8 @@ pub fn start(r: &mut Roster, session: String, yes: bool, again: PromptAgain) -> 
     {
         bail!(refused);
     }
-    // Its first prompt not seen taken asks that instead: a new
-    // conversation either way. A running one fails to start anyway.
-    let give = match (&s.given_prompt, s.state) {
-        (Some(_), State::Stopped) => match give_prompt_again(&s, &again)? {
-            Some(give) => give,
-            None => return Ok(()),
-        },
-        (_, State::Stopped) if !confirm_new_conversation(r, &s, yes)? => return Ok(()),
-        _ => false,
+    let Some(give) = asked(&s, Starting::Start, yes, &again)? else {
+        return Ok(());
     };
     if give {
         r.give_prompt_again(&s.id)?;
@@ -148,42 +135,16 @@ pub fn stop(r: &mut Roster, session: String, yes: bool) -> Result<()> {
 pub fn restart(r: &mut Roster, session: String, yes: bool, again: PromptAgain) -> Result<()> {
     r.refresh()?;
     let s = r.resolve(&session, false)?;
-    // Still at a screen it showed before taking its first prompt,
-    // say: whether to give it again is asked instead. That question
-    // says a working one is cut short; answered on the command line,
-    // it isn't asked, so that's asked as any restart asks it.
-    if s.given_prompt.is_some() {
-        let answered = again.prompt_again || again.no_prompt_again;
-        if answered
-            && s.state == State::Working
-            && !confirm(&format!("{} is working. Restart it?", s.label()), yes)?
-        {
-            return Ok(());
-        }
-        let Some(give) = give_prompt_again(&s, &again)? else {
-            return Ok(());
-        };
-        if give {
-            r.restart_giving_prompt(&s.id)?;
-            println!("Restarted {}, its first prompt given again", s.label());
-        } else {
-            r.restart(&s.id)?;
-            println!("Restarted {}", s.label());
-        }
+    let Some(give) = asked(&s, Starting::Restart, yes, &again)? else {
         return Ok(());
-    }
-    let asked = if !r.can_resume(&s) {
-        confirm_new_conversation(r, &s, yes)?
-    } else if s.state == State::Working {
-        confirm(&format!("{} is working. Restart it?", s.label()), yes)?
-    } else {
-        true
     };
-    if !asked {
-        return Ok(());
+    if give {
+        r.restart_giving_prompt(&s.id)?;
+        println!("Restarted {}, its first prompt given again", s.label());
+    } else {
+        r.restart(&s.id)?;
+        println!("Restarted {}", s.label());
     }
-    r.restart(&s.id)?;
-    println!("Restarted {}", s.label());
     Ok(())
 }
 
@@ -222,14 +183,31 @@ pub fn restore(r: &mut Roster, session: String, name: Option<String>) -> Result<
     Ok(())
 }
 
-/// Whether a start of `s`, whose first prompt its agent hasn't said it took,
-/// gives it again: as `again` says, else asked (with a terminal to
-/// ask in); None for no start at all.
-fn give_prompt_again(s: &Session, again: &PromptAgain) -> Result<Option<bool>> {
+/// Whether to go on starting `s` (`how`), and if so whether its first prompt
+/// is given again: what starting it asks first (`engine::start_check`),
+/// answered by `yes` and `again` or else asked; None for no start at all.
+fn asked(s: &Session, how: Starting, yes: bool, again: &PromptAgain) -> Result<Option<bool>> {
+    Ok(match engine::start_check(s, how) {
+        StartCheck::Go => Some(false),
+        StartCheck::Confirm(question) => confirm(&question, yes)?.then_some(false),
+        StartCheck::PromptAgain { question, unasked } => {
+            let answered = again.prompt_again || again.no_prompt_again;
+            match unasked {
+                Some(unasked) if answered && !confirm(&unasked, yes)? => None,
+                _ => give_prompt_again(&question, again)?,
+            }
+        }
+        StartCheck::Refused(why) => bail!(why),
+    })
+}
+
+/// Whether a start whose first prompt its agent hasn't said it took gives
+/// it again: as `again` says, else `question` asked (with a terminal to ask
+/// in); None for no start at all.
+fn give_prompt_again(question: &str, again: &PromptAgain) -> Result<Option<bool>> {
     if again.prompt_again || again.no_prompt_again {
         return Ok(Some(again.prompt_again));
     }
-    let question = crate::agent::prompt_again_question(s);
     if !io::stdin().is_terminal() {
         bail!("{question} Pass --prompt-again to give it, or --no-prompt-again to start without.");
     }
@@ -242,12 +220,4 @@ fn give_prompt_again(s: &Session, again: &PromptAgain) -> Result<Option<bool>> {
         "n" | "no" => Some(false),
         _ => None,
     })
-}
-
-/// Asks before (re)starting an agent that can't resume its conversation.
-fn confirm_new_conversation(r: &Roster, s: &Session, yes: bool) -> Result<bool> {
-    if r.can_resume(s) {
-        return Ok(true);
-    }
-    confirm(&crate::agent::new_conversation_question(s), yes)
 }

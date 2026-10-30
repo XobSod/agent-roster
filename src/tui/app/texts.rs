@@ -190,10 +190,6 @@ impl App {
         format!("{open} {key}")
     }
 
-    pub(super) fn new_conversation_question(&self, s: &Session) -> String {
-        crate::agent::new_conversation_question(s)
-    }
-
     /// Preview for a project heading.
     pub fn project_info(&self, p: &Project) -> Text<'static> {
         let env = p.origin.join(PROJECT_ENV);

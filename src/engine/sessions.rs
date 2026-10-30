@@ -182,8 +182,8 @@ impl Roster {
             }
             s.pending_prompt = s.given_prompt.take();
         }
-        if s.state != State::Stopped {
-            bail!("{} is already running", s.label());
+        if let StartCheck::Refused(why) = start_check(&s, Starting::Start) {
+            bail!(why);
         }
         // One its agent no longer has (asked about first) begins anew on its
         // id: nothing of it said yet, and no copy of the one it came from.
@@ -492,12 +492,6 @@ impl Roster {
         }
         self.db.save_changes(&before, &s)?;
         Ok(s)
-    }
-
-    /// Whether starting `s` again resumes its conversation; if not, the CLI and
-    /// TUI ask first.
-    pub fn can_resume(&self, s: &Session) -> bool {
-        agent::resumes(s)
     }
 }
 

@@ -110,7 +110,9 @@ for its directory. It goes on with the model and effort it last ran on (as far a
 agent recorded them), the defaults (the project's, if the project runs the same agent,
 else the agent's), or ones you pick in the form (`--defaults`, `--model`, `--effort` on
 the CLI). Close it where it's open first, or adopt a copy and leave the original alone.
-Roster can tell when one is open in Claude, but not in pi or Codex.
+Roster can tell when one is open in Claude, but not in pi or Codex. One that ran in a
+git worktree goes to the project of that worktree's repository, as a session in the
+worktree; if it was one of roster's and is gone, it's made again from its branch first.
 
 ### Worktrees
 

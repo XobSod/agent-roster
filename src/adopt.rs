@@ -45,7 +45,8 @@ impl Roster {
                 .iter()
                 .filter(|p| conversation.cwd.starts_with(&p.origin))
                 .max_by_key(|p| p.origin.components().count())
-                .cloned();
+                .cloned()
+                .or_else(|| self.project_by_worktree(&conversation.cwd, &projects));
             if project.is_none() && !all {
                 continue;
             }
@@ -129,6 +130,8 @@ impl Roster {
         // A copy's conversation is its agent's to name as it starts: Claude
         // and pi are given an id, codex reports its own.
         let fork_from = req.fork.then(|| c.id.clone());
+        // Where it ran, if a worktree: there again, made again if it's gone.
+        let worktree = self.adopted_worktree(&project, &c.cwd)?;
         let (conversation_id, transcript_path) = if req.fork {
             (None, None)
         } else {
@@ -139,6 +142,7 @@ impl Roster {
         };
         self.create_session(request, |s| {
             s.workdir = c.cwd.clone();
+            s.worktree = worktree;
             s.conversation_id = conversation_id;
             s.transcript_path = transcript_path;
             // Moved, it's a conversation its agent kept: it has had turns.

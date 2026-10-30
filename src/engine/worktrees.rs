@@ -227,6 +227,91 @@ impl Roster {
     }
 }
 
+impl Roster {
+    /// The project a conversation that ran in `dir`, in no project's
+    /// directory, belongs to by its worktree: the project of the repository
+    /// a worktree there is of, or the project one of roster's that's gone
+    /// was made for.
+    pub(crate) fn project_by_worktree(&self, dir: &Path, projects: &[Project]) -> Option<Project> {
+        if !dir.exists() {
+            let made = dir.strip_prefix(self.worktrees_dir()).ok()?;
+            let name = made.components().next()?.as_os_str().to_string_lossy();
+            return projects.iter().find(|p| p.name == name).cloned();
+        }
+        // A worktree's root has a `.git` file, not a directory: only then
+        // is git asked.
+        let linked = dir.ancestors().any(|a| a.join(".git").is_file());
+        if !linked {
+            return None;
+        }
+        let repo = git::repository(dir)?;
+        (projects.iter())
+            .filter(|p| git::repository(&p.origin).as_ref() == Some(&repo))
+            .max_by_key(|p| p.origin.components().count())
+            .cloned()
+    }
+
+    /// The worktree a conversation adopted into `project` ran in, at `dir`:
+    /// one there is, of its repository, or one of roster's that's gone, made
+    /// again now from its branch, if that's there and free; None for the
+    /// checkout, or a directory that's no worktree.
+    pub(crate) fn adopted_worktree(
+        &mut self,
+        project: &Project,
+        dir: &Path,
+    ) -> Result<Option<Worktree>> {
+        let Some(top) = git::toplevel(&project.origin) else {
+            return Ok(None);
+        };
+        if dir.exists() {
+            if !git::same_repository(dir, &top) {
+                return Ok(None);
+            }
+            return self.existing_worktree(project, &top, &dir.to_string_lossy());
+        }
+        let ours = self.worktrees_dir().join(&project.name);
+        let Some(name) = (dir.strip_prefix(&ours).ok())
+            .and_then(|rest| rest.components().next())
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        else {
+            return Ok(None);
+        };
+        let root = ours.join(&name);
+        let Some(branch) = git::branches(&top)
+            .into_iter()
+            .find(|b| git::directory_name(b) == name)
+        else {
+            bail!(
+                "it ran in a worktree, {}, that's gone, and so is its branch: it can't be adopted there",
+                root.display()
+            );
+        };
+        if let Some(at) = git::checked_out(&top, &branch)? {
+            bail!(
+                "it ran in a worktree, {}, that's gone, and its branch {branch} is checked out in {} now",
+                root.display(),
+                at.display()
+            );
+        }
+        git::prune_worktrees(&top)?;
+        fs::create_dir_all(&ours).with_context(|| format!("can't make {}", ours.display()))?;
+        git::add_worktree(&project.origin, &root, &branch, None)?;
+        self.notices.push(format!(
+            "Made its worktree, {}, again from branch {branch}",
+            util::short_path(&root)
+        ));
+        Ok(Some(Worktree {
+            root: root.canonicalize()?,
+            repo: top,
+            branch,
+            base: None,
+            made: true,
+            set_up: !project.origin.join(WORKTREE_SETUP).is_file(),
+            trusted_in: None,
+        }))
+    }
+}
+
 /// A worktree sessions deleted for good work in, as it is now: whether it
 /// goes with them, what's in it not committed, and its branch.
 #[derive(Clone, Debug, PartialEq)]

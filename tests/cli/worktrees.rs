@@ -274,3 +274,59 @@ fn a_worktree_is_trusted_in_claude_as_its_checkout_is_till_its_removed() {
     assert_eq!(entry(&trusted), Value::Null);
     assert_eq!(entry(&repo)["hasTrustDialogAccepted"], json!(true));
 }
+
+#[test]
+fn a_conversation_that_ran_in_a_worktree_is_adopted_into_its_repositorys_project() {
+    let Some(t) = TestEnv::new("worktree-adopt") else {
+        return;
+    };
+    let repo = demo(&t);
+    // One made by hand, beside the checkout.
+    let elsewhere = t.path("elsewhere");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "mine",
+            elsewhere.to_str().unwrap(),
+        ],
+    );
+    let elsewhere = fs::canonicalize(&elsewhere).unwrap();
+    t.conversation("c0ffee01", &elsewhere, "Mine");
+    let listed = t.ok(&["adopt", "--list"]);
+    assert!(
+        listed.contains("c0ffee01") && listed.contains("demo"),
+        "{listed}"
+    );
+    t.ok(&["adopt", "c0ffee01", "--name", "mine"]);
+    let s = t.session("mine", false).unwrap();
+    assert_eq!(s["project"], "demo");
+    assert_eq!(s["workdir"], json!(elsewhere));
+    let w = &s["worktree"];
+    assert_eq!(
+        (&w["path"], &w["branch"], &w["made_by_roster"]),
+        (&json!(elsewhere), &json!("mine"), &json!(false))
+    );
+    // One of roster's, gone since with its session, its branch kept: made
+    // again where it was.
+    t.ok(&["new", "demo", "--name", "gone", "--worktree"]);
+    let gone = fs::canonicalize(t.path("state/agent-roster/worktrees/demo/gone")).unwrap();
+    t.ok(&["rm", "--yes", "--keep-branch", "gone"]);
+    assert!(!gone.exists());
+    t.conversation("c0ffee02", &gone, "Gone");
+    let out = t.run(&["adopt", "c0ffee02", "--name", "back"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success() && said.contains("again from branch gone"),
+        "{said}"
+    );
+    assert!(gone.join("a.txt").exists());
+    let w = &t.session("back", false).unwrap()["worktree"];
+    assert_eq!(
+        (&w["branch"], &w["made_by_roster"]),
+        (&json!("gone"), &json!(true))
+    );
+}

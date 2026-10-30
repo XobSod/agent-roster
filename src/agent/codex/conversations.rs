@@ -20,7 +20,8 @@ use crate::stats::{Jsonl, Lines};
 
 /// Codex's directory: `$CODEX_HOME`, else `~/.codex`.
 pub fn codex_dir() -> Option<PathBuf> {
-    match std::env::var_os("CODEX_HOME") {
+    // An empty one is none, to Codex too.
+    match std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => Some(PathBuf::from(dir)),
         None => dirs::home_dir().map(|h| h.join(".codex")),
     }

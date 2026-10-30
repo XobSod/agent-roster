@@ -507,4 +507,16 @@ fn a_sessions_folder_is_trusted_in_its_agent_when_asked() {
         trusted(&elsewhere.join("config.toml"))
     });
     assert!(!trusted(&codex_config));
+    // An empty one is none, to Codex too: its home's, not the folder's.
+    let home = t.path("home");
+    fs::write(
+        proj.join(".agent-roster.env"),
+        format!("HOME='{}'\nCODEX_HOME=\n", home.display()),
+    )
+    .unwrap();
+    t.ok(&["new", "demo", "--name", "empty"]);
+    t.wait_for("trusted in codex's home", |_| {
+        trusted(&home.join(".codex").join("config.toml"))
+    });
+    assert!(!proj.join("config.toml").exists());
 }

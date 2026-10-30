@@ -672,6 +672,22 @@ fn settings_are_changed_in_the_tui_and_followed_on_disk() {
     )
     .unwrap();
     term.wait_for("the reload", "config.toml changed: its settings are in use");
+    // Changed here while another roster changes it, under its lock: changed
+    // once that one is done, in the file as it left it.
+    let lock = t.config_dir().join("config.toml.lock");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    assert!(!term.screen().contains("Set status_line"));
+    term.keys(&["Enter"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::fs::write(&file, format!("group_by = \"project\"\n{text}")).unwrap();
+    std::fs::remove_dir(&lock).unwrap();
+    term.wait_for("the change", "Set status_line");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("group_by = \"project\"") && text.contains("status_line = false"),
+        "{text}"
+    );
     // Broken: the settings in use stay, and it says why, once.
     std::fs::write(&file, "fit_preview = \"sometimes\"\n").unwrap();
     term.wait_for(

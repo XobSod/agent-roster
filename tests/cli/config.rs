@@ -1,7 +1,8 @@
 //! Roster's settings and config.toml, and the tmux config they make.
 
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::common::TestEnv;
 
@@ -120,6 +121,47 @@ fn settings_change_config_toml_in_place() {
         assert!(!out.status.success(), "{key}");
     }
     assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+}
+
+#[test]
+fn settings_changed_at_once_are_all_kept() {
+    let Some(t) = TestEnv::new("atonce") else {
+        return;
+    };
+    let file = t.config_dir().join("config.toml");
+    // Another roster changing config.toml, under its lock: two changes made
+    // meanwhile wait for it, then each is made in the file as the one before
+    // left it.
+    let lock = t.config_dir().join("config.toml.lock");
+    let before = fs::read_to_string(&file).unwrap();
+    fs::create_dir(&lock).unwrap();
+    let set = |setting, value| {
+        t.command(&["config", "set", setting, value])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut waiting = [set("sidebar_usage", "off"), set("group_by", "project")];
+    std::thread::sleep(Duration::from_millis(500));
+    for change in &mut waiting {
+        assert!(change.try_wait().unwrap().is_none(), "it didn't wait");
+    }
+    fs::write(&file, format!("fit_preview = \"never\"\n{before}")).unwrap();
+    fs::remove_dir(&lock).unwrap();
+    for change in waiting {
+        let out = change.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    let text = fs::read_to_string(&file).unwrap();
+    for set in [
+        "fit_preview = \"never\"",
+        "sidebar_usage = false",
+        "group_by = \"project\"",
+    ] {
+        assert!(text.contains(set), "{text}");
+    }
+    assert!(!lock.exists());
 }
 
 #[test]

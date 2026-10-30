@@ -5,18 +5,21 @@
 //! `Config` (adding one without describing it doesn't compile).
 //!
 //! Changing a setting edits `config.toml` in place: the one value, comments
-//! and layout kept (`toml_edit`), the whole file checked before it's written,
-//! and written through a symlink (a dotfiles link stays a link).
+//! and layout kept (`toml_edit`), under the file's lock (`locked`), the whole
+//! file checked before it's written, and written through a symlink (a
+//! dotfiles link stays a link).
 
 use std::fs;
+use std::io::Write;
 use std::ops::Range;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value};
 
-use crate::agent;
+use crate::agent::{self, locked};
 use crate::config::{
     AgentConfig, CardSubagents, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor,
     Notes, Order, ProjectKeys, SessionKeys, ViewKeys,
@@ -46,9 +49,12 @@ impl crate::engine::Roster {
             return Ok((file, false));
         }
         let text = template(&self.settings());
-        write_file(&file, &text)?;
-        self.config_text = text;
-        Ok((file, true))
+        // Not over one another roster made meanwhile.
+        let made = locked::update(&file, |_| Ok((!file.exists()).then(|| text.clone())))?;
+        if made {
+            self.config_text = text;
+        }
+        Ok((file, made))
     }
 
     /// What taking out the setting at `dotted` asks first (`removal_question`),
@@ -61,8 +67,9 @@ impl crate::engine::Roster {
     /// Changes the setting at `dotted` (`agents.pi.title_model`) to `input`,
     /// as typed; None (or empty text) for its default, which takes it out of
     /// config.toml. A whole table (`agents.aider`) can only be taken out.
-    /// The file is read fresh, the change made in it, the result checked
-    /// like a config at startup, and only then written and used.
+    /// The file is read under its lock, the change made in it, the result
+    /// checked like a config at startup, and only then written and used: what
+    /// another roster or an editor changed meanwhile stays.
     pub fn change_setting(&mut self, dotted: &str, input: Option<&str>) -> Result<()> {
         let path: Vec<String> = dotted.split('.').map(String::from).collect();
         // A table of numbers per model, whose names have dots of their own.
@@ -95,12 +102,18 @@ impl crate::engine::Roster {
         if item.is_none() && kind_at(&sections, &path).is_none() && !is_table(&sections, &path) {
             bail!("there's no setting {dotted:?}");
         }
-        let file = self.paths.config_file();
-        let text = crate::config::read_text(&file)?;
-        let changed = edit(&text, &path, item)?;
-        let config = Config::parse(&changed).with_context(|| format!("{dotted}: not changed"))?;
-        write_file(&file, &changed)?;
-        self.use_config(config, changed)
+        let mut written = None;
+        locked::update(&self.paths.config_file(), |text| {
+            let changed = edit(text, &path, item.clone())?;
+            let config =
+                Config::parse(&changed).with_context(|| format!("{dotted}: not changed"))?;
+            written = Some((config, changed.clone()));
+            Ok(Some(changed))
+        })?;
+        let Some((config, text)) = written else {
+            return Ok(());
+        };
+        self.use_config(config, text)
             .with_context(|| format!("{dotted} is changed, but roster's tmux didn't take it"))
     }
 
@@ -119,22 +132,30 @@ impl crate::engine::Roster {
         if agent::available(&self.config).contains(&name) {
             bail!("there's an agent {name:?} already");
         }
-        let file = self.paths.config_file();
-        let text = crate::config::read_text(&file)?;
         let path = |key: &str| vec!["agents".to_string(), name.clone(), key.to_string()];
-        let mut changed = edit(
-            &text,
-            &path("command"),
-            Some(toml_edit::value(command.as_str())),
-        )?;
-        if !args.is_empty() {
-            let args = Item::Value(Value::Array(args.iter().map(String::as_str).collect()));
-            changed = edit(&changed, &path("args"), Some(args))?;
+        let mut written = None;
+        locked::update(&self.paths.config_file(), |text| {
+            // Added by another roster meanwhile.
+            if Config::parse(text).is_ok_and(|c| c.agents.contains_key(&name)) {
+                bail!("there's an agent {name:?} already");
+            }
+            let mut changed = edit(
+                text,
+                &path("command"),
+                Some(toml_edit::value(command.as_str())),
+            )?;
+            if !args.is_empty() {
+                let args = Item::Value(Value::Array(args.iter().map(String::as_str).collect()));
+                changed = edit(&changed, &path("args"), Some(args))?;
+            }
+            let config = Config::parse(&changed).context("not added")?;
+            written = Some((config, changed.clone()));
+            Ok(Some(changed))
+        })?;
+        if let Some((config, text)) = written {
+            self.use_config(config, text)
+                .context("added, but roster's tmux didn't take the settings")?;
         }
-        let config = Config::parse(&changed).context("not added")?;
-        write_file(&file, &changed)?;
-        self.use_config(config, changed)
-            .context("added, but roster's tmux didn't take the settings")?;
         Ok(name)
     }
 
@@ -1336,9 +1357,11 @@ pub fn write_file(path: &Path, text: &str) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("can't create {}", dir.display()))?;
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let partial = target.with_file_name(format!("{name}.{}.partial", std::process::id()));
-    let written = fs::write(&partial, text)
+    let written = create_like(&partial, &target)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
         .with_context(|| format!("can't write {}", partial.display()))
         .and_then(|()| {
+            // All of them: umask may have left some out.
             if let Ok(meta) = fs::metadata(&target) {
                 fs::set_permissions(&partial, meta.permissions()).ok();
             }
@@ -1349,6 +1372,20 @@ pub fn write_file(path: &Path, text: &str) -> Result<()> {
         fs::remove_file(&partial).ok();
     }
     written
+}
+
+/// A new file at `path`, from the start readable by no more than the file
+/// at `like` (an agent's config may hold secrets); if there's none, as
+/// umask says.
+fn create_like(path: &Path, like: &Path) -> std::io::Result<fs::File> {
+    let mode = fs::metadata(like).map_or(0o666, |m| m.permissions().mode() & 0o777);
+    // Left by a process gone, its pid now this one's.
+    fs::remove_file(path).ok();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
 }
 
 /// The file a write to `path` should change: the one at the end of its
@@ -1820,6 +1857,29 @@ mod tests {
                 s.dotted()
             );
         }
+    }
+
+    #[test]
+    fn a_write_is_never_more_readable_than_the_file_it_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let file = dir.path().join("config.toml");
+        fs::write(&file, "token = \"made-up\"\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        // The copy to write in, as it's made; one left over, readable by
+        // all, made again.
+        let partial = dir.path().join("config.toml.partial");
+        create_like(&partial, &file).unwrap();
+        assert_eq!(mode(&partial), 0o600);
+        fs::set_permissions(&partial, fs::Permissions::from_mode(0o644)).unwrap();
+        create_like(&partial, &file).unwrap();
+        assert_eq!(mode(&partial), 0o600);
+        write_file(&file, "token = \"another\"\n").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        // More than umask gives: kept all the same.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        write_file(&file, "token = \"made-up\"\n").unwrap();
+        assert_eq!(mode(&file), 0o666);
     }
 
     #[test]

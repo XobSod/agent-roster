@@ -25,6 +25,8 @@
 //!                                 # card: "folded" (default): how many, and a line each
 //!                                 # once unfolded (l); "unfolded": the lines always;
 //!                                 # "count": how many only
+//! stopped_cards = "unfolded"      # stopped and archived sessions: "folded" (default):
+//!                                 # a line each; "unfolded": whole cards
 //! memory_warning = "8G"           # a session whose processes use more is marked
 //!                                 # (its card, header, a folded group's heading, the
 //!                                 # summary); "off"; default: a quarter of the
@@ -121,6 +123,9 @@ pub struct Config {
     /// What a card says of its session's subagents and shells at work
     /// (default: their count, and a line each once unfolded).
     pub card_subagents: Option<CardSubagents>,
+    /// How stopped and archived sessions show in the list (default: a line
+    /// each).
+    pub stopped_cards: Option<StoppedCards>,
     /// Above how much memory a session's processes are said to use too much
     /// (default: a quarter of the machine's).
     pub memory_warning: Option<MemoryWarning>,
@@ -212,6 +217,16 @@ impl TryFrom<String> for MemoryWarning {
 #[serde(rename_all = "lowercase")]
 pub enum CardSubagents {
     Count,
+    #[default]
+    Folded,
+    Unfolded,
+}
+
+/// How stopped and archived sessions show in the list: a line each, or
+/// whole cards, as the others are.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StoppedCards {
     #[default]
     Folded,
     Unfolded,
@@ -735,6 +750,10 @@ impl Config {
 
     pub fn card_subagents(&self) -> CardSubagents {
         self.card_subagents.unwrap_or_default()
+    }
+
+    pub fn stopped_cards(&self) -> StoppedCards {
+        self.stopped_cards.unwrap_or_default()
     }
 
     /// Above how much memory a session's processes are said to use too

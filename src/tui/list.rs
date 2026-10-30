@@ -106,6 +106,8 @@ impl Entry {
 
 pub struct Options<'a> {
     pub grouped: bool,
+    /// Stopped and archived sessions as whole cards, not a line each.
+    pub stopped_cards: bool,
     pub folded: &'a HashSet<Group>,
     /// Show only this project's sessions.
     pub filter: Option<i64>,
@@ -122,8 +124,8 @@ fn sort(sessions: &mut [&Session], order: &crate::config::Order) {
     sessions.sort_by(|a, b| a.list_order(b, order));
 }
 
-fn entry(s: &Session) -> Entry {
-    if s.state == State::Stopped || s.deleted_at.is_some() {
+fn entry(s: &Session, opts: &Options) -> Entry {
+    if !opts.stopped_cards && (s.state == State::Stopped || s.deleted_at.is_some()) {
         Entry::Row(s.clone())
     } else {
         Entry::Card(s.clone())
@@ -153,7 +155,7 @@ pub fn entries(projects: &[Project], sessions: &[Session], opts: &Options) -> Ve
             open,
         });
         if open {
-            entries.extend(mine.into_iter().map(entry));
+            entries.extend(mine.into_iter().map(|s| entry(s, opts)));
         }
     };
     if opts.grouped {
@@ -265,6 +267,7 @@ mod tests {
         let folded = HashSet::new();
         let opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,
@@ -288,6 +291,15 @@ mod tests {
                 "row:archived",
             ]
         );
+        // As whole cards, if set.
+        let opts = Options {
+            stopped_cards: true,
+            ..opts
+        };
+        let cards = super::entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
+        let keys = keys(&cards);
+        assert!(keys.contains(&"stopped".to_string()) && keys.contains(&"archived".to_string()));
+        assert!(!keys.iter().any(|k| k.starts_with("row:")), "{keys:?}");
     }
 
     #[test]
@@ -303,6 +315,7 @@ mod tests {
         };
         let mut opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,
@@ -341,6 +354,7 @@ mod tests {
         };
         let opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,
@@ -370,6 +384,7 @@ mod tests {
         let folded = HashSet::from([Group::Shelf(Shelf::Archived), Group::Shelf(Shelf::Working)]);
         let opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,
@@ -390,6 +405,7 @@ mod tests {
         let folded = HashSet::new();
         let opts = Options {
             grouped: true,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,
@@ -423,6 +439,7 @@ mod tests {
         let folded = HashSet::new();
         let opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: Some(2),
             hits: None,
@@ -449,6 +466,7 @@ mod tests {
             .into();
         let mut opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: Some(&hits),
@@ -485,6 +503,7 @@ mod tests {
         let folded = HashSet::new();
         let opts = Options {
             grouped: false,
+            stopped_cards: false,
             folded: &folded,
             filter: None,
             hits: None,

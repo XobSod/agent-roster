@@ -146,7 +146,10 @@ pub(super) fn list_lines(
                 vec![heading(*group, label, *count, *open, noted, over, content)]
             }
             Entry::Card(s) => {
-                let noted = !app.grouped && project_noted(app, s);
+                // Grouped by project, the heading right above says it;
+                // archived sessions come from every project.
+                let with_project = !app.grouped || s.deleted_at.is_some();
+                let noted = with_project && project_noted(app, s);
                 use crate::config::CardSubagents;
                 let shown = app.at_work_shown(s, now);
                 // How many, unless always unfolded: then the lines say it.
@@ -156,7 +159,7 @@ pub(super) fn list_lines(
                     CardSubagents::Unfolded => Vec::new(),
                 };
                 let mark = [memory_mark(app, s), mark].concat();
-                let mut rows = card(s, hit(app, s), !app.grouped, noted, mark, content, now);
+                let mut rows = card(s, hit(app, s), with_project, noted, mark, content, now);
                 if shown {
                     rows.extend(subagent_rows(app, s, content, now));
                     rows.extend(shell_rows(s, content, now));
@@ -289,10 +292,15 @@ pub(super) fn card(
     let working = s.state == State::Working;
     let title_style = match (s.state, s.unread) {
         (State::NeedsInput, _) | (State::Idle, true) => Style::new().add_modifier(Modifier::BOLD),
-        (State::Working, _) => Style::new().fg(MUTED),
+        // Muted as on a stopped or archived session's line.
+        (State::Working | State::Stopped, _) => Style::new().fg(MUTED),
         _ => Style::new(),
     };
-    let meta_color = if working { FAINT } else { MUTED };
+    let meta_color = if working || s.deleted_at.is_some() {
+        FAINT
+    } else {
+        MUTED
+    };
     let mut lines = Vec::new();
     if with_project {
         lines.push(fit(
@@ -396,14 +404,13 @@ fn shell_rows(s: &Session, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
 /// A stopped or archived session's line: its agent's mark, project / title,
 /// and its state.
 pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
-    let right = match s.deleted_at {
-        Some(at) => vec![Span::styled(
-            format!("archived {} ", theme::ago(now - at)),
-            Style::new().fg(FAINT),
-        )],
-        None => [status(s, now), vec![Span::raw(" ")]].concat(),
-    };
-    let right = [memory_mark(app, s), note_mark(s), right].concat();
+    let right = [
+        memory_mark(app, s),
+        note_mark(s),
+        status(s, now),
+        vec![Span::raw(" ")],
+    ]
+    .concat();
     let none = Hit::default();
     let hit = hit(app, s).unwrap_or(&none);
     let title = marked(s.display_title(), &hit.title, Style::new().fg(MUTED));

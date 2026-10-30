@@ -22,7 +22,7 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 use crate::agent::{self, locked};
 use crate::config::{
     AgentConfig, CardSubagents, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor,
-    Notes, Order, ProjectKeys, SessionKeys, ViewKeys,
+    Notes, Order, ProjectKeys, SessionKeys, StoppedCards, ViewKeys,
 };
 
 impl crate::engine::Roster {
@@ -491,6 +491,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         notes,
         group_by,
         card_subagents,
+        stopped_cards,
         memory_warning,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
@@ -567,6 +568,15 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                     CardSubagents::Unfolded => "unfolded",
                 },
                 "a session's subagents and shells at work on its card: how many, and a line each once unfolded (l), always, or how many only",
+            ),
+            choice(
+                &["stopped_cards"],
+                &["folded", "unfolded"],
+                match stopped_cards.unwrap_or_default() {
+                    StoppedCards::Folded => "folded",
+                    StoppedCards::Unfolded => "unfolded",
+                },
+                "stopped and archived sessions in the list: a line each, or whole cards as the others are",
             ),
             {
                 let quarter = crate::procs::total_memory()

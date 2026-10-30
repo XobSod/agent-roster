@@ -355,6 +355,114 @@ fn the_list_beside_an_attached_agent_goes_with_its_roster() {
 }
 
 #[test]
+fn the_list_beside_an_agent_stays_while_a_terminal_is_attached() {
+    let Some(t) = TestEnv::new("listshared") else {
+        return;
+    };
+    let config = t.config_dir().join("config.toml");
+    // A generic agent: tracked by its screen, its redraws mustn't look like work.
+    let text = format!(
+        "fit_preview = \"always\"\n{}[agents.app]\ncommand = \"{}\"\nidle_after = 1\n",
+        std::fs::read_to_string(&config).unwrap(),
+        t.path("fake-agent").display()
+    );
+    std::fs::write(&config, text).unwrap();
+    let full = t.path("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join(".fullscreen"), "").unwrap();
+    t.ok(&["project", "add", "full", full.to_str().unwrap()]);
+    t.ok(&["new", "full", "--agent", "app", "--name", "b"]);
+    t.wait_for("b idle", |t| {
+        t.session("b", false).unwrap()["state"] == "idle"
+    });
+    let tmux = |args: &[&str]| -> String {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &t.socket])
+            .args(args)
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let target = format!(
+        "=r-{}:",
+        t.session("b", false).unwrap()["id"].as_str().unwrap()
+    );
+    // Each pane's size, then the window's.
+    let layout = || {
+        tmux(&[
+            "list-panes",
+            "-t",
+            &target,
+            "-F",
+            "#{pane_width}x#{pane_height} #{window_width}x#{window_height}",
+        ])
+    };
+    let attached = || tmux(&["display", "-p", "-t", &target, "#{session_attached}"]);
+    let beside = "37x29 120x29\n82x29 120x29";
+    let sizes = full.join(".sizes");
+    let told = || std::fs::read_to_string(&sizes).unwrap();
+    let back = |term: &Terminal| term.screen().lines().last().unwrap_or_default().to_string();
+    // As the TUI has it, no other roster looking at its screen.
+    let id = t.session("b", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let row = || -> (String, bool, i64) {
+        let db = rusqlite::Connection::open(t.db()).unwrap();
+        db.query_row(
+            "SELECT state, unread, turns FROM sessions WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    };
+    // The TUI's terminal attached, then another, joining the layout the TUI
+    // made. The TUI's detaching, then its roster gone: the list stays with
+    // the other terminal, its back key too, and goes as it leaves, the
+    // agent at the preview's size, never told another width.
+    let term = Terminal::start(&t, &t.shell_command(), (120, 30));
+    term.wait_for("the list", "Enter attach");
+    for gone in [false, true] {
+        t.wait_for("b fitted", |_| layout() == "82x26 82x26");
+        std::fs::write(&sizes, "").unwrap();
+        term.keys(&["Enter"]);
+        t.wait_for("the list beside b", |_| layout() == beside);
+        let command = format!("{} attach b; sleep 600", t.shell_command());
+        let other = Terminal::start_named(&t, "other", &command, (120, 30));
+        t.wait_for("both attached", |_| attached() == "2");
+        other.wait_for("the list there too", " C-q back");
+        if gone {
+            let mark = tmux(&["list-panes", "-t", &target, "-F", "#{@roster_sidebar}"]);
+            let owner: i32 = mark.split(':').next().unwrap().parse().unwrap();
+            // SAFETY: killing the roster this test started, by its pid.
+            assert_eq!(unsafe { libc::kill(owner, libc::SIGKILL) }, 0);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            assert_eq!(layout(), beside);
+        }
+        term.keys(&["C-q"]);
+        if !gone {
+            term.wait_for("the TUI again", "Enter attach");
+        }
+        t.wait_for("one attached", |_| attached() == "1");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert_eq!(layout(), beside);
+        assert!(back(&other).starts_with(" C-q back"), "{}", other.screen());
+        let turns = row().2;
+        other.keys(&["C-q"]);
+        t.wait_for("the list gone", |_| layout() == "82x26 82x26");
+        t.wait_for("b told", |_| told().ends_with("26 82\n"));
+        assert!(told().lines().all(|l| l.ends_with(" 82")), "{}", told());
+        // Its redraw at the size given back is no turn of its own, whichever
+        // roster closed the list.
+        for _ in 0..15 {
+            assert_eq!(row(), ("idle".to_string(), false, turns));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+#[test]
 fn fitted_always_every_agent_keeps_the_previews_width() {
     let Some(t) = TestEnv::new("fitalways") else {
         return;

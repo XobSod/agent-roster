@@ -274,8 +274,8 @@ impl Tmux {
 
     /// Panes of roster's sessions by tmux session name, each session's
     /// agent's (not the read-only list beside it while attached, which goes
-    /// once the roster that attached has: one that ended mid-attach left it);
-    /// empty if the server isn't running.
+    /// once no one is and the roster that attached is done with it, or gone:
+    /// one that ended mid-attach left it); empty if the server isn't running.
     pub fn panes(&self) -> Result<HashMap<String, Pane>> {
         let Some(out) = self.query(&[
             "list-panes".into(),
@@ -314,18 +314,14 @@ impl Tmux {
             ] = fields[..]
             {
                 if !sidebar.is_empty() {
-                    let (owner, after) = sidebar.split_once(' ').unwrap_or((sidebar, ""));
-                    match crate::util::parse_size(after) {
-                        Some(size) if !crate::procs::alive(owner) => {
+                    match left_behind(sidebar, clients) {
+                        Some(Some(size)) => {
                             self.close_sidebar(name, id, size).ok();
                         }
-                        // A mark with no size after its owner can't be told
-                        // left behind, nor the agent's size given back:
-                        // closed once no one's attached.
-                        None if clients == "0" => {
+                        Some(None) => {
                             self.kill_pane(id).ok();
                         }
-                        _ => beside.push(name),
+                        None => beside.push(name),
                     }
                     continue;
                 }
@@ -638,7 +634,8 @@ impl Tmux {
     /// run in `workdir` with `env`): the list `list` columns wide on the left, the agent
     /// `agent` (its width and height) right of the border between them,
     /// keeping the keys; the list's pane id. The list is marked as `owner`'s
-    /// (`procs::identity`): once it's gone, the list is closed as
+    /// (`procs::identity`): once it's gone, or has let go of the list
+    /// (`release_sidebar`), and no client is attached, the list is closed as
     /// `close_sidebar` would, the agent left `after`.
     pub fn split_sidebar(
         &self,
@@ -687,16 +684,34 @@ impl Tmux {
         .to_string();
         // Unmarked, it's still closed as the attach ends.
         let mark = format!("{owner} {}x{}", after.0, after.1);
-        self.run(&[
-            "set-option".into(),
-            "-p".into(),
-            "-t".into(),
-            Arg::Name(&id),
-            "@roster_sidebar".into(),
-            Arg::Name(&mark),
-        ])
-        .ok();
+        self.run(&sidebar_mark(&id, &mark)).ok();
         Ok(id)
+    }
+
+    /// Lets go of the list `split_sidebar` gave, pane `id`, as the attach
+    /// that split it ends: closed as `close_sidebar` would, the agent left
+    /// `after`; with another client still attached to the session, kept for
+    /// it as no one's, and the first `panes` to find none attached closes
+    /// it. Whether it closed it.
+    pub fn release_sidebar(&self, name: &str, id: &str, after: (u16, u16)) -> Result<bool> {
+        // No owner, taken for one gone (`left_behind`); marked in the call
+        // that counts the clients, so one detaching after finds it no one's.
+        let mark = format!(" {}x{}", after.0, after.1);
+        let attached = self.run_all(&[
+            &sidebar_mark(id, &mark),
+            &[
+                "display-message".into(),
+                "-p".into(),
+                "-t".into(),
+                Arg::Pane(name),
+                Arg::Format("#{session_attached}"),
+            ],
+        ])?;
+        if attached.trim() != "0" {
+            return Ok(false);
+        }
+        self.close_sidebar(name, id, after)?;
+        Ok(true)
     }
 
     /// Closes the list `split_sidebar` gave, pane `id`, the session's window
@@ -770,6 +785,30 @@ impl Tmux {
             args.push("-e".into());
         }
         self.run(&args)
+    }
+
+    /// The session's screen as `capture` gives it, and the pane's size as it
+    /// was captured, in one call: a size changed since is the agent's next
+    /// screens redrawn, whoever resized it.
+    pub fn capture_sized(&self, name: &str) -> Result<(String, (u16, u16))> {
+        let capture = [
+            "capture-pane".into(),
+            "-p".into(),
+            "-t".into(),
+            Arg::Pane(name),
+        ];
+        let size = [
+            "display-message".into(),
+            "-p".into(),
+            "-t".into(),
+            Arg::Pane(name),
+            Arg::Format("#{pane_width}x#{pane_height}"),
+        ];
+        let mut out = self.run_all(&[&capture, &size])?;
+        let cut = out.trim_end_matches('\n').rfind('\n').map_or(0, |i| i + 1);
+        let size = crate::util::parse_size(out[cut..].trim()).context("tmux gave no size")?;
+        out.truncate(cut);
+        Ok((out, size))
     }
 
     /// Attaches the current terminal until the user detaches (or the session ends).
@@ -862,6 +901,39 @@ fn started<'a>(
     args.push("--".into());
     args.extend(argv.iter().map(|a| Arg::Text(OsStr::new(a))));
     args
+}
+
+/// Marks pane `id` as the list beside an agent, `mark` saying whose it is
+/// and the agent's size once it's closed (`left_behind`).
+fn sidebar_mark<'a>(id: &'a str, mark: &'a str) -> [Arg<'a>; 6] {
+    [
+        "set-option".into(),
+        "-p".into(),
+        "-t".into(),
+        Arg::Name(id),
+        "@roster_sidebar".into(),
+        Arg::Name(mark),
+    ]
+}
+
+/// Whether the list beside an agent, marked `mark` (`sidebar_mark`), its
+/// session with `clients` attached, is left behind, to be closed: Some then,
+/// with the agent's size to give back if the mark says one. Kept while any
+/// client is attached, the one that split it or not, so a terminal that
+/// joined the layout keeps it.
+fn left_behind(mark: &str, clients: &str) -> Option<Option<(u16, u16)>> {
+    if clients != "0" {
+        return None;
+    }
+    let (owner, after) = mark.split_once(' ').unwrap_or((mark, ""));
+    match crate::util::parse_size(after) {
+        // Its roster gone (ended mid-attach), or done with it (no owner);
+        // one still running, not done, is yet to attach.
+        Some(size) => (!crate::procs::alive(owner)).then_some(Some(size)),
+        // A mark with no size after its owner can't be told left behind,
+        // nor the agent's size given back: closed once no one's attached.
+        None => Some(None),
+    }
 }
 
 fn resize_window(name: &str, size: (u16, u16)) -> [Arg<'_>; 7] {
@@ -1212,6 +1284,28 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(left.trim_end_matches('\n'), markup);
+    }
+
+    #[test]
+    fn the_list_beside_an_agent_goes_with_the_last_client() {
+        let owner = crate::procs::identity(std::process::id()).unwrap();
+        let [pid, start, namespace] = owner.split(':').collect::<Vec<_>>()[..] else {
+            panic!("{owner}");
+        };
+        let gone = format!("{pid}:{}:{namespace}", start.parse::<u64>().unwrap() + 1);
+        let left = |owner: &str, clients| left_behind(&format!("{owner} 82x26"), clients);
+        // Its roster about to attach, or attached.
+        assert_eq!(left(&owner, "0"), None);
+        assert_eq!(left(&owner, "1"), None);
+        // Its roster gone, or done with it: kept while another terminal is
+        // attached, closed after the last, the agent given back its size.
+        for owner in [gone.as_str(), ""] {
+            assert_eq!(left(owner, "1"), None);
+            assert_eq!(left(owner, "0"), Some(Some((82, 26))));
+        }
+        // No size to give back.
+        assert_eq!(left_behind(&gone, "1"), None);
+        assert_eq!(left_behind(&gone, "0"), Some(None));
     }
 
     #[test]

@@ -261,7 +261,6 @@ impl Roster {
         let mut titles = Vec::new();
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
-            let redrawing = self.resized.contains_key(&s.id);
             match panes.get(&s.tmux_name()) {
                 None => s.set_state(State::Stopped, now),
                 Some(pane) if pane.dead => {
@@ -294,9 +293,9 @@ impl Roster {
                     if adapter.reports() {
                         // Its hooks tell; the screen only corrects a missed end of turn.
                         if s.needs_screen_check(now)
-                            && let Some(hash) = self.screen_hash(&s)
+                            && let Some(hash) = self.screen_hash(&s, now)
                         {
-                            if redrawing {
+                            if self.resized.contains_key(&s.id) {
                                 s.redrawn(&hash, now);
                             } else {
                                 s.observe_screen(&hash, now);
@@ -306,9 +305,9 @@ impl Roster {
                                 );
                             }
                         }
-                    } else if let Some(hash) = self.screen_hash(&s) {
+                    } else if let Some(hash) = self.screen_hash(&s, now) {
                         let idle_after = agent::idle_after_ms(&s.agent, &self.config);
-                        if redrawing {
+                        if self.resized.contains_key(&s.id) {
                             s.redrawn(&hash, now);
                         } else {
                             s.observe_generic(&hash, now, idle_after);
@@ -526,15 +525,25 @@ impl Roster {
         if unread {
             s.unread = true;
         } else {
-            let hash = self.screen_hash(&s);
-            s.mark_seen(hash, now_ms());
+            let now = now_ms();
+            let hash = self.screen_hash(&s, now);
+            s.mark_seen(hash, now);
         }
         self.db.save_changes(&before, &s)
     }
 
-    fn screen_hash(&self, s: &Session) -> Option<String> {
-        let screen = self.tmux.capture(&s.tmux_name(), false, 0).ok()?;
-        Some(util::fnv1a(screen.as_bytes()))
+    /// The hash of the session's screen, with the size it was captured at.
+    /// Last seen at another size, by whichever roster (one that closed the
+    /// list beside it, a terminal resized), its screens for a while are the
+    /// agent redrawing.
+    fn screen_hash(&mut self, s: &Session, now: i64) -> Option<String> {
+        let (screen, (width, height)) = self.tmux.capture_sized(&s.tmux_name()).ok()?;
+        let hash = format!("{width}x{height} {}", util::fnv1a(screen.as_bytes()));
+        let size = |hash: &str| hash.split_once(' ').map(|(size, _)| size.to_string());
+        if (s.screen_hash.as_deref()).is_some_and(|was| size(was) != size(&hash)) {
+            self.resized.insert(s.id.clone(), now + RESIZE_GRACE_MS);
+        }
+        Some(hash)
     }
 
     /// The session's current screen, also after its agent exited.

@@ -99,11 +99,14 @@ impl Roster {
         }
         let since = now_ms();
         let status = self.tmux.attach(&name);
-        // Ended mid-attach (its terminal closed), the list closes itself so.
+        // Ended mid-attach (its terminal closed), the list closes itself so;
+        // kept for a terminal still attached, it closes once none is.
         if let Some((pane, after)) = beside {
-            self.tmux.close_sidebar(&name, &pane, after).ok();
-            self.resized
-                .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
+            let closed = self.tmux.release_sidebar(&name, &pane, after);
+            if closed.unwrap_or(true) {
+                self.resized
+                    .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
+            }
         }
         if !status?.success() {
             bail!("couldn't attach to {}", s.label());

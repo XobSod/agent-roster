@@ -209,6 +209,8 @@ pub struct App {
     /// (config.toml), the cards unfolded to show them (`l`), by session, and
     /// what's read of each subagent, by its agent's id for it.
     pub card_subagents: crate::config::CardSubagents,
+    /// Stopped and archived sessions as whole cards, not a line each.
+    stopped_cards: bool,
     /// Above how much memory a session's processes are said to use too
     /// much; None: not said.
     pub memory_limit: Option<u64>,
@@ -284,6 +286,7 @@ impl App {
             account_limits: true,
             sidebar_usage: true,
             card_subagents: Default::default(),
+            stopped_cards: false,
             memory_limit: None,
             resources: HashMap::new(),
             resources_read: None,
@@ -364,6 +367,15 @@ impl App {
     pub fn set_grouped(&mut self, grouped: bool) {
         if self.grouped != grouped {
             self.grouped = grouped;
+            self.rebuild();
+        }
+    }
+
+    /// Stopped and archived sessions as whole cards, or a line each.
+    pub fn set_stopped_cards(&mut self, cards: crate::config::StoppedCards) {
+        let cards = cards == crate::config::StoppedCards::Unfolded;
+        if self.stopped_cards != cards {
+            self.stopped_cards = cards;
             self.rebuild();
         }
     }
@@ -483,6 +495,7 @@ impl App {
     fn list_options(&self) -> list::Options<'_> {
         list::Options {
             grouped: self.grouped,
+            stopped_cards: self.stopped_cards,
             folded: self.folds(),
             filter: self.filter,
             hits: self.hits.as_ref(),

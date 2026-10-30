@@ -77,10 +77,15 @@ pub(super) fn details(s: &Session, name_marks: &[usize], style: Style) -> Vec<Sp
     spans
 }
 
-/// The state at the right of a card: a word, a spinner with a clock, or an
-/// age; a stopped one's with how long ago it stopped. Working unread (its
+/// The state at the right of a card or a row: a word, a spinner with a
+/// clock, or an age; a stopped one's with how long ago it stopped, an
+/// archived one's with how long ago it was archived. Working unread (its
 /// turn over, on what it left running), with the unread mark.
 pub(super) fn status(s: &Session, now: i64) -> Vec<Span<'static>> {
+    if let Some(at) = s.deleted_at {
+        let archived = format!("archived {}", theme::ago(now - at));
+        return vec![Span::styled(archived, Style::new().fg(FAINT))];
+    }
     let since = now - s.state_since.unwrap_or(s.created_at);
     let span = match (s.state, s.unread) {
         (State::NeedsInput, _) => {

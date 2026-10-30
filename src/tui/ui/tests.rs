@@ -299,6 +299,46 @@ fn stopped_rows_name_their_project_too() {
 }
 
 #[test]
+fn stopped_and_archived_sessions_can_be_whole_cards() {
+    let mut app = app();
+    let mut sessions = app.sessions.clone();
+    for s in &mut sessions {
+        s.state = State::Stopped;
+    }
+    sessions[0].state_since = Some(now_ms() - 3 * 3_600_000);
+    sessions[1].deleted_at = Some(now_ms() - 2 * 86_400_000);
+    app.set_data(app.projects.clone(), sessions);
+    app.set_grouped(true);
+    app.set_stopped_cards(crate::config::StoppedCards::Unfolded);
+    // The Archived shelf unfolded.
+    app.selected = (app.entries.iter())
+        .position(|e| {
+            matches!(
+                e,
+                Entry::Heading {
+                    group: Group::Shelf(crate::tui::list::Shelf::Archived),
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    assert!(!app.entries.iter().any(|e| matches!(e, Entry::Row(_))));
+    let screen = render(&app, 120, 24);
+    // Each a card: its title and state, then its name; the archived one
+    // with its project, as it's under no project's heading.
+    assert!(screen.contains("stopped 3h"), "{screen}");
+    assert!(screen.contains("archived 2d"), "{screen}");
+    assert!(screen.contains("✱ api · opus high"), "{screen}");
+    assert!(screen.contains("✱ db"), "{screen}");
+    // The project's heading, and the archived card's own line.
+    assert_eq!(screen.matches("RO roster").count(), 2, "{screen}");
+    // Folded, a line each again.
+    app.set_stopped_cards(crate::config::StoppedCards::Folded);
+    assert!(app.entries.iter().any(|e| matches!(e, Entry::Row(_))));
+}
+
+#[test]
 fn rows_keep_their_projects_note_mark_with_a_long_name() {
     let mut app = app();
     let mut projects = app.projects.clone();

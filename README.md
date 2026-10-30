@@ -347,6 +347,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     it left running, on its card: `"folded"` (default), how many (`↳2 $1 ›`), and a
     line each once you unfold it with `l`; `"unfolded"`, the lines always; `"count"`,
     how many only.
+  - `stopped_cards`: stopped and archived sessions in the list: `"folded"` (default), a
+    line each; `"unfolded"`, whole cards as the others are (the preview shows the
+    selected one in full either way).
   - `memory_warning`: a session whose processes (its agent, all it started, and what it
     left running) use more memory than this is marked in red: `⚠` and how much on its card,
     in its header and on a folded group's heading, and a line under the summary saying how

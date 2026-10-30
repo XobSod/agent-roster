@@ -76,6 +76,7 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
+    app.set_stopped_cards(roster.config.stopped_cards());
     app.config_file = roster.paths.config_file();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
@@ -173,6 +174,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
+    app.set_stopped_cards(roster.config.stopped_cards());
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));

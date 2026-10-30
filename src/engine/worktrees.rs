@@ -46,8 +46,9 @@ impl Roster {
 
     /// Where a session named `name` in `project` works, as `works_in` says:
     /// None for the checkout, else its directory and its worktree, made now
-    /// if it's to be new. What a new one leaves behind is said
-    /// (`notices`): the checkout's changes not committed.
+    /// if it's to be new. What's to know of a new one is said (`notices`):
+    /// a branch there already, checked out as it is, and the checkout's
+    /// changes not committed, which it doesn't have.
     pub(super) fn place(
         &mut self,
         project: &Project,
@@ -89,6 +90,9 @@ impl Roster {
             false => worktree.root.join(&within),
         };
         if !dir.is_dir() {
+            if worktree.made {
+                undo_worktree(&worktree);
+            }
             bail!(
                 "{} isn't in the worktree at {}, so the session can't work there",
                 within.display(),
@@ -118,10 +122,21 @@ impl Roster {
                 at.display()
             );
         }
+        if exists && base.is_some_and(|b| b != "HEAD") {
+            bail!(
+                "branch {branch} is there already, so it isn't made from anything: leave out --base to check it out as it is"
+            );
+        }
         // What it's counted against: the branch the checkout is on, as it
-        // moves, rather than the commit it was on.
+        // moves, rather than the commit it was on; for a branch that was
+        // there, the repository's default one.
         let (from, recorded) = match (exists, base) {
-            (true, _) => (None, None),
+            (true, _) => {
+                self.notices.push(format!(
+                    "Branch {branch} is there already: checked out as it is"
+                ));
+                (None, git::default_branch(top))
+            }
             (false, None | Some("HEAD")) => {
                 let head = git::commit(checkout, "HEAD")?;
                 let on = git::current_branch(checkout).unwrap_or_else(|| head.clone());
@@ -132,14 +147,31 @@ impl Roster {
                 (Some(base.to_string()), Some(base.to_string()))
             }
         };
-        let root = self
-            .worktrees_dir()
-            .join(&project.name)
-            .join(git::directory_name(branch));
+        let dir = self.worktrees_dir();
+        if !dir.is_absolute() {
+            bail!(
+                "[worktrees] directory is {}: it has to be a whole path (or start with ~)",
+                dir.display()
+            );
+        }
+        let root = dir.join(&project.name).join(git::directory_name(branch));
         if root.exists() {
             bail!(
                 "{} is there already: roster makes no worktree in a directory it didn't make",
                 root.display()
+            );
+        }
+        // Not in the repository's own working tree, the project's checkout
+        // say, which `[worktrees] directory` could put it in.
+        let above = root.ancestors().skip(1).find(|a| a.exists());
+        if let Some(inside) = above
+            .and_then(git::toplevel)
+            .filter(|t| git::same_repository(t, top))
+        {
+            bail!(
+                "{} would be in {}, a working tree of the repository itself: [worktrees] directory has to be outside it",
+                root.display(),
+                inside.display()
             );
         }
         if let Some(parent) = root.parent() {
@@ -147,7 +179,13 @@ impl Roster {
                 .with_context(|| format!("can't make {}", parent.display()))?;
         }
         git::add_worktree(checkout, &root, branch, from.as_deref())?;
-        let root = root.canonicalize()?;
+        let root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(e) => {
+                git::remove_worktree(checkout, &root, true).ok();
+                bail!("can't find the worktree made at {}: {e}", root.display());
+            }
+        };
         if let Ok(n @ 1..) = git::changed_files(checkout) {
             let files = if n == 1 { "file" } else { "files" };
             self.notices.push(format!(
@@ -293,9 +331,8 @@ impl Roster {
                 at.display()
             );
         }
-        git::prune_worktrees(&top)?;
         fs::create_dir_all(&ours).with_context(|| format!("can't make {}", ours.display()))?;
-        git::add_worktree(&project.origin, &root, &branch, None)?;
+        git::add_worktree_again(&project.origin, &root, &branch)?;
         self.notices.push(format!(
             "Made its worktree, {}, again from branch {branch}",
             util::short_path(&root)
@@ -351,6 +388,7 @@ impl Roster {
     /// they work in, a worktree once however many of them work in it.
     pub fn leaving(&self, ids: &[String]) -> Result<Vec<Leaving>> {
         let all = self.db.sessions(true)?;
+        let projects = self.db.projects()?;
         let (going, staying): (Vec<&Session>, Vec<&Session>) =
             all.iter().partition(|s| ids.contains(&s.id));
         let mut leaving: Vec<Leaving> = Vec::new();
@@ -364,16 +402,22 @@ impl Roster {
             }
             let other =
                 (staying.iter()).find(|o| o.worktree.as_ref().is_some_and(|ow| ow.root == w.root));
-            let stays = match other {
-                Some(o) => Some(format!("{} works in it", o.label())),
-                None if !w.made => Some("roster didn't make it".to_string()),
-                None => None,
+            let project = (projects.iter()).find(|p| p.origin.starts_with(&w.root));
+            let mut stays = match (other, project) {
+                (Some(o), _) => Some(format!("{} works in it", o.label())),
+                (None, Some(p)) => Some(format!("project {} is there", p.name)),
+                (None, None) if !w.made => Some("roster didn't make it".to_string()),
+                (None, None) => None,
             };
-            let goes = stays.is_none();
-            let changed = match goes && w.root.exists() {
-                true => git::changed_files(&w.root)?,
+            // What git can't read isn't taken for clean.
+            let changed = match stays.is_none() && w.root.exists() {
+                true => git::changed_files(&w.root).unwrap_or_else(|e| {
+                    stays = Some(format!("git can't tell what's in it ({e:#})"));
+                    0
+                }),
                 false => 0,
             };
+            let goes = stays.is_none();
             let branch = (goes && git::branch_exists(&w.repo, &w.branch)).then(|| Branch {
                 name: w.branch.clone(),
                 base: w.base.clone(),
@@ -420,7 +464,18 @@ impl Roster {
                 said.push(format!("Its worktree, {at}, stays: {e:#}"));
                 continue;
             }
-            for (agent, file) in &l.trusted_in {
+            // Where its sessions' agents were told to trust it, and where
+            // they keep their trust by default: a session that shared it and
+            // was deleted before took its record with it.
+            let mut told = l.trusted_in.clone();
+            for name in agent::available(&self.config) {
+                if let Some(file) = agent::adapter(&name).trust_config() {
+                    told.push((name, file));
+                }
+            }
+            told.sort();
+            told.dedup();
+            for (agent, file) in &told {
                 agent::adapter(agent)
                     .untrust_folders_under(file, &l.root)
                     .ok();
@@ -508,6 +563,11 @@ pub fn branches_question(leaving: &[Leaving], discard: bool) -> Option<String> {
         [b] if leaving.len() == 1 => Some(match b.unmerged {
             Some(0) => format!(
                 "Its branch {} is merged into {}: delete it too?",
+                b.name,
+                base(b)
+            ),
+            None if b.base.is_some() => format!(
+                "Its branch {} can't be told merged or not, {} being gone: delete it too?",
                 b.name,
                 base(b)
             ),
@@ -660,9 +720,18 @@ mod tests {
             branches_question(&one, true).unwrap(),
             "Its branch fix is merged into main: delete it too?"
         );
+        // Its base gone, or none known: said so.
         let unknown = [leaving("/w/fix", None, 0, None)];
         assert_eq!(
             branches_question(&unknown, false).unwrap(),
+            "Its branch fix can't be told merged or not, main being gone: delete it too?"
+        );
+        let mut none = unknown.clone();
+        if let Some(b) = &mut none[0].branch {
+            b.base = None;
+        }
+        assert_eq!(
+            branches_question(&none, false).unwrap(),
             "Delete its branch fix too?"
         );
         // A project's: each.

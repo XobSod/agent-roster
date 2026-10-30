@@ -151,10 +151,11 @@ fn a_session_works_in_a_worktree_made_for_it_or_shared() {
         "--worktree",
         "feature",
     ]);
+    // Counted against the default branch, having no base of its own.
     let w = worktree(&t, "four");
     assert_eq!(
         (&w["branch"], &w["base"]),
-        (&json!("feature"), &Value::Null)
+        (&json!("feature"), &json!("main"))
     );
 
     // Deleting one of two working in it leaves the worktree to the other.
@@ -329,4 +330,154 @@ fn a_conversation_that_ran_in_a_worktree_is_adopted_into_its_repositorys_project
         (&w["branch"], &w["made_by_roster"]),
         (&json!("gone"), &json!(true))
     );
+}
+
+#[test]
+fn what_a_worktree_is_made_from_and_what_deleting_one_with_changes_asks() {
+    let Some(t) = TestEnv::new("worktree-more") else {
+        return;
+    };
+    let repo = demo(&t);
+    let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    // From a base: another branch's commit, counted against it.
+    git(&repo, &["switch", "-q", "-c", "side"]);
+    fs::write(repo.join("side.txt"), "side\n").unwrap();
+    git(&repo, &["add", "side.txt"]);
+    git(&repo, &["commit", "-q", "-m", "side"]);
+    git(&repo, &["switch", "-q", "main"]);
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "b",
+        "--worktree",
+        "--base",
+        "side",
+    ]);
+    let root = fs::canonicalize(t.path("state/agent-roster/worktrees/demo/b")).unwrap();
+    assert!(root.join("side.txt").exists());
+    assert_eq!(worktree(&t, "b")["base"], "side");
+    // A branch there: said, and taken from no base.
+    let out = t.run(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "s",
+        "--worktree",
+        "side",
+        "--base",
+        "main",
+    ]);
+    assert!(
+        stderr(&out).contains("so it isn't made from anything"),
+        "{}",
+        stderr(&out)
+    );
+    git(&repo, &["branch", "old"]);
+    let out = t.run(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "o",
+        "--worktree",
+        "old",
+    ]);
+    assert!(
+        stderr(&out).contains("Branch old is there already: checked out as it is"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(worktree(&t, "o")["base"], "main");
+    // Named for it, a session isn't given an old branch's name.
+    git(&repo, &["branch", "echo-1"]);
+    t.ok(&["new", "demo", "--agent", "echo", "--worktree"]);
+    assert!(t.session("echo-2", false).unwrap()["worktree"]["branch"] == "echo-2");
+    // In one by a directory in it.
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "in",
+        "--in",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(worktree(&t, "in")["path"], json!(root));
+    t.ok(&["rm", "--yes", "in"]);
+    // Changes not committed go only when asked to, its branch then asked of.
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+    let out = t.run(&["rm", "--yes", "--discard-changes", "b"]);
+    assert!(
+        !out.status.success() && stderr(&out).contains("Its branch b is merged into side"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(t.session("b", false).is_some());
+    t.ok(&["rm", "--yes", "--discard-changes", "--keep-branch", "b"]);
+    assert!(!root.exists());
+    assert!(!git(&repo, &["branch", "--list", "b"]).is_empty());
+    // A directory for them inside the repository itself, refused; nor a
+    // relative one.
+    let config = t.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        format!("{text}[worktrees]\ndirectory = \"{}\"\n", repo.display()),
+    )
+    .unwrap();
+    let out = t.run(&["new", "demo", "--agent", "echo", "--worktree", "inside"]);
+    assert!(
+        stderr(&out).contains("a working tree of the repository itself"),
+        "{}",
+        stderr(&out)
+    );
+    fs::write(&config, format!("{text}[worktrees]\ndirectory = \"wt\"\n")).unwrap();
+    let out = t.run(&["new", "demo", "--agent", "echo", "--worktree", "relative"]);
+    assert!(
+        stderr(&out).contains("it has to be a whole path"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!git(&repo, &["branch", "--list", "inside", "relative"]).contains("inside"));
+}
+
+#[test]
+fn a_project_in_a_subdirectory_works_there_in_its_worktrees_and_goes_with_them() {
+    let Some(t) = TestEnv::new("worktree-sub") else {
+        return;
+    };
+    let repo = demo(&t);
+    fs::create_dir_all(repo.join("api")).unwrap();
+    fs::write(repo.join("api/x.txt"), "x\n").unwrap();
+    git(&repo, &["add", "api/x.txt"]);
+    git(&repo, &["commit", "-q", "-m", "api"]);
+    t.ok(&["project", "add", "api", repo.join("api").to_str().unwrap()]);
+    t.ok(&["new", "api", "--agent", "echo", "--name", "w", "--worktree"]);
+    let root = fs::canonicalize(t.path("state/agent-roster/worktrees/api/w")).unwrap();
+    assert_eq!(
+        t.session("w", false).unwrap()["workdir"],
+        json!(root.join("api"))
+    );
+    // Removing the project asks of its archived sessions' worktrees and
+    // branches, as deleting does.
+    t.ok(&["archive", "--yes", "w"]);
+    let out = t.run(&["project", "rm", "--yes", "api"]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success() && said.contains("--delete-branch"),
+        "{said}"
+    );
+    let out = t.ok(&["project", "rm", "--yes", "--delete-branches", "api"]);
+    assert!(
+        out.contains("Removed its worktree") && out.contains("Deleted its branch w"),
+        "{out}"
+    );
+    assert!(!root.exists());
 }

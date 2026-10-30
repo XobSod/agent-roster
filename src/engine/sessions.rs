@@ -122,10 +122,20 @@ impl Roster {
                 }
                 name.to_string()
             }
-            None => (1..)
-                .map(|i| format!("{agent}-{i}"))
-                .find(|n| !taken.contains(n))
-                .expect("unbounded"),
+            None => {
+                // In a new worktree named after it: not a branch of a session
+                // before, which it would be checked out on as it was.
+                let branches = match &req.works_in {
+                    WorksIn::New { branch: None, .. } => (crate::git::toplevel(&project.origin))
+                        .map(|top| crate::git::branches(&top))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                (1..)
+                    .map(|i| format!("{agent}-{i}"))
+                    .find(|n| !taken.contains(n) && !branches.contains(n))
+                    .expect("unbounded")
+            }
         };
         // Only for agents that take them; else the agent's in config.toml.
         let (model, effort) = if adapter.choices().is_some() {
@@ -198,12 +208,13 @@ impl Roster {
         // Its worktree gone: made again where it was (asked about first),
         // and set up again, being new.
         if let Some(w) = s.worktree.as_mut().filter(|w| !w.root.exists()) {
-            crate::git::prune_worktrees(&w.repo)?;
             if let Some(parent) = w.root.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("can't make {}", parent.display()))?;
             }
-            crate::git::add_worktree(&w.repo, &w.root, &w.branch, None)?;
+            // Where git may still have it, its branch free (`start_check`):
+            // no other worktree git lost track of is let go of.
+            crate::git::add_worktree_again(&w.repo, &w.root, &w.branch)?;
             let project = (self.db.projects()?.into_iter()).find(|p| p.id == s.project_id);
             w.set_up = !project.is_some_and(|p| p.origin.join(WORKTREE_SETUP).is_file());
             // Kept, though the start fails: the worktree is there now.

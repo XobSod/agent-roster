@@ -63,6 +63,13 @@ pub fn start_check(s: &Session, how: Starting) -> StartCheck {
             w.branch
         ));
     }
+    if let Ok(Some(at)) = crate::git::checked_out(&w.repo, &w.branch) {
+        return StartCheck::Refused(format!(
+            "{gone}, and its branch {} is checked out in {} now: it can't start",
+            w.branch,
+            at.display()
+        ));
+    }
     let again = format!(
         "{gone}: it's made again from branch {}, where it was.",
         w.branch
@@ -73,9 +80,16 @@ pub fn start_check(s: &Session, how: Starting) -> StartCheck {
             w.branch
         )),
         StartCheck::Confirm(question) => StartCheck::Confirm(format!("{again} {question}")),
+        // Asked, though its first prompt is answered for without the question.
         StartCheck::PromptAgain { question, unasked } => StartCheck::PromptAgain {
             question: format!("{again} {question}"),
-            unasked,
+            unasked: Some(match unasked {
+                Some(working) => format!("{again} {working}"),
+                None => format!(
+                    "{gone}. Make it again from branch {}, where it was, and start?",
+                    w.branch
+                ),
+            }),
         },
         refused @ StartCheck::Refused(_) => refused,
     }
@@ -194,13 +208,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         crate::git::tests::repo(&repo);
+        crate::git::tests::sh(&repo, &["branch", "work"]);
         let mut s = session("s");
         s.state = State::Stopped;
         s.conversation_id = Some("c-1".into());
         s.worktree = Some(crate::model::Worktree {
             root: tmp.path().join("gone"),
             repo: repo.clone(),
-            branch: "main".into(),
+            branch: "work".into(),
             base: None,
             made: true,
             set_up: true,
@@ -210,7 +225,7 @@ mod tests {
             panic!()
         };
         assert!(
-            question.ends_with("is gone. Make it again from branch main, where it was, and start?")
+            question.ends_with("is gone. Make it again from branch work, where it was, and start?")
         );
         // With what else it asks, in one question.
         s.conversation_id = None;
@@ -218,13 +233,33 @@ mod tests {
             panic!()
         };
         assert!(
-            question.contains("made again from branch main, where it was. "),
+            question.contains("made again from branch work, where it was. "),
             "{question}"
         );
         assert!(question.ends_with("Start a new one?"), "{question}");
+        // Its first prompt to give again, answered on the command line: the
+        // worktree still asked about.
+        s.given_prompt = Some("fix it".into());
+        let StartCheck::PromptAgain { unasked, .. } = start_check(&s, Starting::Start) else {
+            panic!()
+        };
+        assert!(unasked.is_some_and(|q| q.contains("Make it again from branch work")));
+        s.given_prompt = None;
         // Attached to while it runs, nothing.
         s.state = State::Idle;
         assert_eq!(start_check(&s, Starting::Attach), StartCheck::Go);
+        // Its branch checked out elsewhere since: not twice.
+        s.state = State::Stopped;
+        if let Some(w) = &mut s.worktree {
+            w.branch = "main".into();
+        }
+        let StartCheck::Refused(why) = start_check(&s, Starting::Start) else {
+            panic!()
+        };
+        assert!(
+            why.contains("and its branch main is checked out in"),
+            "{why}"
+        );
         // Its branch gone too.
         s.state = State::Stopped;
         if let Some(w) = &mut s.worktree {

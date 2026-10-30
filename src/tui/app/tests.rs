@@ -1512,6 +1512,7 @@ fn news_that_comes_on_its_own_doesnt_hide_an_error() {
 #[test]
 fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
     use crate::engine::{Branch, Deleting, Leaving};
+    use crate::tui::op::LeavingStep::{Branches, Changes};
     let mut app = app();
     let leaving = |changed, unmerged| Leaving {
         root: "/w/demo/fix".into(),
@@ -1526,13 +1527,27 @@ fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
         }),
     };
     let go = |how| Op::Delete("s1".into(), how);
-    let again = |discard| Op::AskDelete {
+    let again = |step| Op::AskDelete {
         id: "s1".into(),
-        discard: Some(discard),
+        step: Some(step),
     };
-    // Changes first: y removes them and asks of the branch next; n keeps
-    // the worktree, so there's no branch to ask of.
-    app.ask_leaving("Delete it?".into(), &[leaving(3, 2)], None, go, again);
+    let how = |discard_changes, delete_branches| Deleting {
+        discard_changes,
+        delete_branches,
+    };
+    // The deletion first, alone: only y goes on, to the changes.
+    let dirty = [leaving(3, 2)];
+    assert_eq!(
+        app.ask_leaving("Delete it?".into(), &dirty, None, go, again),
+        None
+    );
+    let Some(Dialog::Confirm { question, op }) = app.dialog.take() else {
+        panic!("no confirmation")
+    };
+    assert_eq!((question.as_str(), op), ("Delete it?", again(Changes)));
+    // y removes them, then asks of the branch; n keeps the worktree, and so
+    // its branch, asking nothing more.
+    app.ask_leaving("Delete it?".into(), &dirty, Some(Changes), go, again);
     let Some(Dialog::Ask { question, yes, no }) = app.dialog.take() else {
         panic!("no question")
     };
@@ -1540,9 +1555,17 @@ fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
         question.contains("has 3 files changed, not committed"),
         "{question}"
     );
-    assert_eq!(yes, again(true));
-    assert_eq!(no, go(Deleting::default()));
-    app.ask_leaving("Delete it?".into(), &[leaving(3, 2)], Some(true), go, again);
+    assert_eq!(
+        (yes, no),
+        (again(Branches { discard: true }), go(how(false, false)))
+    );
+    app.ask_leaving(
+        "Delete it?".into(),
+        &dirty,
+        Some(Branches { discard: true }),
+        go,
+        again,
+    );
     let Some(Dialog::Ask { question, yes, no }) = app.dialog.take() else {
         panic!("no question")
     };
@@ -1550,26 +1573,29 @@ fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
         question.contains("Its branch fix has 2 commits main doesn't, which deleting it loses"),
         "{question}"
     );
-    let how = |delete_branches| Deleting {
-        discard_changes: true,
-        delete_branches,
+    assert_eq!((yes, no), (go(how(true, true)), go(how(true, false))));
+    // Clean: from the deletion straight to the branch.
+    let clean = [leaving(0, 0)];
+    app.ask_leaving("Delete it?".into(), &clean, None, go, again);
+    let Some(Dialog::Confirm { op, .. }) = app.dialog.take() else {
+        panic!("no confirmation")
     };
-    assert_eq!((yes, no), (go(how(true)), go(how(false))));
-    // Clean and merged: the branch asked of with the deletion itself.
-    app.ask_leaving("Delete it?".into(), &[leaving(0, 0)], None, go, again);
-    let Some(Dialog::Ask { question, .. }) = app.dialog.take() else {
-        panic!("no question")
-    };
-    assert!(
-        question.starts_with("Delete it? Its branch fix is merged into main: delete it too?"),
-        "{question}"
-    );
-    // One that stays: said, and nothing else asked.
+    assert_eq!(op, again(Branches { discard: false }));
+    // Nothing left to ask, as it is by then: done at once.
     let stays = Leaving {
         stays: Some("demo/b works in it".into()),
         branch: None,
         ..leaving(0, 0)
     };
+    let done = app.ask_leaving(
+        "Delete it?".into(),
+        std::slice::from_ref(&stays),
+        Some(Changes),
+        go,
+        again,
+    );
+    assert_eq!(done, Some(go(how(false, false))));
+    // One that stays: said with the deletion.
     app.ask_leaving("Delete it?".into(), &[stays], None, go, again);
     let Some(Dialog::Confirm { question, op }) = app.dialog.take() else {
         panic!("no confirmation")
@@ -1578,5 +1604,5 @@ fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
         question,
         "Delete it? Its worktree, /w/demo/fix, stays: demo/b works in it."
     );
-    assert_eq!(op, go(Deleting::default()));
+    assert_eq!(op, go(how(false, false)));
 }

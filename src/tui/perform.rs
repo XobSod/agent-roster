@@ -134,21 +134,26 @@ pub(super) fn perform(
                     .join("; ")
             })
         }
-        Op::AskDelete { id, discard } => roster.db.session(&id).and_then(|s| {
-            let leaving = roster.leaving(std::slice::from_ref(&id))?;
-            let question = crate::agent::delete_question(&s);
-            app.ask_leaving(
-                question,
-                &leaving,
-                discard,
-                |how| Op::Delete(id.clone(), how),
-                |discard| Op::AskDelete {
-                    id: id.clone(),
-                    discard: Some(discard),
-                },
-            );
-            Ok(String::new())
-        }),
+        Op::AskDelete { id, step } => {
+            let asked = roster.db.session(&id).and_then(|s| {
+                let leaving = roster.leaving(std::slice::from_ref(&id))?;
+                Ok(app.ask_leaving(
+                    crate::agent::delete_question(&s),
+                    &leaving,
+                    step,
+                    |how| Op::Delete(id.clone(), how),
+                    |step| Op::AskDelete {
+                        id: id.clone(),
+                        step: Some(step),
+                    },
+                ))
+            });
+            match asked {
+                Ok(Some(op)) => return perform(terminal, roster, app, op),
+                Ok(None) => Ok(String::new()),
+                Err(e) => Err(e),
+            }
+        }
         Op::Restore { id, name } => roster.restore(&id, name.as_deref()).map(|s| {
             app.select(EntryKey::Session(s.id.clone()));
             format!("Restored {} (stopped)", s.label())
@@ -349,26 +354,30 @@ pub(super) fn perform(
                 .collect::<Vec<_>>()
                 .join("; ")
         }),
-        Op::AskRemoveProject { name, discard } => {
-            roster.removal_question(&name).and_then(|question| {
+        Op::AskRemoveProject { name, step } => {
+            let asked = roster.removal_question(&name).and_then(|question| {
                 let project =
                     (roster.db.project(&name)?).with_context(|| format!("no project {name:?}"))?;
                 let ids: Vec<String> = (roster.db.purged_with(&project)?.into_iter())
                     .map(|s| s.id)
                     .collect();
                 let leaving = roster.leaving(&ids)?;
-                app.ask_leaving(
+                Ok(app.ask_leaving(
                     question,
                     &leaving,
-                    discard,
+                    step,
                     |how| Op::RemoveProject(name.clone(), how),
-                    |discard| Op::AskRemoveProject {
+                    |step| Op::AskRemoveProject {
                         name: name.clone(),
-                        discard: Some(discard),
+                        step: Some(step),
                     },
-                );
-                Ok(String::new())
-            })
+                ))
+            });
+            match asked {
+                Ok(Some(op)) => return perform(terminal, roster, app, op),
+                Ok(None) => Ok(String::new()),
+                Err(e) => Err(e),
+            }
         }
         Op::Quit => Ok(String::new()),
     };

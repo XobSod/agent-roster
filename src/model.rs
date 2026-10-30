@@ -39,7 +39,8 @@ pub struct Worktree {
     pub repo: PathBuf,
     pub branch: String,
     /// What its branch was made from, to count against (a branch, a ref, a
-    /// commit); None for a branch that was there.
+    /// commit); for a branch that was there, the repository's default
+    /// branch (None if it's that one, or there's none).
     pub base: Option<String>,
     /// Made by roster, which removes it once no session works in it.
     pub made: bool,

@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_is_set_up_once_in_the_env_files_environment() {
+    fn a_worktree_is_set_up_in_the_env_files_environment_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("env");
         std::fs::write(&global, "A=from-env\n").unwrap();

@@ -252,4 +252,33 @@ mod tests {
         assert!(trust(&file, work).is_err());
         assert_eq!(fs::read_to_string(&file).unwrap(), "[1]");
     }
+
+    #[test]
+    fn a_worktree_is_trusted_as_its_checkout_and_taken_back_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        crate::git::tests::repo(&repo);
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let file = dir.path().join(".claude.json");
+        let config = |entries: &[&str]| {
+            let projects: serde_json::Map<String, Value> = (entries.iter())
+                .map(|e| (e.to_string(), json!({"hasTrustDialogAccepted": true})))
+                .collect();
+            fs::write(&file, json!({"projects": projects}).to_string()).unwrap();
+        };
+        // Its folder's entry, or one above it within its repository.
+        config(&[repo.to_str().unwrap()]);
+        assert!(trusted_at(&file, &repo.join("sub")));
+        config(&[dir.path().canonicalize().unwrap().to_str().unwrap()]);
+        assert!(!trusted_at(&file, &repo.join("sub")));
+        // Taken back: what's at or under the worktree, nothing beside it.
+        config(&["/w/fix", "/w/fix/sub", "/w/fix-2", "/w"]);
+        assert!(untrust_under(&file, Path::new("/w/fix")).unwrap());
+        let left: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let mut keys: Vec<&String> = left["projects"].as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["/w", "/w/fix-2"]);
+        assert!(!untrust_under(&file, Path::new("/w/fix")).unwrap());
+    }
 }

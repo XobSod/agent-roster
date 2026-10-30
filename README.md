@@ -120,7 +120,8 @@ A session can work in a git worktree of its own instead of the project's checkou
 several agents work on one repository without touching each other's files.
 `roster new myproj --worktree` makes one on a new branch named after the session, from
 the commit the checkout is on (`--worktree fix-auth --base main` names both; a branch
-that exists is checked out as it is, and one checked out elsewhere can't be twice).
+that exists is checked out as it is, counted against the default branch, and one
+checked out elsewhere can't be twice).
 `--in <session or directory>` starts a session in a worktree there is, another
 session's say, which they then share. In the new-session form (`s n`), *Works in*
 does the same for a project in git: the checkout, a new worktree (its branch and
@@ -428,7 +429,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     slower, they're just text. `lines`, how many of each note's lines the preview
     shows, from the pinned one (default 2, at most 10).
   - `[worktrees]`: `directory`, where new git worktrees for sessions go, a folder per
-    project in it (default: roster's state directory, so uninstalling takes them).
+    project in it (default: roster's state directory, so uninstalling takes them): a
+    whole path (or `~/…`), outside the project's repository.
   - `fit_preview` (default `"auto"`): agents drawing full screen (in the terminal's
     alternate screen, as Claude Code's fullscreen renderer does) are sized to the
     preview while you're not attached, so it shows all of their screen; `"never"`

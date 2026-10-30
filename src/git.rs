@@ -35,7 +35,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
         let said = said.trim().trim_start_matches("fatal: ");
-        bail!("git {} failed: {said}", args.first().unwrap_or(&""));
+        // Named by its command, past any `-c <setting>`.
+        let mut words = args.iter();
+        let name = loop {
+            match words.next() {
+                Some(&"-c") => {
+                    words.next();
+                }
+                Some(word) => break *word,
+                None => break "",
+            }
+        };
+        bail!("git {name} failed: {said}");
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
@@ -202,6 +213,14 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: Option<&str>) 
         Some(base) => git(repo, &["worktree", "add", "-b", branch, "--", &path, base]),
         None => git(repo, &["worktree", "add", "--", &path, branch]),
     }?;
+    Ok(())
+}
+
+/// Makes the worktree of `repo` at `path` again, on `branch`, git still
+/// knowing it there though its directory went; the branch must be free.
+pub fn add_worktree_again(repo: &Path, path: &Path, branch: &str) -> Result<()> {
+    let path = path.to_string_lossy();
+    git(repo, &["worktree", "add", "--force", "--", &path, branch])?;
     Ok(())
 }
 

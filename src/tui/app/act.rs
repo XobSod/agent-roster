@@ -418,7 +418,7 @@ impl App {
         if s.worktree.is_some() {
             return Some(Op::AskDelete {
                 id: s.id,
-                discard: None,
+                step: None,
             });
         }
         let question = crate::agent::delete_question(&s);
@@ -426,45 +426,51 @@ impl App {
         None
     }
 
-    /// What deleting for good asks of the worktrees in `leaving`, after
-    /// `question`: before the changes in them are decided (`discard` None),
-    /// whether to remove those with changes, and then their branches; `go`
-    /// does it as decided, `again` asks the next question.
+    /// What deleting for good asks of the worktrees in `leaving`, one thing
+    /// at a time: whether to (`question`, with what stays), then whether
+    /// those with changes not committed go too, then their branches; `go`
+    /// does it as decided, `again` asks the next. The op to do at once if
+    /// nothing is left to ask.
     pub(crate) fn ask_leaving(
         &mut self,
         question: String,
         leaving: &[crate::engine::Leaving],
-        discard: Option<bool>,
+        step: Option<op::LeavingStep>,
         go: impl Fn(crate::engine::Deleting) -> Op,
-        again: impl Fn(bool) -> Op,
-    ) {
+        again: impl Fn(op::LeavingStep) -> Op,
+    ) -> Option<Op> {
         use crate::engine::{Deleting, branches_question, changes_question, staying_said};
+        use op::LeavingStep::{Branches, Changes};
         let how = |discard_changes, delete_branches| Deleting {
             discard_changes,
             delete_branches,
         };
-        let question = question + &staying_said(leaving);
-        let changes = discard
-            .is_none()
-            .then(|| changes_question(leaving))
-            .flatten();
-        let discard = discard.unwrap_or(false);
-        match (changes, branches_question(leaving, discard)) {
-            // y: removed with them, and then its branch; n: it stays.
-            (Some(changes), _) => {
-                let then = |discard| match branches_question(leaving, discard) {
-                    Some(_) => again(discard),
-                    None => go(how(discard, false)),
+        // The branches' question next, if there's one, those changes decided.
+        let then = |discard| match branches_question(leaving, discard) {
+            Some(_) => again(Branches { discard }),
+            None => go(how(discard, false)),
+        };
+        match step {
+            None => {
+                let next = match changes_question(leaving) {
+                    Some(_) => again(Changes),
+                    None => then(false),
                 };
-                self.ask(format!("{question} {changes}"), then(true), then(false));
+                self.confirm(question + &staying_said(leaving), next);
             }
-            (None, Some(branches)) => self.ask(
-                format!("{question} {branches}"),
-                go(how(discard, true)),
-                go(how(discard, false)),
-            ),
-            (None, None) => self.confirm(question, go(how(discard, false))),
+            Some(Changes) => match changes_question(leaving) {
+                // y: removed with them; n: it stays, and its branch with it.
+                Some(changes) => self.ask(changes, then(true), then(false)),
+                None => return Some(then(false)),
+            },
+            Some(Branches { discard }) => match branches_question(leaving, discard) {
+                Some(branches) => {
+                    self.ask(branches, go(how(discard, true)), go(how(discard, false)))
+                }
+                None => return Some(go(how(discard, false))),
+            },
         }
+        None
     }
 
     /// `p o`: the selected project's note, opened beside the selected
@@ -614,7 +620,7 @@ impl App {
         if archived.iter().any(|s| s.worktree.is_some()) {
             return Some(Op::AskRemoveProject {
                 name: p.name.clone(),
-                discard: None,
+                step: None,
             });
         }
         let question = crate::engine::project_removal_question(&p, archived);

@@ -144,6 +144,10 @@ pub struct Session {
     pub conversation_id: Option<String>,
     /// Where the agent keeps the conversation; if it exists, the next start resumes.
     pub transcript_path: Option<String>,
+    /// The conversation it's on has had a turn, so its agent has written it
+    /// (Claude does with the first message): its transcript missing before
+    /// then is still to come, and after, gone (`agent::conversation_lost`).
+    pub conversation_begun: bool,
     pub state: State,
     pub unread: bool,
     pub exit_status: Option<i32>,
@@ -231,6 +235,7 @@ impl Session {
             workdir: project.origin.clone(),
             conversation_id: None,
             transcript_path: None,
+            conversation_begun: false,
             state: State::Stopped,
             unread: false,
             exit_status: None,
@@ -443,9 +448,16 @@ impl Session {
             self.title = None;
         }
         // A copy that has moved on to another conversation isn't to be made
-        // of the original again.
+        // of the original again; nor is the one it's on known to have had a
+        // turn.
         if report.cleared || moved_on {
             self.fork_from = None;
+            self.conversation_begun = false;
+        }
+        // Written already: it has had a message, though none was seen here
+        // (taken up inside its agent, `/resume`, or adopted).
+        if report.transcript_written {
+            self.conversation_begun = true;
         }
         if let Some(model) = &report.model {
             self.running_model = Some(model.clone());
@@ -467,6 +479,15 @@ impl Session {
             "session" | "prompt" | "working" | "idle" | "needs-input"
         ) {
             self.given_prompt = None;
+        }
+        // A turn of its own: its conversation is kept from now on.
+        if report.subagent.is_none()
+            && matches!(
+                e.kind.as_str(),
+                "prompt" | "working" | "idle" | "needs-input"
+            )
+        {
+            self.conversation_begun = true;
         }
         // A subagent it said started, heard of again; one whose start
         // wasn't heard (its report lost) at work all the same.
@@ -951,6 +972,51 @@ pub mod tests {
         s.apply(&event("session", 10), &report);
         assert_eq!(s.conversation_id.as_deref(), Some("c-2"));
         assert_eq!(s.title, None);
+    }
+
+    #[test]
+    fn a_conversation_has_begun_once_it_has_had_a_turn() {
+        let mut s = session("a");
+        s.conversation_id = Some("c-1".into());
+        let on = |id: &str| Report {
+            conversation_id: Some(id.into()),
+            ..Report::default()
+        };
+        // Started (or resumed): no turn yet; a subagent's isn't one.
+        s.apply(&event("session", 10), &on("c-1"));
+        assert!(!s.conversation_begun);
+        let subagent = Report {
+            subagent: Some("b1".into()),
+            ..Report::default()
+        };
+        s.apply(&event("working", 15), &subagent);
+        assert!(!s.conversation_begun);
+        for kind in ["prompt", "working", "needs-input", "idle"] {
+            let mut s = s.clone();
+            s.apply(&event(kind, 20), &on("c-1"));
+            assert!(s.conversation_begun, "{kind}");
+        }
+        s.apply(&event("prompt", 20), &on("c-1"));
+        // Resumed again, it still has.
+        s.apply(&event("session", 30), &on("c-1"));
+        assert!(s.conversation_begun);
+        // Cleared, or on another conversation, it has had none there.
+        let cleared = Report {
+            cleared: true,
+            ..on("c-2")
+        };
+        s.apply(&event("session", 40), &cleared);
+        assert!(!s.conversation_begun);
+        s.apply(&event("idle", 50), &on("c-2"));
+        s.apply(&event("session", 60), &on("c-3"));
+        assert!(!s.conversation_begun);
+        // Taken up inside its agent (`/resume`), already written: it has.
+        let written = Report {
+            transcript_written: true,
+            ..on("c-4")
+        };
+        s.apply(&event("session", 70), &written);
+        assert!(s.conversation_begun);
     }
 
     #[test]

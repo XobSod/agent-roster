@@ -55,6 +55,10 @@ impl Adapter for Claude {
         true
     }
 
+    fn deletes_old_conversations(&self) -> bool {
+        true
+    }
+
     fn keeps_transcript(&self) -> bool {
         true
     }

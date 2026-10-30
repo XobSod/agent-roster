@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 15;
+pub(super) const SCHEMA_VERSION: i64 = 16;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -55,7 +55,8 @@ CREATE TABLE sessions (
     awaiting          INTEGER NOT NULL DEFAULT 0,
     shells            TEXT,
     started_at        INTEGER,
-    session_at        INTEGER
+    session_at        INTEGER,
+    conversation_begun INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX sessions_live_name ON sessions(project_id, name) WHERE deleted_at IS NULL;
 CREATE TABLE events (
@@ -206,6 +207,15 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
         15,
         Sql("ALTER TABLE sessions ADD COLUMN started_at INTEGER;
          ALTER TABLE sessions ADD COLUMN session_at INTEGER;"),
+    ),
+    // A session that has had turns is taken for one whose conversation has:
+    // asked about once too often rather than given a new one unasked.
+    (
+        16,
+        Sql(
+            "ALTER TABLE sessions ADD COLUMN conversation_begun INTEGER NOT NULL DEFAULT 0;
+         UPDATE sessions SET conversation_begun = 1 WHERE turns > 0;",
+        ),
     ),
 ];
 

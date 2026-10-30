@@ -120,7 +120,10 @@ impl Adapter for Pi {
 
     /// The extension reports in roster's own terms.
     fn report(&self, payload: &Value) -> Report {
-        Report::deserialize(payload).unwrap_or_default()
+        Report {
+            transcript_written: super::transcript_written(payload),
+            ..Report::deserialize(payload).unwrap_or_default()
+        }
     }
 
     fn transcript(&self, path: &Path) -> Option<Box<dyn Transcript>> {
@@ -300,6 +303,7 @@ mod tests {
                 effort: Some("medium".into()),
                 title: Some(None),
                 context_window: Some(1_000_000),
+                transcript_written: false,
                 shell: None,
                 shells_ended: Vec::new(),
                 woken: false,

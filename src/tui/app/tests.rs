@@ -593,6 +593,65 @@ fn agents_that_cant_resume_ask_before_a_new_conversation() {
 }
 
 #[test]
+fn a_conversation_claude_no_longer_has_is_asked_about_before_a_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app();
+    // A conversation that has had turns, its transcript deleted since.
+    let mut gone = with("c1", (1, "alpha"), State::Stopped, false, 1);
+    gone.transcript_path = Some(dir.path().join("c1.jsonl").to_string_lossy().into());
+    gone.conversation_begun = true;
+    let mut sessions = app.sessions.clone();
+    sessions.push(gone.clone());
+    app.folded.clear();
+    app.set_data(app.projects.clone(), sessions.clone());
+    select(&mut app, "c1");
+    for (chord, op) in [
+        ("ss", Op::Start("c1".into())),
+        ("sr", Op::Restart("c1".into())),
+    ] {
+        assert_eq!(keys(&mut app, chord), None);
+        let Some(Dialog::Confirm { question, .. }) = &app.dialog else {
+            panic!("no confirmation")
+        };
+        assert!(
+            question.contains("Claude no longer has it, as it deletes old ones"),
+            "{question}"
+        );
+        assert_eq!(keys(&mut app, "y"), Some(op));
+    }
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert_eq!(keys(&mut app, "y"), Some(Op::Attach("c1".into())));
+    let conversation = |app: &App, s: &Session| -> String {
+        (app.session_info(s, &[], &[], 10).lines.iter())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|l| l.contains("Conversation"))
+            .unwrap()
+    };
+    assert!(
+        conversation(&app, &gone).ends_with("Claude no longer has it: a new one when started)"),
+        "{}",
+        conversation(&app, &gone)
+    );
+    // Not written yet (before its first message, or just cleared): started
+    // as it is.
+    let s = sessions.last_mut().unwrap();
+    s.conversation_begun = false;
+    let fresh = s.clone();
+    app.set_data(app.projects.clone(), sessions);
+    assert_eq!(keys(&mut app, "ss"), Some(Op::Start("c1".into())));
+    assert!(
+        conversation(&app, &fresh).ends_with("a new one when started"),
+        "{}",
+        conversation(&app, &fresh)
+    );
+}
+
+#[test]
 fn a_kept_first_prompt_is_asked_about_as_it_starts() {
     let mut app = app();
     app.agents.push("codex".into());

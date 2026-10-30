@@ -101,6 +101,12 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// Whether it deletes old conversations itself (Claude, those older than
+    /// its retention period): then that's why one is gone.
+    fn deletes_old_conversations(&self) -> bool {
+        false
+    }
+
     /// Whether it keeps a transcript roster reads (`transcript`).
     fn keeps_transcript(&self) -> bool {
         false
@@ -444,6 +450,10 @@ pub struct Report {
     /// A prompt it was given by itself: told that something it left running
     /// ended, not by you.
     pub woken: bool,
+    /// Its transcript was there as it reported (`report::TRANSCRIPT_SIZE`):
+    /// its conversation has had a message, whatever roster saw of it.
+    #[serde(skip)]
+    pub transcript_written: bool,
 }
 
 /// Ends of commands an agent left running, as its transcript records them
@@ -510,8 +520,15 @@ pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
         started: source == Some("startup"),
         compacted: source == Some("compact"),
         model: text(payload.get("model")),
+        transcript_written: transcript_written(payload),
         ..Report::default()
     }
+}
+
+/// Whether `payload`'s transcript was there, not empty, as roster stored it
+/// (`report::TRANSCRIPT_SIZE`).
+pub(crate) fn transcript_written(payload: &serde_json::Value) -> bool {
+    (payload.get(crate::report::TRANSCRIPT_SIZE)).is_some_and(|size| size.as_u64() > Some(0))
 }
 
 /// What an agent keeps of one of its subagents (`Adapter::subagent_info`).
@@ -650,9 +667,25 @@ pub fn transcript_of(s: &Session, path: &Path) -> Option<Box<dyn Transcript>> {
 /// Whether starting `s` goes on with its conversation: its agent resumes, and
 /// roster knows the conversation, or the one an adopted copy forks. An agent
 /// that names its conversation only from its first turn on (codex) may not
-/// have yet, or never will if its hooks don't run: then it starts a new one.
+/// have yet, or never will if its hooks don't run: then it starts a new one,
+/// as does one whose agent no longer has it (`conversation_lost`).
 pub fn resumes(s: &Session) -> bool {
-    adapter(&s.agent).resumes() && (s.conversation_id.is_some() || s.fork_from.is_some())
+    adapter(&s.agent).resumes()
+        && (s.conversation_id.is_some() || s.fork_from.is_some())
+        && !conversation_lost(s)
+}
+
+/// Whether `s`'s agent no longer has its conversation: it has had a turn
+/// (`Session::conversation_begun`), and its transcript is gone (Claude
+/// deletes old ones). An agent given the conversation's id at every start
+/// (Claude, pi) would begin a new one on it, unasked; codex, told to resume
+/// one it can't find, says so.
+pub fn conversation_lost(s: &Session) -> bool {
+    let a = adapter(&s.agent);
+    a.keeps_transcript()
+        && !a.names_its_conversation()
+        && s.conversation_begun
+        && (s.transcript_path.as_deref()).is_some_and(|p| !Path::new(p).exists())
 }
 
 /// What starting `s` asks when its agent hasn't said it took its first
@@ -748,7 +781,20 @@ pub fn delete_question(s: &Session) -> String {
 /// What the CLI and TUI ask before starting `s`, which begins a new
 /// conversation (`resumes`).
 pub fn new_conversation_question(s: &Session) -> String {
-    if adapter(&s.agent).names_its_conversation() {
+    let a = adapter(&s.agent);
+    if conversation_lost(s) {
+        let why = if a.deletes_old_conversations() {
+            ", as it deletes old ones"
+        } else {
+            ", its file gone"
+        };
+        format!(
+            "{} ({}) can't resume its conversation: {} no longer has it{why}. Start a new one?",
+            s.label(),
+            s.agent,
+            crate::util::capitalize(&s.agent)
+        )
+    } else if a.names_its_conversation() {
         format!(
             "{} ({}) hasn't said which conversation it's on, so it can't resume it. Start a new one?",
             s.label(),
@@ -1056,6 +1102,40 @@ mod tests {
         s.agent = "aider".into();
         assert!(!resumes(&s));
         assert!(new_conversation_question(&s).contains("can't resume its conversation"));
+    }
+
+    #[test]
+    fn a_conversation_gone_after_its_first_turn_isnt_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("c-1.jsonl");
+        let mut s = session("a");
+        s.conversation_id = Some("c-1".into());
+        s.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        // Not written yet: before its first message, or just cleared.
+        assert!(resumes(&s) && !conversation_lost(&s));
+        // A copy, forking its original till it has its own.
+        s.fork_from = Some("c-0".into());
+        assert!(resumes(&s));
+        // Written, then deleted: lost, and said why.
+        s.conversation_begun = true;
+        std::fs::write(&transcript, "{}\n").unwrap();
+        assert!(resumes(&s));
+        std::fs::remove_file(&transcript).unwrap();
+        assert!(conversation_lost(&s) && !resumes(&s));
+        assert_eq!(
+            new_conversation_question(&s),
+            "demo/s-a (claude) can't resume its conversation: Claude no longer has it, as it deletes old ones. Start a new one?"
+        );
+        s.agent = "pi".into();
+        assert!(!resumes(&s));
+        assert!(
+            new_conversation_question(&s).contains("Pi no longer has it, its file gone"),
+            "{}",
+            new_conversation_question(&s)
+        );
+        // Codex says so itself, if it can't find it.
+        s.agent = "codex".into();
+        assert!(!conversation_lost(&s) && resumes(&s));
     }
 
     #[test]

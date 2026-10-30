@@ -64,18 +64,19 @@ three menus, which pop up their keys:
 ### Sessions and shelves
 
 Sessions sit on shelves by attention. At the top what waits for you: *Needs input*
-(questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom
-what you've handed off or finished: *Working* (dimmed) and *Archived* (folded;
-`Enter` restores one, `s D` deletes it for good). Within a shelf it's first come,
-first served (configurable). `group_by = "project"` puts them under each project
-instead, archived ones still on their shelf. Coming back from an agent you gave a task, the cursor
-stays where it was, on the next one waiting; after only reading, it stays on that
-agent. A stopped or archived session's preview says what it was: when it stopped or
-was archived, its project, title, note and last prompts, and whether starting it
-resumes its conversation. For a stopped one whose agent exited with an error, it
-also shows how the agent's screen ended (`roster show` prints all of it). A shelf's
-or a project's heading previews its sessions at a glance: what each is waiting for
-and since when, its last prompt, and its note's line.
+(questions, finished turns you haven't seen), *Idle* and *Stopped*; at the bottom what
+you've handed off or finished: *Working* (dimmed) and *Archived* (folded; `Enter`
+restores one, `s D` deletes it for good). Within a shelf it's first come, first served
+(configurable). `group_by = "project"` puts them under each project instead, archived
+ones still on their shelf. Coming back from an agent you gave a task, the cursor stays
+where it was, on the next one waiting; after only reading, it stays on that agent. A
+stopped or archived session's preview says what it was: when it stopped or was archived,
+its project, title, note and last prompts, and whether starting it resumes its
+conversation (one Claude or pi no longer has, as Claude deletes old ones, can't be:
+starting it asks before a new one). For a stopped one whose agent exited with an error,
+it also shows how the agent's screen ended (`roster show` prints all of it). A shelf's
+or a project's heading previews its sessions at a glance: what each is waiting for and
+since when, its last prompt, and its note's line.
 
 Under the preview's header is what roster knows of the session: when it was made, its
 prompts, the time it worked, and from its agent's conversation, the context used,

@@ -300,6 +300,31 @@ fn migrates_a_version_1_database() {
 }
 
 #[test]
+fn an_upgraded_session_that_had_turns_has_begun_its_conversation() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(V1_SCHEMA).unwrap();
+    let tx = conn.transaction().unwrap();
+    for (_, migration) in MIGRATIONS.iter().filter(|(to, _)| *to < 15) {
+        match migration {
+            Sql(sql) => tx.execute_batch(sql).unwrap(),
+            Code(migrate) => migrate(&tx).unwrap(),
+        }
+    }
+    tx.execute_batch(
+        "PRAGMA user_version = 14;
+         INSERT INTO projects (name, origin, created_at) VALUES ('p', '/p', 0);
+         INSERT INTO sessions (id, project_id, name, agent, workdir, state, created_at, turns)
+         VALUES ('used', 1, 'a', 'claude', '/p', 'stopped', 0, 3),
+                ('new', 1, 'b', 'claude', '/p', 'stopped', 0, 0);",
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let db = Db::init(conn).unwrap();
+    assert!(db.session("used").unwrap().conversation_begun);
+    assert!(!db.session("new").unwrap().conversation_begun);
+}
+
+#[test]
 fn a_save_of_what_changed_leaves_what_another_roster_saved() {
     let (db, s) = db_with_session();
     // A refresh loaded it; an edit saves a name and a title meanwhile.
@@ -330,6 +355,7 @@ fn a_save_of_what_changed_writes_every_column_save_session_does() {
     after.name = "n".into();
     after.conversation_id = Some("c".into());
     after.transcript_path = Some("/t".into());
+    after.conversation_begun = true;
     after.state = State::NeedsInput;
     after.unread = true;
     after.exit_status = Some(3);

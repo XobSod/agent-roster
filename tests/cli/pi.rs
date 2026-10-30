@@ -135,6 +135,18 @@ fn pi_reports_through_rosters_extension() {
         title.starts_with("fake pi: -p --no-session --no-tools"),
         "{title}"
     );
+
+    // Its session file gone after its turns, pi would begin a new one on its
+    // id: starting it asks first.
+    t.ok(&["stop", "p"]);
+    fs::remove_file(t.path(&format!("proj/.pi-{conversation}.jsonl"))).unwrap();
+    let out = t.run(&["start", "p"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success()
+            && err.contains("demo/p (pi) can't resume its conversation: Pi no longer has it"),
+        "{err}"
+    );
 }
 
 #[test]

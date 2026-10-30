@@ -8,7 +8,7 @@ pub(super) const SESSION_COLUMNS: &str =
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
     s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting, s.shells,
-    s.started_at, s.session_at, s.note, s.note_pin, s.note_at";
+    s.started_at, s.session_at, s.conversation_begun, s.note, s.note_pin, s.note_at";
 
 impl Db {
     /// The names of a project's live sessions.
@@ -115,6 +115,7 @@ impl Db {
             name,
             conversation_id,
             transcript_path,
+            conversation_begun,
             unread,
             exit_status,
             last_event_at,
@@ -165,6 +166,7 @@ impl Db {
             name,
             conversation_id,
             transcript_path,
+            conversation_begun,
             unread,
             exit_status,
             last_event_at,
@@ -389,6 +391,7 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              name = :name,
              conversation_id = :conversation_id,
              transcript_path = :transcript_path,
+             conversation_begun = :conversation_begun,
              state = :state,
              unread = :unread,
              exit_status = :exit_status,
@@ -421,6 +424,7 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":name": s.name,
             ":conversation_id": s.conversation_id,
             ":transcript_path": s.transcript_path,
+            ":conversation_begun": s.conversation_begun,
             ":state": s.state.as_str(),
             ":unread": s.unread,
             ":exit_status": s.exit_status,
@@ -471,6 +475,7 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         workdir: r.get::<_, String>("workdir")?.into(),
         conversation_id: r.get("conversation_id")?,
         transcript_path: r.get("transcript_path")?,
+        conversation_begun: r.get("conversation_begun")?,
         state: State::parse(&r.get::<_, String>("state")?),
         unread: r.get("unread")?,
         exit_status: r.get("exit_status")?,

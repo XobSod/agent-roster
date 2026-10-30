@@ -185,6 +185,17 @@ impl Roster {
         if s.state != State::Stopped {
             bail!("{} is already running", s.label());
         }
+        // One its agent no longer has (asked about first) begins anew on its
+        // id: nothing of it said yet, and no copy of the one it came from.
+        if agent::conversation_lost(&s) {
+            s.conversation_begun = false;
+            s.fork_from = None;
+        }
+        // Written, it has begun, whatever roster saw of it, so it's missed
+        // once its agent deletes it.
+        if (s.transcript_path.as_deref()).is_some_and(|p| Path::new(p).exists()) {
+            s.conversation_begun = true;
+        }
         let cx = agent::Context {
             roster: &self.exe,
             state_dir: &self.paths.state_dir,

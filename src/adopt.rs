@@ -140,6 +140,8 @@ impl Roster {
             s.workdir = c.cwd.clone();
             s.conversation_id = conversation_id;
             s.transcript_path = transcript_path;
+            // Moved, it's a conversation its agent kept: it has had turns.
+            s.conversation_begun = !req.fork;
             s.fork_from = fork_from;
             s.title = c.title.clone();
             // A name it was given is like a title of your own (pi's is its

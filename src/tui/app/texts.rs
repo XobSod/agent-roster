@@ -456,8 +456,9 @@ impl App {
             ));
         }
         // What starting it goes on with: its conversation once its agent has
-        // written it. Until then, a fork of the one it was adopted from, or
-        // a new one.
+        // written it, and a new one (asked first) once its agent no longer
+        // has it. Until then, a fork of the one it was adopted from, or a new
+        // one.
         let short = |id: &str| id.chars().take(8).collect::<String>();
         let written = s
             .transcript_path
@@ -468,6 +469,16 @@ impl App {
             (Some(id), _) if written => vec![
                 Span::raw(short(id)),
                 Span::styled(" (resumed when started)", muted),
+            ],
+            (Some(id), _) if crate::agent::conversation_lost(s) => vec![
+                Span::raw(short(id)),
+                Span::styled(
+                    format!(
+                        " ({} no longer has it: a new one when started)",
+                        crate::util::capitalize(&s.agent)
+                    ),
+                    muted,
+                ),
             ],
             (_, Some(from)) => vec![
                 Span::styled("a fork of ", muted),

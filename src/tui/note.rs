@@ -763,11 +763,11 @@ impl NoteEditor {
                     (":q!", "close, leave it"),
                     ("C-g", "$EDITOR"),
                 ],
+                // Of vim's own, what's needed to write and get out; the rest
+                // are roster's.
                 EditorMode::Normal => &[
                     ("i", "insert"),
-                    (":w", "save"),
                     (":wq", "save and close"),
-                    (":q!", "close, leave changes"),
                     ("mm", "pin a line"),
                     (":earlier", "older versions"),
                     ("C-g", "$EDITOR"),
@@ -786,7 +786,7 @@ impl NoteEditor {
             && self.command.is_none()
             && self.mode() == EditorMode::Normal
         {
-            hints.insert(4, (":e!".into(), "take it as saved"));
+            hints.insert(2, (":e!".into(), "take it as saved"));
         }
         hints
     }
@@ -1163,14 +1163,13 @@ mod tests {
         assert!(open.of(&Whose::Project(2)).is_none());
         // The footer says how to show the other, where there is one: from
         // the project's, ] for the session's; with the other changed, :wqa
-        // and :qa! close.
+        // saves both and closes.
         let hints = |open: &OpenNotes| -> Vec<String> {
             open.hints().into_iter().map(|(k, _)| k).collect()
         };
         assert!(hints(&open).contains(&"]".to_string()));
         assert!(hints(&open).contains(&":wqa".to_string()));
-        assert!(hints(&open).contains(&":qa!".to_string()));
-        assert!(!hints(&open).contains(&":q!".to_string()));
+        assert!(!hints(&open).contains(&":wq".to_string()));
         // Typing a command, only its own.
         keys(open.shown_mut(), ":w");
         assert_eq!(hints(&open), ["Enter", "Esc"]);

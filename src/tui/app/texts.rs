@@ -458,12 +458,11 @@ impl App {
         // What starting it goes on with: its conversation once its agent has
         // written it, and a new one (asked first) once its agent no longer
         // has it. Until then, a fork of the one it was adopted from, or a new
-        // one.
+        // one. Codex resumes one by its id wherever its file is, or says it
+        // can't find it.
         let short = |id: &str| id.chars().take(8).collect::<String>();
-        let written = s
-            .transcript_path
-            .as_deref()
-            .is_some_and(|p| std::path::Path::new(p).exists());
+        let written = crate::agent::adapter(&s.agent).names_its_conversation()
+            || (s.transcript_path.as_deref()).is_some_and(|p| std::path::Path::new(p).exists());
         let conversation = match (&s.conversation_id, &s.fork_from) {
             _ if !self.resumes(&s.agent) => vec![Span::styled("a new one when started", muted)],
             (Some(id), _) if written => vec![

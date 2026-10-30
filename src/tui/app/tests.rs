@@ -649,6 +649,15 @@ fn a_conversation_claude_no_longer_has_is_asked_about_before_a_new_one() {
         "{}",
         conversation(&app, &fresh)
     );
+    // Codex's, its file gone: resumed by id all the same.
+    app.agents.push("codex".into());
+    let mut codex = fresh.clone();
+    codex.agent = "codex".into();
+    assert!(
+        conversation(&app, &codex).ends_with("(resumed when started)"),
+        "{}",
+        conversation(&app, &codex)
+    );
 }
 
 #[test]

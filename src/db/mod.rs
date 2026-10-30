@@ -44,6 +44,7 @@ impl Db {
         let conn =
             Connection::open(path).with_context(|| format!("can't open {}", path.display()))?;
         Db::init(conn)
+            .map_err(|e| unwritable(e, path, std::env::var_os("ROSTER_SESSION").is_some()))
     }
 
     #[cfg(test)]
@@ -219,6 +220,27 @@ fn constraint(e: rusqlite::Error, message: impl FnOnce() -> String) -> anyhow::E
         }
         e => e.into(),
     }
+}
+
+/// The database at `path` refusing to be written (opened, it's read-only, or
+/// its `-wal` can't be made beside it) as that, saying where; and `inside`
+/// an agent's command (`roster note` from codex, say), that its sandbox may
+/// be what refuses. Other errors as they are.
+fn unwritable(e: anyhow::Error, path: &Path, inside: bool) -> anyhow::Error {
+    use rusqlite::ErrorCode::{CannotOpen, ReadOnly};
+    let code = (e.downcast_ref::<rusqlite::Error>()).and_then(rusqlite::Error::sqlite_error_code);
+    if !matches!(code, Some(CannotOpen | ReadOnly)) {
+        return e;
+    }
+    let message = if inside {
+        format!(
+            "can't write {} from inside an agent, whose sandbox may not let it",
+            path.display()
+        )
+    } else {
+        format!("can't write {}", path.display())
+    };
+    e.context(message)
 }
 
 fn path_str(p: &Path) -> Result<&str> {

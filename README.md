@@ -129,7 +129,10 @@ counted beside them, `$1`, with a line each when unfolded: what it does, as Clau
 it, and how long it's been running. A turn that ends with only those left stays on
 *Working*, marked unread (`● ⠋`): Claude may be waiting for one, taking its result up by
 itself once it's done, which takes the mark off, or for you, with a server left running
-for you to try.
+for you to try. Codex's background terminals (`/ps`) count the same, a line each with
+its command; Codex takes none of their results up, so the session is idle and unread
+once the last ends or is closed (`/stop`). In a conversation begun by an older Codex,
+which records no such end, they aren't counted.
 
 ### Notes
 
@@ -290,7 +293,9 @@ roster config --edit                    # config.toml in $EDITOR (from those def
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`
 lists every command. Each agent's session has `ROSTER_SESSION` set to its id, which
 is how `roster note` inside it knows whose note is meant, and `ROSTER_EXE` to the roster
-that started it, for an agent whose `PATH` has no `roster` (`"$ROSTER_EXE" note`).
+that started it, for an agent whose `PATH` has no `roster` (`"$ROSTER_EXE" note`). An
+agent's sandbox may keep its commands from writing roster's database, outside the
+project: Codex's does, and roster says so; Codex may then ask to run it outside.
 
 ## Configure
 
@@ -328,7 +333,7 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `group_by`: `"attention"` (default), the session list on shelves by what waits
     for you, or `"project"`, under each project's heading.
   - `card_subagents`: a Claude or Codex session's subagents at work, and the commands
-    Claude left running, on its card: `"folded"` (default), how many (`↳2 $1 ›`), and a
+    it left running, on its card: `"folded"` (default), how many (`↳2 $1 ›`), and a
     line each once you unfold it with `l`; `"unfolded"`, the lines always; `"count"`,
     how many only.
   - `memory_warning`: a session whose processes (its agent, all it started, and what it
@@ -481,9 +486,12 @@ Roster starts [Codex](https://github.com/openai/codex) with hooks of its own, gi
 each run as `-c hooks.<Event>=[…]` arguments, for its sessions only; your `~/.codex`
 config and hooks stay as they are. Codex runs a hook only once it's trusted, so the
 first time, it asks you to review roster's (and again if roster moves, since the
-command is part of what's trusted): trust them, or roster can't follow it. They report
-its state: the tools it calls say working, a question it asks (`PermissionRequest`)
-needs input, the end of a turn idle. Each run also gets `--no-daemon`, so its tools
+command is part of what's trusted, and once more when roster listens to more of them):
+trust them, or roster can't follow it. They report its state: the tools it calls say
+working; a question it asks (`PermissionRequest`, or its question form in Plan mode)
+needs input; a `/compact` you run is working till it's done; the end of a turn is idle.
+A `/review` runs in a thread of Codex's own, whose end no hook reports: roster reads it
+from the session's conversation once Codex's screen is still. Each run also gets `--no-daemon`, so its tools
 run in the session's environment, your env files' included, rather than a shared
 Codex server's.
 

@@ -220,6 +220,12 @@ impl Adapter for Claude {
         shells::ended(transcript, from)
     }
 
+    /// A command that ends at once may have its end written before the hook
+    /// reporting it ran, what tools called beside it returned in between.
+    fn shell_slack(&self) -> u64 {
+        1 << 20
+    }
+
     fn subagent_doing(&self, file: &Path) -> Option<String> {
         subagents::doing(file)
     }

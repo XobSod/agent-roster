@@ -103,19 +103,15 @@ pub struct Roster {
 }
 
 /// How far a session's transcript has been read for the ends of what its
-/// agent left running (`Adapter::shells_ended`), and those found: when each
-/// was first written (else read), and whether its agent was told it then.
-/// A refresh reads only what was written since.
+/// agent left running (`Adapter::shells_ended`), and those found, by id:
+/// when each was written (else read), whether its agent was told it then,
+/// and where. An id may have several, as codex gives a later command the id
+/// of one that's over. A refresh reads only what was written since.
 struct ShellsRead {
     path: String,
     upto: u64,
-    ended: HashMap<String, (i64, bool)>,
+    ended: HashMap<String, Vec<(i64, bool, u64)>>,
 }
-
-/// How far before a shell was reported its transcript is read for its end:
-/// a command that ends at once may have its end written before the hook
-/// reporting it ran, what tools called beside it returned in between.
-const SHELL_SLACK: u64 = 1 << 20;
 
 /// How long an end queued for its agent while it waits is left to the turn
 /// the agent starts on it, which reports it (written a moment before the
@@ -145,7 +141,7 @@ fn shells_ended(
     };
     let fresh = || ShellsRead {
         path: path.to_string(),
-        upto: first.saturating_sub(SHELL_SLACK),
+        upto: first.saturating_sub(agent::adapter(&s.agent).shell_slack()),
         ended: HashMap::new(),
     };
     let known = read.entry(s.id.clone()).or_insert_with(fresh);
@@ -155,16 +151,24 @@ fn shells_ended(
     }
     if let Some((ends, upto)) = agent::adapter(&s.agent).shells_ended(Path::new(path), known.upto) {
         for end in ends {
-            let seen = known
-                .ended
-                .entry(end.id)
-                .or_insert((end.at.unwrap_or(now).min(now), false));
-            seen.1 |= end.told;
+            let seen = (end.at.unwrap_or(now).min(now), end.told, end.line);
+            known.ended.entry(end.id).or_default().push(seen);
         }
         known.upto = upto;
     }
-    let found: Vec<(&String, i64, bool)> = (s.shells.keys())
-        .filter_map(|id| known.ended.get(id).map(|&(at, told)| (id, at, told)))
+    // Each one's end, written after its mark: when first, and whether told
+    // then or after.
+    let slack = agent::adapter(&s.agent).shell_slack();
+    let found: Vec<(&String, i64, bool)> = (s.shells.iter())
+        .filter_map(|(id, shell)| {
+            let after = shell.from.saturating_sub(slack);
+            let own = known.ended.get(id)?.iter().filter(|end| end.2 >= after);
+            let (at, told) = own.fold(None, |found, &(at, told, _)| match found {
+                None => Some((at, told)),
+                Some((first, was)) => Some((first.min(at), was || told)),
+            })?;
+            Some((id, at, told))
+        })
         .collect();
     // Waiting, an end only queued is the turn's it starts on it, for now.
     let ended = (found.iter())
@@ -299,10 +303,31 @@ impl Roster {
                                 s.redrawn(&hash, now);
                             } else {
                                 s.observe_screen(&hash, now);
-                                s.correct_stale_working(
+                                let since = s.state_since;
+                                let transcript = s.transcript_path.clone();
+                                let transcript = transcript.as_deref().map(Path::new);
+                                // What the turn left running, which an end no
+                                // hook reports (an interrupt) doesn't say.
+                                if s.stale(now)
+                                    && let Some(path) = transcript
+                                {
+                                    s.add_shells(&adapter.shells_left(path), now);
+                                }
+                                // Its transcript saying the turn ended since,
+                                // not interrupted: there's its answer to read,
+                                // left with only shells running too, as when
+                                // its end is reported. Subagents still at work
+                                // put that off, the mark theirs to give.
+                                if s.correct_stale_working(
                                     now,
                                     adapter.subagents_outlive_interrupts(),
-                                );
+                                ) && s.subagents.is_empty()
+                                    && let Some(path) = transcript
+                                    && let Some(ended) = adapter.turn_ended(path)
+                                    && since.is_none_or(|since| ended >= since)
+                                {
+                                    s.unread = true;
+                                }
                             }
                         }
                     } else if let Some(hash) = self.screen_hash(&s, now) {
@@ -715,6 +740,44 @@ mod tests {
         std::fs::write(&other, notice("b1", t1)).unwrap();
         let s = on_shells(&other, &["b2"], 0, false);
         assert_eq!(shells_ended(&mut read, &s, later), (Vec::new(), None));
+        // Codex's are looked for from where each was seen running: an end
+        // of its id before that is another command's, its id given again.
+        let rollout = dir.path().join("rollout.jsonl");
+        let end = |id: &str, ms: i64| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+                "item": {"type": "CommandExecution", "process_id": id}, "completed_at_ms": ms}})
+            .to_string()
+                + "\n"
+        };
+        let before = end("7001", 1_000);
+        std::fs::write(&rollout, &before).unwrap();
+        let mut s = on_shells(&rollout, &["7001"], before.len() as u64, false);
+        s.agent = "codex".into();
+        let mut codex = HashMap::new();
+        assert!(shells_ended(&mut codex, &s, later).0.is_empty());
+        std::fs::write(&rollout, format!("{before}{}", end("7001", 2_000))).unwrap();
+        assert_eq!(
+            shells_ended(&mut codex, &s, later).0,
+            [("7001".to_string(), 2_000)]
+        );
+        // Each one's from its own mark: another's, earlier, isn't its.
+        let mut s = on_shells(&rollout, &["7001", "7002"], before.len() as u64, false);
+        s.agent = "codex".into();
+        let mark = std::fs::metadata(&rollout).unwrap().len();
+        let text = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{text}{}", end("7002", 3_000))).unwrap();
+        s.shells.get_mut("7002").unwrap().from = mark + end("7002", 3_000).len() as u64;
+        let mut codex = HashMap::new();
+        assert_eq!(
+            shells_ended(&mut codex, &s, later).0,
+            [("7001".to_string(), 2_000)]
+        );
+        let text = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{text}{}", end("7002", 4_000))).unwrap();
+        assert_eq!(
+            shells_ended(&mut codex, &s, later).0,
+            [("7001".to_string(), 2_000), ("7002".to_string(), 4_000)]
+        );
         // Read far past its shells' mark with no end: that's to be saved.
         let long = format!("{}\n", "y".repeat(SHELL_READ_SAVED as usize));
         std::fs::write(&other, &long).unwrap();

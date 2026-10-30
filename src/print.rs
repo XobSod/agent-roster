@@ -628,8 +628,9 @@ pub fn summarize(agent: &str, payload: Option<&str>) -> String {
     if let Some(agent) = &report.subagent {
         parts.push(format!("subagent={}", agent.get(..8).unwrap_or(agent)));
     }
-    if let Some(shell) = &report.shell {
-        parts.push(format!("shell={}", shell.id));
+    if !report.shells.is_empty() {
+        let ids: Vec<&str> = report.shells.iter().map(|s| s.id.as_str()).collect();
+        parts.push(format!("shells={}", ids.join(",")));
     }
     if !report.shells_ended.is_empty() {
         parts.push(format!("shells-ended={}", report.shells_ended.join(",")));

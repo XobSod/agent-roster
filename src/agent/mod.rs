@@ -228,6 +228,26 @@ pub trait Adapter: Sync {
         None
     }
 
+    /// How far before a shell's mark (`Backgrounded::from`) its end may be
+    /// written in its transcript (bytes), to be read from there.
+    fn shell_slack(&self) -> u64 {
+        0
+    }
+
+    /// The commands its last turn left running in the background, as its
+    /// transcript at `transcript` records them, for an agent whose hooks
+    /// don't say (codex's background terminals).
+    fn shells_left(&self, _transcript: &Path) -> Vec<Backgrounded> {
+        Vec::new()
+    }
+
+    /// When its last turn ended, as its transcript at `transcript` records
+    /// it: None if that turn hasn't, was interrupted, or it can't tell. For
+    /// a turn whose end no hook reports (a codex review's).
+    fn turn_ended(&self, _transcript: &Path) -> Option<i64> {
+        None
+    }
+
     /// Trusts the folder `dir` in the agent's own config, as answering its
     /// question there would (`trust_project_folders`), unless it trusts it
     /// already: whether it wrote that. Its config is found from the
@@ -443,8 +463,9 @@ pub struct Report {
     pub title: Option<Option<String>>,
     /// The context window of the model it's running, in tokens.
     pub context_window: Option<u64>,
-    /// A command it just left running in the background (Claude's shells).
-    pub shell: Option<Backgrounded>,
+    /// Commands it just left running in the background (its shells:
+    /// Claude's, codex's background terminals).
+    pub shells: Vec<Backgrounded>,
     /// Commands it left running that it says have ended, by its id for each.
     pub shells_ended: Vec<String>,
     /// A prompt it was given by itself: told that something it left running
@@ -471,9 +492,12 @@ pub struct ShellEnd {
     /// prompt of a turn of its own (which reports it): no hook will report
     /// it.
     pub told: bool,
+    /// Where its line starts in the transcript (bytes): one before a shell's
+    /// mark, but for its agent's `Adapter::shell_slack`, isn't its.
+    pub line: u64,
 }
 
-/// A command an agent left running in the background (`Report::shell`).
+/// A command an agent left running in the background (`Report::shells`).
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Backgrounded {
@@ -481,9 +505,14 @@ pub struct Backgrounded {
     pub id: String,
     /// What it does, as the agent put it.
     pub what: Option<String>,
+    /// When it started (ms), if the agent says; else `ran` before it was
+    /// reported.
+    pub started: Option<i64>,
     /// How long it had run before it was left running (ms).
     pub ran: i64,
-    /// How long the agent's transcript was as it was reported (bytes).
+    /// Where in the agent's transcript nothing of its end is written before
+    /// (bytes), but for its agent's `Adapter::shell_slack`: how long it was
+    /// as the command was reported, or where it was seen running.
     pub from: u64,
 }
 

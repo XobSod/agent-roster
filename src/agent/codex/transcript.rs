@@ -352,6 +352,23 @@ pub(super) fn last_limits(path: &std::path::Path) -> Option<crate::usage::Usage>
     })?)
 }
 
+/// When the rollout at `path`'s last turn ended, if it did rather than
+/// being interrupted (`turn_aborted`), failing (its end with an `error`) or
+/// going on still: codex writes `task_started` and `task_complete` around
+/// each, a review's too.
+pub(super) fn turn_ended(path: &std::path::Path) -> Option<i64> {
+    const ENDS: &[&str] = &["task_started", "task_complete", "turn_aborted"];
+    let entry = last_entry(path, br#""type":"t"#, |e| {
+        e["type"] == "event_msg"
+            && e["payload"]["type"]
+                .as_str()
+                .is_some_and(|t| ENDS.contains(&t))
+    })?;
+    (entry["payload"]["type"] == "task_complete" && entry["payload"]["error"].is_null())
+        .then(|| crate::util::iso_ms(entry["timestamp"].as_str()?))
+        .flatten()
+}
+
 /// The rollout at `path`'s last entry holding `needle` that `wanted` takes,
 /// looked for in its last MB only, each such line alone parsed: a turn that
 /// wrote more since leaves it unknown.
@@ -802,6 +819,55 @@ mod tests {
         lines.push(untimed.to_string());
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         assert_eq!(last_limits(&path).unwrap().windows[0].used, 17.0);
+    }
+
+    /// As 0.165 writes a review in the session's own rollout: its turn
+    /// started, the review thread's start passed on, the review's outcome,
+    /// and its turn complete.
+    #[test]
+    fn a_turn_ended_as_its_rollout_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        assert_eq!(turn_ended(&path), None);
+        let event = |kind: &str, at: &str| {
+            json!({"timestamp": at, "type": "event_msg", "payload": {"type": kind, "turn_id": "t"}})
+                .to_string()
+        };
+        let mut lines = turn("first", 5, 115, 400_000);
+        lines.push(event("task_complete", "2026-01-01T10:00:00.000Z"));
+        lines.push(event("task_started", "2026-01-01T10:00:01.000Z"));
+        lines.push(event("task_started", "2026-01-01T10:00:02.000Z"));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        // Going on: the turn before's end isn't this one's.
+        assert_eq!(turn_ended(&path), None);
+        lines.push(user(
+            "<user_action>review done</user_action>",
+            Some(&["unknown"]),
+        ));
+        lines.push(event("task_complete", "2026-01-01T10:00:03.000Z"));
+        lines.extend(
+            turn("", 0, 0, 400_000)
+                .into_iter()
+                .filter(|l| l.contains("token_count")),
+        );
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(
+            turn_ended(&path),
+            crate::util::iso_ms("2026-01-01T10:00:03.000Z")
+        );
+        // Interrupted, it didn't end.
+        lines.push(event("task_started", "2026-01-01T10:00:04.000Z"));
+        lines.push(event("turn_aborted", "2026-01-01T10:00:05.000Z"));
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(turn_ended(&path), None);
+        // Failed, it ended as if interrupted.
+        lines.push(event("task_started", "2026-01-01T10:00:06.000Z"));
+        let mut failed: Value =
+            serde_json::from_str(&event("task_complete", "2026-01-01T10:00:07.000Z")).unwrap();
+        failed["payload"]["error"] = json!({"message": "stream disconnected"});
+        lines.push(failed.to_string());
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(turn_ended(&path), None);
     }
 
     #[test]

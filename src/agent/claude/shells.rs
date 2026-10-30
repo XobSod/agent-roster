@@ -42,9 +42,10 @@ pub(super) fn read(payload: &Value, report: &mut Report) {
                     .and_then(Value::as_str)
                     .map(crate::agent::clean)
                     .filter(|d| !d.is_empty());
-                report.shell = Some(Backgrounded {
+                report.shells.push(Backgrounded {
                     id: id.to_string(),
                     what,
+                    started: None,
                     // Put there by you or a timeout, it ran a while first.
                     ran: (payload.get("duration_ms").and_then(Value::as_i64)).unwrap_or(0),
                     from: (payload.get(crate::report::TRANSCRIPT_SIZE))
@@ -83,11 +84,18 @@ pub(super) fn ended(transcript: &Path, from: u64) -> Option<(ShellEnds, u64)> {
         if n == 0 || line.last() != Some(&b'\n') {
             break;
         }
+        let start = read;
         read += n as u64;
         if finder.find(&line).is_some()
             && let Some((notice, at, told)) = notice_in(&line)
         {
-            ids.extend((task_ids(&notice).into_iter()).map(|id| ShellEnd { id, at, told }));
+            let end = |id| ShellEnd {
+                id,
+                at,
+                told,
+                line: start,
+            };
+            ids.extend(task_ids(&notice).into_iter().map(end));
         }
     }
     Some((ids, read))
@@ -187,21 +195,22 @@ mod tests {
         let shell = Backgrounded {
             id: "b1".into(),
             what: Some("Run the tests".into()),
+            started: None,
             ran: 4000,
             from: 1234,
         };
-        assert_eq!(report.shell, Some(shell));
+        assert_eq!(report.shells, [shell]);
         assert!(!report.woken);
         // A subagent's ends with its final reply.
-        assert_eq!(read_payload(left.clone(), Some("a1")).shell, None);
+        assert_eq!(read_payload(left.clone(), Some("a1")).shells, []);
         // As does one Claude ends with its own turn.
         let mut with_turn = left;
         with_turn["tool_response"]["backgroundEndsWithFinalResponse"] = json!(true);
-        assert_eq!(read_payload(with_turn, None).shell, None);
+        assert_eq!(read_payload(with_turn, None).shells, []);
         // A command that finished in the foreground left nothing running.
         let done = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
             "tool_input": {"command": "ls"}, "tool_response": {"stdout": "a"}});
-        assert_eq!(read_payload(done, None).shell, None);
+        assert_eq!(read_payload(done, None).shells, []);
     }
 
     #[test]
@@ -284,14 +293,17 @@ mod tests {
         let at = crate::util::iso_ms("2026-01-01T10:00:00.500Z");
         // Whether Claude was told it mid-turn, not only had it queued or
         // given as a prompt (which a turn of its own reports).
-        let end = |id: &str, at, told| ShellEnd {
+        // And where its line starts.
+        let start = |n: usize| (lines[..n].iter().map(|l| l.to_string().len() as u64 + 1)).sum();
+        let end = |id: &str, at, told, n| ShellEnd {
             id: id.into(),
             at,
             told,
+            line: start(n),
         };
-        assert_eq!(found[0], end("b1", at, false));
-        assert_eq!(found[1], end("b2", None, true));
-        assert_eq!(found[2], end("b3", None, false));
+        assert_eq!(found[0], end("b1", at, false, 2));
+        assert_eq!(found[1], end("b2", None, true, 5));
+        assert_eq!(found[2], end("b3", None, false, 6));
         assert_eq!(ids(found), ["b1", "b2", "b3"]);
         assert_eq!(read, whole);
         // From where it read up to: nothing new.

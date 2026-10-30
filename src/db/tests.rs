@@ -997,3 +997,38 @@ fn project_removal_refuses_live_sessions() {
     assert_eq!(db.remove_project(&project).unwrap().len(), 1);
     assert!(db.project("demo").unwrap().is_none());
 }
+
+/// As a sandbox keeps an agent's command from writing outside its folder
+/// (codex's, running `roster note`): the database there, but its folder not
+/// to be written, so no `-wal` beside it.
+#[test]
+fn a_database_that_cant_be_written_says_where_and_why_it_may_be() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("roster.db");
+    drop(Db::open(&path).unwrap());
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = |inside| {
+        let conn = Connection::open(&path).unwrap();
+        let e = Db::init(conn)
+            .err()
+            .expect("written in a folder that can't be");
+        format!("{:#}", super::unwritable(e, &path, inside))
+    };
+    let (inside, outside) = (refused(true), refused(false));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let place = path.display().to_string();
+    assert!(
+        inside.starts_with(&format!(
+            "can't write {place} from inside an agent, whose sandbox"
+        )),
+        "{inside}"
+    );
+    assert!(
+        outside.starts_with(&format!("can't write {place}: ")),
+        "{outside}"
+    );
+    // Any other error as it is.
+    let e = super::unwritable(anyhow::anyhow!("from a newer roster"), &path, true);
+    assert_eq!(e.to_string(), "from a newer roster");
+}

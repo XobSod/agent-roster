@@ -304,7 +304,7 @@ mod tests {
                 title: Some(None),
                 context_window: Some(1_000_000),
                 transcript_written: false,
-                shell: None,
+                shells: Vec::new(),
                 shells_ended: Vec::new(),
                 woken: false,
             }

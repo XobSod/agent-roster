@@ -29,7 +29,7 @@ pub struct Subagent {
 }
 
 /// A command a session's agent left running in the background (Claude's
-/// shells), as its agent said it did.
+/// shells, codex's background terminals), as its agent said it did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Shell {
     /// What it does, as the agent put it.
@@ -507,19 +507,12 @@ impl Session {
                 None => {}
             }
         }
-        // A command it left running in the background, and those it says
+        // Commands it left running in the background, and those it says
         // have ended (told so, or stopping one itself).
         for id in &report.shells_ended {
             self.shells.remove(id);
         }
-        if let Some(shell) = &report.shell {
-            let left = Shell {
-                what: shell.what.clone(),
-                started: e.at - shell.ran.max(0),
-                from: shell.from,
-            };
-            self.shells.insert(shell.id.clone(), left);
-        }
+        self.add_shells(&report.shells, e.at);
         match e.kind.as_str() {
             "subagent-start" => {
                 if let Some(id) = &report.subagent {
@@ -681,6 +674,25 @@ impl Session {
         true
     }
 
+    /// Commands it left running in the background, reported at `at`. One
+    /// it has already (codex's, polled in a later turn) keeps what's known
+    /// of it: what it does, when it started, where its end is looked for.
+    pub fn add_shells(&mut self, shells: &[crate::agent::Backgrounded], at: i64) {
+        for shell in shells {
+            let left = self
+                .shells
+                .entry(shell.id.clone())
+                .or_insert_with(|| Shell {
+                    what: None,
+                    started: shell.started.unwrap_or(at - shell.ran.max(0)),
+                    from: shell.from,
+                });
+            if left.what.is_none() {
+                left.what = shell.what.clone();
+            }
+        }
+    }
+
     /// Its agent's transcript read up to `upto` (bytes) with none of the
     /// ends of its shells `ids` in it. Whether that's further than known.
     pub fn shells_read_to(&mut self, upto: u64, ids: &[String]) -> bool {
@@ -755,6 +767,13 @@ impl Session {
         true
     }
 
+    /// Working, by what was last reported, but nothing reported for a while
+    /// and its screen as still: its turn over unreported, most likely.
+    pub fn stale(&self, now: i64) -> bool {
+        let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
+        self.needs_screen_check(now) && still
+    }
+
     /// Turns a stale "working" into idle once the screen has stopped changing.
     /// Doesn't mark it unread: for Claude this only happens after an interrupt,
     /// which the user did while attached. Subagents its agent's interrupt
@@ -762,8 +781,7 @@ impl Session {
     /// interrupt does, keep it working, its own turn over, as at the end of a
     /// turn they outlive.
     pub fn correct_stale_working(&mut self, now: i64, subagents_outlive: bool) -> bool {
-        let still = self.screen_changed_at.is_some_and(|t| now - t >= QUIET_MS);
-        if self.needs_screen_check(now) && still {
+        if self.stale(now) {
             // Interrupted (Esc), its subagents said nothing: gone with the
             // turn, or ones left running take theirs up in a turn of their own.
             if !subagents_outlive {
@@ -1339,12 +1357,13 @@ pub mod tests {
     fn shells_left_running_after_its_turn_keep_it_working_but_unread() {
         use crate::agent::Backgrounded;
         let left = |id: &str| Report {
-            shell: Some(Backgrounded {
+            shells: vec![Backgrounded {
                 id: id.into(),
                 what: Some("Run the tests".into()),
+                started: None,
                 ran: 0,
                 from: 500,
-            }),
+            }],
             ..Report::default()
         };
         let told = |ids: &[&str]| Report {
@@ -1457,9 +1476,54 @@ pub mod tests {
 
         // Put there after running a while: it started then.
         let mut ran = left("b8");
-        ran.shell.as_mut().unwrap().ran = 5_000;
+        ran.shells[0].ran = 5_000;
         s.apply(&event("working", 90_000), &ran);
         assert_eq!(s.shells["b8"].started, 85_000);
+    }
+
+    /// Codex's background terminals: when one started its agent says, and
+    /// one polled in a later turn is found running again, with less said.
+    #[test]
+    fn a_shell_found_again_keeps_what_is_known_of_it() {
+        use crate::agent::Backgrounded;
+        let mut s = session("a");
+        let dev = Backgrounded {
+            id: "1234".into(),
+            what: Some("npm run dev".into()),
+            started: Some(10_000),
+            ran: 0,
+            from: 500,
+        };
+        // Found hours on (an interrupt noticed late): from when it started.
+        s.add_shells(std::slice::from_ref(&dev), 9_000_000);
+        assert_eq!(s.shells["1234"].started, 10_000);
+        let polled = Backgrounded {
+            what: None,
+            started: Some(60_000),
+            from: 9_000,
+            ..dev
+        };
+        s.add_shells(&[polled], 9_500_000);
+        assert_eq!(
+            s.shells["1234"],
+            Shell {
+                what: Some("npm run dev".into()),
+                started: 10_000,
+                from: 500,
+            }
+        );
+        // What it does, once said, where nothing was.
+        s.shells.get_mut("1234").unwrap().what = None;
+        s.add_shells(
+            &[Backgrounded {
+                id: "1234".into(),
+                what: Some("npm run dev".into()),
+                ..Backgrounded::default()
+            }],
+            9_600_000,
+        );
+        assert_eq!(s.shells["1234"].what.as_deref(), Some("npm run dev"));
+        assert_eq!(s.shells["1234"].started, 10_000);
     }
 
     #[test]
@@ -1469,10 +1533,10 @@ pub mod tests {
         s.apply(
             &event("working", 1_000),
             &Report {
-                shell: Some(Backgrounded {
+                shells: vec![Backgrounded {
                     id: "b1".into(),
                     ..Backgrounded::default()
-                }),
+                }],
                 ..Report::default()
             },
         );

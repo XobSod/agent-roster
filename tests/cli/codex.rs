@@ -187,6 +187,176 @@ fn codex_reports_through_the_hooks_it_is_given() {
 }
 
 #[test]
+fn codex_is_followed_where_no_hook_of_its_says() {
+    let Some(t) = TestEnv::new("codex-unhooked") else {
+        return;
+    };
+    with_fake_codex(&t);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "c"]);
+    t.wait_for("idle, untouched", |t| {
+        t.session("c", false).unwrap()["state"] == "idle"
+    });
+    let id = t.session("c", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let state = |t: &TestEnv| {
+        let s = t.session("c", false).unwrap();
+        (s["state"].clone(), s["unread"].clone(), s["shells"].clone())
+    };
+    let rollout = t.path("rollout-2026-01-01T10-00-00-01a1.jsonl");
+    let line = |at: &str, kind: &str, payload: Value| {
+        json!({"timestamp": at, "type": kind, "payload": payload}).to_string() + "\n"
+    };
+    let append = |text: String| {
+        let mut all = fs::read_to_string(&rollout).unwrap_or_default();
+        all.push_str(&text);
+        fs::write(&rollout, all).unwrap();
+    };
+    let hook = |event: &str, more: Value| {
+        let mut payload = json!({"hook_event_name": event, "session_id": "01a1",
+            "transcript_path": rollout});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(more.as_object().unwrap().clone());
+        payload.to_string()
+    };
+
+    // A turn that leaves a terminal running: working on it, unread.
+    append(line(
+        "2026-01-01T10:00:00.000Z",
+        "session_meta",
+        json!({"id": "01a1", "history_mode": "paginated"}),
+    ));
+    append(line(
+        "2026-01-01T10:00:01.000Z",
+        "event_msg",
+        json!({"type": "task_started"}),
+    ));
+    t.report(
+        &id,
+        "prompt",
+        &hook("UserPromptSubmit", json!({"prompt": "run the server"})),
+    );
+    append(line(
+        "2026-01-01T10:00:02.000Z",
+        "response_item",
+        json!({"type": "function_call",
+        "call_id": "c1", "name": "exec_command", "arguments": "{\"cmd\": \"npm run dev\"}"}),
+    ));
+    append(line(
+        "2026-01-01T10:00:03.000Z",
+        "response_item",
+        json!({"type": "function_call_output",
+        "call_id": "c1", "output": "Wall time: 2.5 seconds\nProcess running with session ID 2001\nOutput:\nready\n"}),
+    ));
+    append(line(
+        "2026-01-01T10:00:04.000Z",
+        "event_msg",
+        json!({"type": "task_complete"}),
+    ));
+    t.report(&id, "idle", &hook("Stop", json!({})));
+    assert_eq!(state(&t), (json!("working"), json!(true), json!(1)));
+    // Its end, as codex records it: idle, and unread, what it ran yours to read.
+    t.ok(&["read", "c"]);
+    append(line(
+        "2026-01-01T10:00:05.000Z",
+        "event_msg",
+        json!({"type": "item_completed",
+        "item": {"type": "CommandExecution", "process_id": "2001", "status": "completed"},
+        "completed_at_ms": 1_767_261_610_000_i64}),
+    ));
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "c"]);
+
+    // Its question form waits for you.
+    t.report(
+        &id,
+        "prompt",
+        &hook("UserPromptSubmit", json!({"prompt": "plan it"})),
+    );
+    t.report(
+        &id,
+        "needs-input",
+        &hook("PreToolUse", json!({"tool_name": "request_user_input"})),
+    );
+    assert_eq!(state(&t).0, json!("needs-input"));
+    t.report(
+        &id,
+        "working",
+        &hook("PostToolUse", json!({"tool_name": "request_user_input"})),
+    );
+    t.report(&id, "idle", &hook("Stop", json!({})));
+    t.ok(&["read", "c"]);
+
+    // A /compact you run is work, though no turn: waiting again after.
+    t.report(
+        &id,
+        "compacting",
+        &hook("PreCompact", json!({"trigger": "manual"})),
+    );
+    assert_eq!(state(&t).0, json!("working"));
+    t.report(
+        &id,
+        "compacted",
+        &hook("PostCompact", json!({"trigger": "manual"})),
+    );
+    assert_eq!(state(&t), (json!("idle"), json!(false), json!(0)));
+}
+
+#[test]
+fn a_turn_no_hook_ends_is_read_from_the_rollout() {
+    let Some(t) = TestEnv::new("codex-unreported") else {
+        return;
+    };
+    with_fake_codex(&t);
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "r"]);
+    t.wait_for("idle, untouched", |t| {
+        t.session("r", false).unwrap()["state"] == "idle"
+    });
+    let id = t.session("r", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rollout = t.path("rollout-2026-01-01T10-00-00-01a2.jsonl");
+    let prompt = json!({"hook_event_name": "UserPromptSubmit", "session_id": "01a2",
+        "transcript_path": rollout, "prompt": "/review"})
+    .to_string();
+    // As Codex dates its lines: in UTC, a moment from now.
+    let soon = || {
+        let out = Command::new("date")
+            .args(["-u", "-d", "now + 2 sec", "+%Y-%m-%dT%H:%M:%S.000Z"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let event =
+        |kind: &str| json!({"timestamp": soon(), "type": "event_msg", "payload": {"type": kind}});
+    let turn = |end: &Value| format!("{}\n{end}\n", event("task_started"));
+    // A review's end, which no hook reports: once its screen is still,
+    // idle, and unread, as Codex wrote that its turn completed.
+    t.report(&id, "prompt", &prompt);
+    fs::write(&rollout, turn(&event("task_complete"))).unwrap();
+    t.wait_for("its end", |t| {
+        t.session("r", false).unwrap()["state"] == "idle"
+    });
+    assert_eq!(t.session("r", false).unwrap()["unread"], true);
+    // Failed, it ends as if cut short: not unread.
+    t.ok(&["read", "r"]);
+    t.report(&id, "prompt", &prompt);
+    let mut failed = event("task_complete");
+    failed["payload"]["error"] = json!({"message": "stream disconnected"});
+    fs::write(&rollout, turn(&failed)).unwrap();
+    t.wait_for("its end", |t| {
+        t.session("r", false).unwrap()["state"] == "idle"
+    });
+    assert_eq!(t.session("r", false).unwrap()["unread"], false);
+}
+
+#[test]
 fn a_first_prompt_longer_than_a_tmux_command_line_reaches_codex() {
     let Some(t) = TestEnv::new("codex-long") else {
         return;

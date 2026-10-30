@@ -9,6 +9,7 @@
 
 pub mod conversations;
 mod limits;
+mod shells;
 mod subagents;
 mod tokens;
 mod transcript;
@@ -34,18 +35,28 @@ const EFFORTS: &[&str] = &[
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
-/// The hook events roster listens to, and the kind of state each one is.
-/// `Interrupt` and `SessionEnd` are left alone: an interrupted turn, which
-/// reports no `Stop`, ends on the screen as Claude's does, and a closing
-/// session leaves its pane, which roster notices.
-const HOOKS: &[(&str, &str)] = &[
-    ("SessionStart", "session"),
-    ("UserPromptSubmit", "prompt"),
-    ("PostToolUse", "working"),
-    ("PermissionRequest", "needs-input"),
-    ("Stop", "idle"),
-    ("SubagentStart", "subagent-start"),
-    ("SubagentStop", "subagent-stop"),
+/// The hook events roster listens to, which of each (its matcher, if only
+/// some), and the kind of state each one is. `Interrupt` and `SessionEnd`
+/// are left alone: an interrupted turn, which reports no `Stop`, ends on the
+/// screen as Claude's does, and a closing session leaves its pane, which
+/// roster notices.
+///
+/// Codex's question form (`request_user_input`, in Plan mode) waits for you
+/// with no hook of its own: the tool's call starting is its question. Its
+/// other question tool, `request_user_input_async`, waits for nothing (the
+/// question ends the turn). As Claude's, a compaction is reported only when
+/// you ask for one: codex's own, mid-turn, isn't a turn's end.
+const HOOKS: &[(&str, Option<&str>, &str)] = &[
+    ("SessionStart", None, "session"),
+    ("UserPromptSubmit", None, "prompt"),
+    ("PreToolUse", Some("^request_user_input$"), "needs-input"),
+    ("PostToolUse", None, "working"),
+    ("PermissionRequest", None, "needs-input"),
+    ("PreCompact", Some("manual"), "compacting"),
+    ("PostCompact", Some("manual"), "compacted"),
+    ("Stop", None, "idle"),
+    ("SubagentStart", None, "subagent-start"),
+    ("SubagentStop", None, "subagent-stop"),
 ];
 
 /// What a one-off run turns off, as config overrides: every feature that
@@ -214,13 +225,56 @@ impl Adapter for Codex {
     /// A hook's payload, as Claude's are (`super::hook_report`). Codex's
     /// don't say the effort, which its rollout, named in them, does (the
     /// session's own: a subagent's names none).
+    ///
+    /// A review (`/review`) runs in a thread of its own, whose hooks come
+    /// with the session's id but the review's rollout (named for another
+    /// thread) and model: the session takes neither, nor the review's
+    /// instructions for its last prompt. Its work is the session's turn all
+    /// the same, which ends with no `Stop` (`turn_ended`).
     fn report(&self, payload: &Value) -> Report {
         let report = super::hook_report(payload);
-        let effort = report
-            .transcript_path
-            .as_deref()
-            .and_then(|path| transcript::last_effort(std::path::Path::new(path)));
-        Report { effort, ..report }
+        if let (Some(id), Some(path)) = (&report.conversation_id, &report.transcript_path)
+            && !rollout_of(path, id)
+        {
+            return Report {
+                transcript_path: None,
+                transcript_written: false,
+                model: None,
+                ..report
+            };
+        }
+        let path = report.transcript_path.as_deref().map(std::path::Path::new);
+        let effort = path.and_then(transcript::last_effort);
+        // Its turn over, what it left running: no hook says. Its rollout as
+        // far as it went as the hook ran, not a later turn's, read late.
+        let shells = match path {
+            Some(path) if payload["hook_event_name"] == "Stop" => {
+                let upto = payload[crate::report::TRANSCRIPT_SIZE].as_u64();
+                shells::left(path, upto)
+            }
+            _ => Vec::new(),
+        };
+        Report {
+            effort,
+            shells,
+            ..report
+        }
+    }
+
+    fn shells_left(&self, transcript: &std::path::Path) -> Vec<super::Backgrounded> {
+        shells::left(transcript, None)
+    }
+
+    fn shells_ended(
+        &self,
+        transcript: &std::path::Path,
+        from: u64,
+    ) -> Option<(super::ShellEnds, u64)> {
+        shells::ended(transcript, from)
+    }
+
+    fn turn_ended(&self, transcript: &std::path::Path) -> Option<i64> {
+        transcript::turn_ended(transcript)
     }
 
     fn names_its_task(&self) -> bool {
@@ -309,17 +363,32 @@ impl Adapter for Codex {
 /// every hook, the project's and your own too.
 fn hooks(exe: &str) -> Vec<String> {
     let mut argv = Vec::new();
-    for (event, kind) in HOOKS {
+    for (event, matcher, kind) in HOOKS {
         let command = format!("{} report {kind}", sh_quote(exe));
+        let matcher = matcher.map_or_else(String::new, |m| format!("matcher={},", toml_str(m)));
         argv.extend([
             "-c".to_string(),
             format!(
-                r#"hooks.{event}=[{{hooks=[{{type="command",command={}}}]}}]"#,
+                r#"hooks.{event}=[{{{matcher}hooks=[{{type="command",command={}}}]}}]"#,
                 toml_str(&command)
             ),
         ]);
     }
     argv
+}
+
+/// Whether the rollout at `path` is thread `id`'s, by its name:
+/// `rollout-<time>-<thread>.jsonl`, or `-<thread>_<rollout>.jsonl` for one
+/// codex wrote the thread over into (an earlier prompt of it edited).
+fn rollout_of(path: &str, id: &str) -> bool {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str());
+    let ids = name
+        .and_then(|n| n.strip_suffix(".jsonl"))
+        .unwrap_or_default();
+    let thread = ids.split_once('_').map_or(ids, |(thread, _)| thread);
+    thread.ends_with(&format!("-{id}"))
 }
 
 /// A string as codex reads it in a `-c` value: quoted, with the few escapes
@@ -410,6 +479,12 @@ mod tests {
         assert!(argv.contains(
             r#"hooks.Stop=[{hooks=[{type="command",command="'/roster with spaces' report idle"}]}]"#
         ));
+        // Its question form's call, and only a compaction you asked for.
+        assert!(argv.contains(
+            r#"hooks.PreToolUse=[{matcher="^request_user_input$",hooks=[{type="command",command="'/roster with spaces' report needs-input"}]}]"#
+        ));
+        assert!(argv.contains(r#"hooks.PreCompact=[{matcher="manual",hooks="#));
+        assert!(argv.contains(r#"hooks.PostCompact=[{matcher="manual",hooks="#));
         // Its own server, so its tools get the session's environment; and its
         // review of hooks isn't skipped (for every hook, that would be).
         assert!(argv.contains("--no-daemon"), "{argv}");
@@ -429,9 +504,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         let argv = hooks(&exe.to_string_lossy());
-        for ((event, kind), pair) in HOOKS.iter().zip(argv.chunks(2)) {
+        for ((event, matcher, kind), pair) in HOOKS.iter().zip(argv.chunks(2)) {
             let value = pair[1].strip_prefix(&format!("hooks.{event}=")).unwrap();
             let parsed: toml::Value = toml::from_str(&format!("v = {value}")).unwrap();
+            assert_eq!(
+                parsed["v"][0].get("matcher").and_then(|m| m.as_str()),
+                *matcher
+            );
             let command = parsed["v"][0]["hooks"][0]["command"].as_str().unwrap();
             let out = std::process::Command::new("sh")
                 .args(["-c", command])
@@ -561,6 +640,49 @@ mod tests {
         // started all the same.
         let payload = r#"{"session_id":"01a1","agent_id":"019a","agent_type":"worker"}"#;
         assert!(crate::agent::read_report("codex", Some(payload)).subagents_start_said);
+        // A review's, from its own thread: the session's conversation, but
+        // the review's rollout and model, of which the session takes
+        // neither.
+        let report = Codex.report(&serde_json::json!({
+            "session_id": "01a1",
+            "transcript_path": "/s/rollout-2026-01-01T10-00-00-01a2.jsonl",
+            "model": "gpt-6-luna",
+            "permission_mode": "bypassPermissions",
+            "prompt": "Review the current code changes",
+        }));
+        assert_eq!(
+            report,
+            Report {
+                conversation_id: Some("01a1".into()),
+                ..Report::default()
+            }
+        );
+        // The session's own, written over into a rollout of its own once
+        // an earlier prompt is edited: taken.
+        let edited = "/s/rollout-2026-01-01T10-00-00-01a1_01b2.jsonl";
+        let report = Codex.report(&serde_json::json!({
+            "session_id": "01a1", "transcript_path": edited, "model": "gpt-6-luna"}));
+        assert_eq!(report.transcript_path.as_deref(), Some(edited));
+        assert_eq!(report.model.as_deref(), Some("gpt-6-luna"));
+        // Its turn over, what it left running, from its rollout: no other
+        // hook's payload says.
+        std::fs::write(
+            &rollout,
+            [
+                r#"{"timestamp":"2026-01-01T10:00:00.000Z","type":"session_meta","payload":{"id":"01a1","history_mode":"paginated"}}"#,
+                r#"{"timestamp":"2026-01-01T10:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-01-01T10:00:02.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Wall time: 1.0 seconds\nProcess running with session ID 2001\nOutput:\n"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let hook = |event: &str| {
+            Codex.report(&serde_json::json!({"hook_event_name": event, "session_id": "01a1", "transcript_path": rollout}))
+        };
+        let ids = |report: Report| report.shells.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        assert_eq!(ids(hook("Stop")), ["2001"]);
+        assert!(ids(hook("PostToolUse")).is_empty());
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }

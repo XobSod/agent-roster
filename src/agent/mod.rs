@@ -13,10 +13,11 @@
 //! environment). The kinds:
 //!
 //! - `session`: it (re)started or cleared its conversation, and waits for a
-//!   prompt. Its payload names the transcript: until then, a first prompt
-//!   isn't typed in (the agent may still be asking something else, such as
-//!   whether to trust the directory). An agent handed its first prompt on its
-//!   command line instead (`Adapter::takes_prompt`) has nothing typed in.
+//!   prompt. Its payload names the transcript. Until it's reported in the run
+//!   roster started, a first prompt isn't typed in (the agent may still be
+//!   asking something else, such as whether to trust the directory). An agent
+//!   handed its first prompt on its command line instead
+//!   (`Adapter::takes_prompt`) has nothing typed in.
 //! - `prompt`: you gave it a task; it's working.
 //! - `working`: it's still at it (after a tool, or a question answered).
 //! - `needs-input`: it's waiting for you in the middle of a turn.

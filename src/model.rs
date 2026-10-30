@@ -164,6 +164,10 @@ pub struct Session {
     pub state_since: Option<i64>,
     /// A first prompt to type into the agent once it's ready.
     pub pending_prompt: Option<String>,
+    /// When roster last started its agent, and when its agent last said it
+    /// waits for a prompt on its conversation (a `session` report), in ms.
+    pub started_at: Option<i64>,
+    pub session_at: Option<i64>,
     /// The model and effort the agent runs with: what it reported, else
     /// what its start asked for (`Roster::start`).
     pub running_model: Option<String>,
@@ -241,6 +245,8 @@ impl Session {
             effort: None,
             state_since: Some(now),
             pending_prompt: None,
+            started_at: None,
+            session_at: None,
             running_model: None,
             running_effort: None,
             title_override: None,
@@ -378,6 +384,14 @@ impl Session {
     /// The title, else the session's name.
     pub fn display_title(&self) -> &str {
         self.title().unwrap_or(&self.name)
+    }
+
+    /// Whether its agent has said it waits for a prompt since roster last
+    /// started it: what it said in a run before says nothing of this one,
+    /// which may be at a screen it shows first.
+    pub fn waits_since_started(&self) -> bool {
+        let started = self.started_at.unwrap_or(i64::MIN);
+        self.session_at.is_some_and(|at| at >= started)
     }
 
     /// Why it can't be started giving its kept first prompt again
@@ -583,6 +597,7 @@ impl Session {
                 self.shells.clear();
                 self.awaiting = false;
                 self.set_state(State::Idle, e.at);
+                self.session_at = Some(e.at);
             }
             _ => return,
         }
@@ -908,6 +923,19 @@ pub mod tests {
         assert_eq!((s.state, s.unread), (State::Idle, false));
         assert_eq!(s.conversation_id.as_deref(), Some("c-1"));
         assert_eq!(s.transcript_path.as_deref(), Some("/t/c-1.jsonl"));
+    }
+
+    #[test]
+    fn only_a_session_reported_since_its_start_says_it_waits() {
+        let mut s = session("a");
+        assert!(!s.waits_since_started());
+        apply(&mut s, "session", 10);
+        assert!(s.waits_since_started());
+        // Started again: what its last run said isn't this one's.
+        s.started_at = Some(20);
+        assert!(!s.waits_since_started());
+        apply(&mut s, "session", 20);
+        assert!(s.waits_since_started());
     }
 
     #[test]

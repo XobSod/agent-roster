@@ -171,13 +171,14 @@ impl Roster {
     }
 
     /// Whether an agent is waiting for its first prompt: for one with hooks,
-    /// after it has reported its session, which names its transcript (a new
-    /// conversation has none before that); for others, idle after starting up.
-    /// (An agent that takes its first prompt on its command line never waits.)
+    /// after it has reported its session since it was last started (idle by
+    /// its screen alone, it may be at a screen it shows first, which would
+    /// take the prompt); for others, idle after starting up. (An agent that
+    /// takes its first prompt on its command line never waits.)
     pub(super) fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
         s.state == State::Idle
             && if agent::adapter(&s.agent).reports() {
-                s.transcript_path.is_some()
+                s.waits_since_started()
             } else {
                 s.baseline_at.is_some_and(|b| now > b)
             }

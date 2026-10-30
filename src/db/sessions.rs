@@ -8,7 +8,7 @@ pub(super) const SESSION_COLUMNS: &str =
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
     s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting, s.shells,
-    s.note, s.note_pin, s.note_at";
+    s.started_at, s.session_at, s.note, s.note_pin, s.note_at";
 
 impl Db {
     /// The names of a project's live sessions.
@@ -127,6 +127,8 @@ impl Db {
             effort,
             state_since,
             pending_prompt,
+            started_at,
+            session_at,
             running_model,
             running_effort,
             title_override,
@@ -175,6 +177,8 @@ impl Db {
             effort,
             state_since,
             pending_prompt,
+            started_at,
+            session_at,
             running_model,
             running_effort,
             title_override,
@@ -398,6 +402,8 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              effort = :effort,
              state_since = :state_since,
              pending_prompt = :pending_prompt,
+             started_at = :started_at,
+             session_at = :session_at,
              running_model = :running_model,
              running_effort = :running_effort,
              title_override = :title_override,
@@ -428,6 +434,8 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":effort": s.effort,
             ":state_since": s.state_since,
             ":pending_prompt": s.pending_prompt,
+            ":started_at": s.started_at,
+            ":session_at": s.session_at,
             ":running_model": s.running_model,
             ":running_effort": s.running_effort,
             ":title_override": s.title_override,
@@ -477,6 +485,8 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         effort: r.get("effort")?,
         state_since: r.get("state_since")?,
         pending_prompt: r.get("pending_prompt")?,
+        started_at: r.get("started_at")?,
+        session_at: r.get("session_at")?,
         running_model: r.get("running_model")?,
         running_effort: r.get("running_effort")?,
         title_override: r.get("title_override")?,

@@ -222,6 +222,8 @@ impl Roster {
         if let (Some(file), Some(text)) = (&prompt, &launch.prompt) {
             self.write_prompt(file, text)?;
         }
+        // Before its agent runs, so what it reports of this run comes after.
+        let now = now_ms();
         let started = if has_pane {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)
         } else {
@@ -254,7 +256,6 @@ impl Roster {
         {
             self.notices.push(config_notice(&e));
         }
-        let now = now_ms();
         if launch.conversation_id.is_some() {
             s.conversation_id = launch.conversation_id;
         }
@@ -274,6 +275,7 @@ impl Roster {
             s.given_prompt = s.pending_prompt.take().or(s.given_prompt.take());
         }
         s.set_state(State::Working, now);
+        s.started_at = Some(now);
         s.unread = false;
         s.exit_status = None;
         s.screen_hash = None;

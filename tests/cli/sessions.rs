@@ -507,6 +507,74 @@ fn first_prompts_are_typed_in_once_the_agent_is_ready() {
 }
 
 #[test]
+fn a_first_prompt_waits_for_a_restarted_agent_to_report_its_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(t) = TestEnv::new("promptrestart") else {
+        return;
+    };
+    // Claude's stand-in: its first run exits at once; the next shows a
+    // screen of its own (a question about its setup, say), reporting nothing.
+    let agent = t.path("setup-claude");
+    fs::write(
+        &agent,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{ran}' ]; then touch '{ran}'; exit 1; fi\necho 'Pick a theme'\nexec cat\n",
+            ran = t.path("ran").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        t.config_dir().join("config.toml"),
+        format!(
+            "shell = \"/bin/sh\"\n[agents.claude]\ncommand = \"{}\"\n",
+            agent.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    let out = t.ok(&["new", "demo", "--name", "one", "--prompt", "run my task"]);
+    assert!(
+        out.contains("The agent stopped before it was ready"),
+        "{out}"
+    );
+    let id = t.session("one", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Its run reported its session, naming its transcript, before it exited
+    // (said here once it's gone, which comes to the same).
+    let payload = format!(
+        r#"{{"session_id":"conv-1","transcript_path":"{}"}}"#,
+        t.path("conv-1.jsonl").display()
+    );
+    t.report(&id, "session", &payload);
+    let s = t.session("one", false).unwrap();
+    assert_eq!(
+        (&s["state"], &s["pending_prompt"]),
+        (&json!("stopped"), &json!(true))
+    );
+    assert!(s["transcript_path"].is_string(), "{s}");
+
+    // Started again, its screen still turns it idle, but its first prompt
+    // waits for this run to report its session.
+    t.ok(&["start", "one"]);
+    t.wait_for("idle", |t| {
+        t.session("one", false).unwrap()["state"] == "idle"
+    });
+    assert_eq!(t.session("one", false).unwrap()["pending_prompt"], true);
+    let screen = t.ok(&["show", "one"]);
+    assert!(
+        screen.contains("Pick a theme") && !screen.contains("run my task"),
+        "typed before the agent was ready: {screen}"
+    );
+    t.report(&id, "session", &payload);
+    t.wait_for("the prompt in the agent", |t| {
+        t.ok(&["show", "one"]).contains("run my task")
+    });
+}
+
+#[test]
 fn projects_and_sessions_can_be_edited() {
     let Some(t) = TestEnv::new("edit") else {
         return;

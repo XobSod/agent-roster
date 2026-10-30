@@ -343,6 +343,8 @@ fn a_save_of_what_changed_writes_every_column_save_session_does() {
     after.effort = Some("e".into());
     after.state_since = Some(5);
     after.pending_prompt = Some("p".into());
+    after.started_at = Some(12);
+    after.session_at = Some(13);
     after.running_model = Some("rm".into());
     after.running_effort = Some("re".into());
     after.title_override = Some("to".into());

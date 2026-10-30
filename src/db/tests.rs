@@ -265,6 +265,28 @@ fn free_room_left_behind_goes_back_to_the_disk_at_the_next_start() {
 }
 
 #[test]
+fn rosters_making_the_database_at_once_both_open_it() {
+    // Over and over, as they collide only now and then.
+    for _ in 0..30 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.db");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let opening: Vec<_> = (0..2)
+            .map(|_| {
+                let (path, start) = (path.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    Db::open(&path).map(drop)
+                })
+            })
+            .collect();
+        for open in opening {
+            open.join().unwrap().unwrap();
+        }
+    }
+}
+
+#[test]
 fn a_calls_id_is_kept_as_the_same_hash_everywhere() {
     // FNV-1a's, as any implementation of it gives.
     assert_eq!(call_key(""), 0xcbf2_9ce4_8422_2325_u64 as i64);

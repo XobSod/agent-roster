@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{
@@ -32,6 +32,9 @@ use self::{notes::*, projects::*, schema::*, sessions::*, spent::*};
 /// free pages back.
 const AUTO_VACUUM_INCREMENTAL: i64 = 2;
 
+/// How long the database another roster is writing is waited for.
+const BUSY: Duration = Duration::from_secs(5);
+
 pub struct Db {
     conn: Connection,
 }
@@ -49,8 +52,8 @@ impl Db {
     }
 
     fn init(mut conn: Connection) -> Result<Db> {
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.busy_timeout(BUSY)?;
+        wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         // In one transaction, with the version read inside it: two rosters
         // starting at once don't both migrate, and an interrupted migration
@@ -185,6 +188,25 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
         [key, value],
     )?;
     Ok(())
+}
+
+/// Puts the database in WAL mode, which it keeps from then on. For a new
+/// one that asks for the write lock while holding a read lock, which SQLite
+/// doesn't wait for (two doing it at once would wait on each other for
+/// ever): busy, as another roster makes it at the same moment, it's tried
+/// again.
+fn wal(conn: &Connection) -> Result<()> {
+    let since = Instant::now();
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy && since.elapsed() < BUSY =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            done => return Ok(done?),
+        }
+    }
 }
 
 /// A constraint violation (a name taken) as `message`; other errors as they are.

@@ -307,7 +307,8 @@ impl Roster {
                                 let transcript = s.transcript_path.clone();
                                 let transcript = transcript.as_deref().map(Path::new);
                                 // What the turn left running, which an end no
-                                // hook reports (an interrupt) doesn't say.
+                                // hook reports (a review's, a failed turn's)
+                                // doesn't say.
                                 if s.stale(now)
                                     && let Some(path) = transcript
                                 {

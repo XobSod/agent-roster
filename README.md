@@ -487,21 +487,20 @@ is forked with `--fork`.
 Roster starts [Codex](https://github.com/openai/codex) with hooks of its own, given to
 each run as `-c hooks.<Event>=[…]` arguments, for its sessions only; your `~/.codex`
 config and hooks stay as they are. Codex runs a hook only once it's trusted, and asks
-you to review new or changed ones as it starts; roster's change when roster moves,
-since the command is part of what's trusted, and when roster listens to more of them.
-So roster trusts its own as a session starts, as answering that review would: by the
-hash Codex's server gives for each (`codex app-server`, about a third of a second; given
-up after 10 s), given to that run alone as `-c hooks.state=…`, your `config.toml` left
-as it is. Only roster's own: a project's or your own hooks Codex still asks about.
+you to review new or changed ones as it starts; roster's change when roster moves, since
+the command is part of what's trusted, and when roster listens to more of them. So
+roster trusts its own as a session starts, as answering that review would: by the hash
+Codex's server gives for each (`codex app-server`, about a third of a second; given up
+after 10 s), given to that run alone as `-c hooks.state=…`, your `config.toml` left as
+it is. Only roster's own: a project's or your own hooks Codex still asks about.
 `trust_roster_hooks = false` under `[agents.codex]` leaves roster's to you too: trust
-them, or roster can't follow it.
-They report its state: the tools it calls say
-working; a question it asks (`PermissionRequest`, or its question form in Plan mode)
-needs input; a `/compact` you run is working till it's done; the end of a turn is idle.
-A `/review` runs in a thread of Codex's own, whose end no hook reports: roster reads it
-from the session's conversation once Codex's screen is still. Each run also gets `--no-daemon`, so its tools
-run in the session's environment, your env files' included, rather than a shared
-Codex server's.
+them, or roster can't follow it. They report its state: the tools it calls say working;
+a question it asks (`PermissionRequest`, or its question form in Plan mode) needs input;
+a `/compact` you run is working till it's done; the end of a turn is idle, and one you
+cut short (Esc, at a question too) idle, not unread. A `/review` runs in a thread of
+Codex's own, whose end no hook reports: roster reads it from the session's conversation
+once Codex's screen is still. Each run also gets `--no-daemon`, so its tools run in the
+session's environment, your env files' included, rather than a shared Codex server's.
 
 Codex says nothing through its hooks before its first turn, so a session's first
 prompt goes on its command line, as Codex's own, instead of being typed in: whatever

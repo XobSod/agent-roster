@@ -37,10 +37,10 @@ const EFFORTS: &[&str] = &[
 ];
 
 /// The hook events roster listens to, which of each (its matcher, if only
-/// some), and the kind of state each one is. `Interrupt` and `SessionEnd`
-/// are left alone: an interrupted turn, which reports no `Stop`, ends on the
-/// screen as Claude's does, and a closing session leaves its pane, which
-/// roster notices.
+/// some), and the kind of state each one is. An interrupted turn reports no
+/// `Stop` but `Interrupt`, at a question too, where its screen still says
+/// nothing. `SessionEnd` is left alone: a closing session leaves its pane,
+/// which roster notices.
 ///
 /// Codex's question form (`request_user_input`, in Plan mode) waits for you
 /// with no hook of its own: the tool's call starting is its question. Its
@@ -56,6 +56,7 @@ const HOOKS: &[(&str, Option<&str>, &str)] = &[
     ("PreCompact", Some("manual"), "compacting"),
     ("PostCompact", Some("manual"), "compacted"),
     ("Stop", None, "idle"),
+    ("Interrupt", None, "interrupted"),
     ("SubagentStart", None, "subagent-start"),
     ("SubagentStop", None, "subagent-stop"),
 ];
@@ -246,10 +247,15 @@ impl Adapter for Codex {
         }
         let path = report.transcript_path.as_deref().map(std::path::Path::new);
         let effort = path.and_then(transcript::last_effort);
-        // Its turn over, what it left running: no hook says. Its rollout as
-        // far as it went as the hook ran, not a later turn's, read late.
+        // Its turn over, or cut short, what it left running: no hook says.
+        // Its rollout as far as it went as the hook ran, not a later turn's,
+        // read late.
+        let ended = matches!(
+            payload["hook_event_name"].as_str(),
+            Some("Stop" | "Interrupt")
+        );
         let shells = match path {
-            Some(path) if payload["hook_event_name"] == "Stop" => {
+            Some(path) if ended => {
                 let upto = payload[crate::report::TRANSCRIPT_SIZE].as_u64();
                 shells::left(path, upto)
             }
@@ -376,10 +382,17 @@ fn hooks(exe: &str) -> Vec<String> {
     for (event, matcher, kind) in HOOKS {
         let command = format!("{} report {kind}", sh_quote(exe));
         let matcher = matcher.map_or_else(String::new, |m| format!("matcher={},", toml_str(m)));
+        // Codex gives an Interrupt hook 1 s unless told longer, 3 at most;
+        // a report may wait on the database longer than 1.
+        let timeout = if *event == "Interrupt" {
+            ",timeout=3"
+        } else {
+            ""
+        };
         argv.extend([
             "-c".to_string(),
             format!(
-                r#"hooks.{event}=[{{{matcher}hooks=[{{type="command",command={}}}]}}]"#,
+                r#"hooks.{event}=[{{{matcher}hooks=[{{type="command",command={}{timeout}}}]}}]"#,
                 toml_str(&command)
             ),
         ]);
@@ -494,6 +507,10 @@ mod tests {
             r#"hooks.PreToolUse=[{matcher="^request_user_input$",hooks=[{type="command",command="'/roster with spaces' report needs-input"}]}]"#
         ));
         assert!(argv.contains(r#"hooks.PreCompact=[{matcher="manual",hooks="#));
+        // An interrupt's given as long as codex lets it.
+        assert!(argv.contains(
+            r#"hooks.Interrupt=[{hooks=[{type="command",command="'/roster with spaces' report interrupted",timeout=3}]}]"#
+        ));
         assert!(argv.contains(r#"hooks.PostCompact=[{matcher="manual",hooks="#));
         // Its own server, so its tools get the session's environment; and its
         // review of hooks isn't skipped (for every hook, that would be).

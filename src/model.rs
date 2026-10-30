@@ -586,6 +586,21 @@ impl Session {
                 }
                 self.unread = true;
             }
+            // Its turn cut short, as codex reports it (Claude's Esc fires
+            // nothing): idle, and not unread, as you did it yourself, a
+            // question it asked included; what it left running goes on, its
+            // subagents finishing theirs, and it works on them.
+            "interrupted" => {
+                if report.subagent.is_some() {
+                    return;
+                }
+                if self.subagents.is_empty() && self.shells.is_empty() {
+                    self.set_state(State::Idle, e.at);
+                } else {
+                    self.set_state(State::Working, e.at);
+                    self.awaiting = true;
+                }
+            }
             // A compaction you asked for: work, though not a turn, while it
             // runs, waiting as it was once done; what else it was at (a
             // question, subagents left running) stays.
@@ -1551,6 +1566,26 @@ pub mod tests {
         );
         assert!(s.subagents.is_empty());
         assert!(!s.needs_screen_check(1_000 + 2 * QUIET_MS));
+    }
+
+    #[test]
+    fn an_interrupt_reported_ends_its_turn_and_its_question_but_not_what_it_left() {
+        let mut s = session("a");
+        s.state = State::Idle;
+        // At its question (Esc on it): idle, not unread anew.
+        apply(&mut s, "prompt", 1_000);
+        apply(&mut s, "needs-input", 1_100);
+        s.unread = false;
+        apply(&mut s, "interrupted", 1_200);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+        // With a subagent at work: working on it.
+        apply(&mut s, "prompt", 2_000);
+        s.subagents.insert("f1".into(), Subagent::default());
+        apply(&mut s, "interrupted", 2_100);
+        assert_eq!(
+            (s.state, s.awaiting, s.unread),
+            (State::Working, true, false)
+        );
     }
 
     #[test]

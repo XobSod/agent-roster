@@ -290,6 +290,43 @@ fn codex_is_followed_where_no_hook_of_its_says() {
     );
     t.report(&id, "idle", &hook("Stop", json!({})));
     t.ok(&["read", "c"]);
+    // Dismissed (Esc), it's an interrupt: idle, you did it.
+    let plan = hook("UserPromptSubmit", json!({"prompt": "plan more"}));
+    t.report(&id, "prompt", &plan);
+    let question = hook("PreToolUse", json!({"tool_name": "request_user_input"}));
+    t.report(&id, "needs-input", &question);
+    t.ok(&["read", "c"]);
+    t.report(&id, "interrupted", &hook("Interrupt", json!({})));
+    assert_eq!(state(&t), (json!("idle"), json!(false), json!(0)));
+    // Cut short with a terminal left running: it works on, not unread.
+    t.report(&id, "prompt", &plan);
+    append(line(
+        "2026-01-01T10:01:00.000Z",
+        "event_msg",
+        json!({"type": "task_started"}),
+    ));
+    append(line(
+        "2026-01-01T10:01:01.000Z",
+        "response_item",
+        json!({"type": "function_call_output",
+        "call_id": "c9", "output": "Wall time: 1.0 seconds\nProcess running with session ID 2009\nOutput:\n"}),
+    ));
+    append(line(
+        "2026-01-01T10:01:02.000Z",
+        "event_msg",
+        json!({"type": "turn_aborted"}),
+    ));
+    t.report(&id, "interrupted", &hook("Interrupt", json!({})));
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    append(line(
+        "2026-01-01T10:01:03.000Z",
+        "event_msg",
+        json!({"type": "item_completed",
+        "item": {"type": "CommandExecution", "id": "c9", "process_id": "2009"},
+        "completed_at_ms": 1_767_261_670_000_i64}),
+    ));
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "c"]);
 
     // A /compact you run is work, though no turn: waiting again after.
     t.report(

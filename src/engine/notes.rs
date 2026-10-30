@@ -66,6 +66,60 @@ impl Roster {
         self.db.note(whose)
     }
 
+    /// The versions kept of a session's or a project's note, the latest
+    /// first.
+    pub fn note_versions(&self, whose: &Whose) -> Result<Vec<note::Version>> {
+        self.db.note_versions(whose)
+    }
+
+    /// Version `back` of the note `n` (1: as it was before its last change).
+    pub fn note_version(&self, n: &Noted, back: usize) -> Result<note::Version> {
+        let mut versions = self.db.note_versions(&n.whose)?;
+        let label = &n.label;
+        match versions.len() {
+            k if (1..=k).contains(&back) => Ok(versions.swap_remove(back - 1)),
+            0 => bail!("the note of {label} has no older versions"),
+            1 => bail!("the note of {label} has 1 older version, so no version {back}"),
+            k => bail!("the note of {label} has {k} older versions, so no version {back}"),
+        }
+    }
+
+    /// Brings back version `back` of the note `n` (1: as it was before its
+    /// last change), over the note as it was read; the note it replaces is
+    /// kept as a version in turn. What happened, to say.
+    pub fn restore_note(&self, n: &Noted, back: usize) -> Result<String> {
+        let label = &n.label;
+        let note::Version {
+            note: old,
+            replaced_at,
+            ..
+        } = self.note_version(n, back)?;
+        if n.note
+            .as_ref()
+            .is_some_and(|now| (&now.text, now.pin) == (&old.text, old.pin))
+        {
+            return Ok(format!(
+                "The note of {label} is as version {back} has it already"
+            ));
+        }
+        if !self.db.set_note_if(
+            &n.whose,
+            n.note.as_ref(),
+            new_note(&old.text, old.pin).as_ref(),
+        )? {
+            bail!("the note of {label} changed meanwhile; nothing brought back");
+        }
+        // Only a text replaced is kept, not a pin moved.
+        let kept = match &n.note {
+            Some(now) if now.text != old.text => "; the one it replaced is version 1 now",
+            _ => "",
+        };
+        Ok(format!(
+            "Brought back the note of {label} as it was {}{kept}",
+            util::ago_said(now_ms() - replaced_at)
+        ))
+    }
+
     /// Saves a session's or a project's note from the TUI's editor, opened
     /// on note `base` (nothing but blanks removes it): merged with one saved
     /// meanwhile, unless `force`d over it.

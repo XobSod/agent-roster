@@ -67,6 +67,13 @@ pub enum Op {
     EditNote(crate::note::Whose),
     /// The open note taken as saved now, its changes left.
     ReloadNote(crate::note::Whose),
+    /// The open note's version `step` older than the one it shows (or the
+    /// note; negative: newer) shown in its place, as far as the oldest kept;
+    /// past the newest, the note as saved.
+    NoteVersion {
+        whose: crate::note::Whose,
+        step: isize,
+    },
     /// Make sure the chats project exists, then open the new-chat form.
     NewChat,
     /// Look for conversations to adopt, then pick one.

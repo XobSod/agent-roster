@@ -160,6 +160,14 @@ pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
     if editor.dirty() {
         title.push(unsaved());
     }
+    // By when, which a change saved meanwhile doesn't renumber.
+    if let Some(v) = &editor.version {
+        let ago = crate::util::ago_said(crate::util::now_ms() - v.replaced_at);
+        title.push(Span::styled(
+            format!("older version, as it was {ago} "),
+            Style::new().fg(ACCENT),
+        ));
+    }
     let warning = match editor.conflicts() {
         0 if editor.external => Some("external change".to_string()),
         0 => None,

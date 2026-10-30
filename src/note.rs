@@ -20,6 +20,16 @@ pub struct Note {
     pub at: i64,
 }
 
+/// A note as it was before a change of its text replaced it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Version {
+    pub note: Note,
+    pub replaced_at: i64,
+    /// The lines that change removed and added (`changed`); None if not
+    /// known.
+    pub change: Option<(usize, usize)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Whose {
     /// A session's, by its id.
@@ -219,6 +229,14 @@ impl<'a> Merging<'a> {
     }
 }
 
+/// How many lines going from `old` to `new` removes and adds, beside those
+/// it keeps (`matches`).
+pub fn changed(old: &str, new: &str) -> (usize, usize) {
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let kept = matches(&old, &new).iter().flatten().count();
+    (old.len() - kept, new.len() - kept)
+}
+
 /// Which line of `new` each line of `old` is kept as, by their longest common
 /// run of lines. A note is a few hundred lines at most; beyond what's alike
 /// at the start and the end, a middle too big to compare is taken as changed
@@ -343,6 +361,14 @@ mod tests {
     fn follow(old: &str, new: &str, pin: usize) -> Option<usize> {
         let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
         follow_pin(&old, &new, Some(pin))
+    }
+
+    #[test]
+    fn a_change_counts_the_lines_it_removes_and_adds() {
+        assert_eq!(changed("a\nb\nc", "a\nb\nc"), (0, 0));
+        assert_eq!(changed("a\nb\nc", "a\nc\nd\ne"), (1, 2));
+        assert_eq!(changed("", "a\nb"), (0, 2));
+        assert_eq!(changed("a\nb", ""), (2, 0));
     }
 
     #[test]

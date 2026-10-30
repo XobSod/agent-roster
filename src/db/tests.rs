@@ -314,6 +314,16 @@ fn migrates_a_version_1_database() {
     assert_eq!((s.state, s.baseline_at, s.title), (State::Idle, None, None));
     let p = db.project("p").unwrap().unwrap();
     assert_eq!((p.model, p.note), (None, None));
+    let whose = Whose::Session("old".into());
+    for text in ["a", "b"] {
+        let note = Note {
+            text: text.into(),
+            pin: None,
+            at: 0,
+        };
+        db.set_note(&whose, Some(&note)).unwrap();
+    }
+    assert_eq!(db.note_versions(&whose).unwrap().len(), 1);
     let version: i64 = db
         .conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -596,6 +606,73 @@ fn a_note_is_saved_apart_from_the_rest() {
     assert_eq!(db.session(&s.id).unwrap().note, None);
     assert!(db.set_note_if(&Whose::Project(99), None, None).is_err());
     assert!(db.set_note(&Whose::Project(99), None).is_err());
+}
+
+#[test]
+fn a_notes_text_it_replaces_is_kept_the_last_few() {
+    let (mut db, s) = db_with_session();
+    let note = |text: &str, pin| Note {
+        text: text.into(),
+        pin,
+        at: 7,
+    };
+    let kept = |db: &Db, whose: &Whose| -> Vec<(String, Option<usize>)> {
+        let versions = db.note_versions(whose).unwrap();
+        versions
+            .into_iter()
+            .map(|v| (v.note.text, v.note.pin))
+            .collect()
+    };
+    let whose = Whose::Session(s.id.clone());
+    // Nothing before the first; the pin alone changed isn't a version.
+    db.set_note(&whose, Some(&note("a", None))).unwrap();
+    db.set_note(&whose, Some(&note("a", Some(0)))).unwrap();
+    assert!(kept(&db, &whose).is_empty());
+    let before = crate::util::now_ms();
+    db.set_note(&whose, Some(&note("b", None))).unwrap();
+    assert_eq!(kept(&db, &whose), [("a".into(), Some(0))]);
+    assert!(db.note_versions(&whose).unwrap()[0].replaced_at >= before);
+    // None for a save over what wasn't there; one for a note removed.
+    assert!(
+        !db.set_note_if(&whose, None, Some(&note("c", None)))
+            .unwrap()
+    );
+    assert_eq!(kept(&db, &whose).len(), 1);
+    assert!(
+        db.set_note_if(&whose, Some(&note("b", None)), None)
+            .unwrap()
+    );
+    assert_eq!(kept(&db, &whose)[0], ("b".into(), None));
+    assert_eq!(db.note_versions(&whose).unwrap()[0].change, Some((1, 0)));
+    // The last ones, the latest first.
+    for i in 0..VERSIONS_KEPT {
+        db.set_note(&whose, Some(&note(&i.to_string(), None)))
+            .unwrap();
+    }
+    let texts: Vec<String> = kept(&db, &whose).into_iter().map(|(t, _)| t).collect();
+    let mut expected: Vec<String> = (0..VERSIONS_KEPT - 1)
+        .rev()
+        .map(|i| i.to_string())
+        .collect();
+    expected.push("b".into());
+    assert_eq!(texts, expected);
+
+    // A project's are its own, and go with it, as a session's go with it.
+    let p = db.add_project(&project("other"), 0).unwrap();
+    let theirs = Whose::Project(p.id);
+    db.set_note(&theirs, Some(&note("x", None))).unwrap();
+    db.set_note(&theirs, Some(&note("y", None))).unwrap();
+    assert_eq!(kept(&db, &theirs), [("x".into(), None)]);
+    let count = |db: &Db| -> i64 {
+        db.conn
+            .query_row("SELECT count(*) FROM note_versions", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count(&db), VERSIONS_KEPT as i64 + 1);
+    db.remove_project(&p).unwrap();
+    assert_eq!(count(&db), VERSIONS_KEPT as i64);
+    db.delete_session(&s.id).unwrap();
+    assert_eq!(count(&db), 0);
 }
 
 #[test]

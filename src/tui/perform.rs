@@ -256,6 +256,32 @@ pub(super) fn perform(
                 None => String::new(),
             }
         }),
+        Op::NoteVersion { whose, step } => roster.note_versions(&whose).and_then(|mut kept| {
+            let current = roster.note(&whose)?;
+            let Some(editor) = app.note.as_mut().and_then(|open| open.of(&whose)) else {
+                return Ok(String::new());
+            };
+            let label = editor.label.clone();
+            let of = kept.len();
+            let to = match super::note::step_to(&kept, editor.version.as_ref(), step) {
+                None if of == 0 => return Ok(format!("The note of {label} has no older versions")),
+                None => {
+                    return Ok(format!(
+                        "No earlier version: version {of} is the oldest kept"
+                    ));
+                }
+                Some(0) => {
+                    editor.reload(current.as_ref());
+                    return Ok(format!("The note of {label} as saved"));
+                }
+                Some(to) => to,
+            };
+            editor.show_version(kept.swap_remove(to - 1), current.as_ref());
+            Ok(format!(
+                "Version {to} of {of} of the note of {label}: :w brings it back, :e! goes back to \
+                 the note"
+            ))
+        }),
         Op::NewChat => roster.chat_project().and_then(|chats| {
             app.chat_project = Some(chats.id);
             app.open_chat_form(&roster.projects()?, &chats);

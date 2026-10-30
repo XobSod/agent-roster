@@ -165,9 +165,17 @@ agent's screen the preview shows the pinned line and the one below (`lines` unde
 `[notes]` shows more, or only the one), so a to-do list
 shows where you are in it (with no pin, the note's first lines). The pin follows its
 line as you edit. Ctrl+G hands the note to `$VISUAL` or `$EDITOR` and back; with
-`editor = "external"` under `[notes]`, `s o` opens it there. A note stays through
-stops, restarts and archiving, and goes only when its session is deleted for good;
-`✎` marks sessions with one.
+`editor = "external"` under `[notes]`, `s o` opens it there. Each change to a note's
+text, from anywhere, keeps the text it replaced, the last 10 (the pin alone changed
+isn't a version): `:earlier` shows the note as it was before its last change in its
+place (over changes of yours, `:earlier!`; `older version` in the title, with when;
+which one is said below), `:earlier` again the one before, and `:later` the next, back
+to the note as saved (`:earlier 3` steps three; `:earlier 3f` too, as in vim). `:w`
+brings back the one shown over the note as it is now, edited or not, and `:e!` goes
+back to the note, so a line an agent dropped can be yanked from an old version and put
+in the note. From the CLI, `roster note --versions` lists them, `--version N` prints one and `--restore N`
+brings it back. A note stays through stops, restarts and archiving, and goes, with its
+versions, only when its session is deleted for good; `✎` marks sessions with one.
 
 Each project can have a note too, for what outlives its sessions: a backlog, what to
 remember there. `p o` opens it, in the same editor (in the projects view, `o`). Its
@@ -182,7 +190,8 @@ one shown first, as vim does). A line yanked in one puts in the other, and `.` r
 there what you did in this one: they share one register and one `.`, as vim's buffers
 do. In the editor too, the pinned line is
 marked `▤` in the project's note. `▤` after a project's name marks it having a note,
-on cards and headings and in the projects view. It goes when the project is removed.
+on cards and headings and in the projects view. It goes, with its versions, when the
+project is removed.
 
 ### Processes
 
@@ -261,6 +270,8 @@ roster info api                         # created, prompts, time worked, context
 roster note api                         # print its note; --edit opens it in $EDITOR
 roster note api --append "- [ ] check the fork path"   # --set replaces it ("-": from stdin), --clear removes it
 roster note api --pin 3                 # the line the preview shows, with the one below; --unpin
+roster note api --versions              # the last 10 it replaced, when and how; --version 2 prints one
+roster note api --restore 2             # bring one back; the note it replaces is kept in turn
 roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
 roster note api --project               # api's project's
 roster note --append "- [x] tests pass" # inside an agent: its own session's note; --project alone, its project's

@@ -13,10 +13,24 @@ pub fn note(r: &mut Roster, args: NoteArgs) -> Result<()> {
         edit,
         pin,
         unpin,
+        versions,
+        version,
+        restore,
     } = args;
     let n = noted(r, session.as_deref(), project.as_deref())?;
     if pin.is_some() || unpin {
         println!("{}", r.pin_note(&n, pin)?);
+        return Ok(());
+    }
+    if versions {
+        return list_versions(r, &n);
+    }
+    if let Some(back) = version {
+        println!("{}", r.note_version(&n, back)?.note.text);
+        return Ok(());
+    }
+    if let Some(back) = restore {
+        println!("{}", r.restore_note(&n, back)?);
         return Ok(());
     }
     let old = n.note.as_ref().map_or(String::new(), |n| n.text.clone());
@@ -52,6 +66,39 @@ pub fn note(r: &mut Roster, args: NoteArgs) -> Result<()> {
         }
     };
     println!("{}", r.change_note(&n, &new)?);
+    Ok(())
+}
+
+/// `roster note --versions`: each version kept, the latest first, with when
+/// it was replaced, its lines, and what the change replacing it removed and
+/// added.
+fn list_versions(r: &Roster, n: &note::Noted) -> Result<()> {
+    let kept = r.note_versions(&n.whose)?;
+    if kept.is_empty() {
+        eprintln!("The note of {} has no older versions", n.label);
+        return Ok(());
+    }
+    let now = util::now_ms();
+    let rows: Vec<Vec<String>> = kept
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let change = v.change.map_or(String::new(), |(removed, added)| {
+                format!("-{removed} +{added}")
+            });
+            vec![
+                (i + 1).to_string(),
+                format!(
+                    "{}, {}",
+                    util::ago_said(now - v.replaced_at),
+                    util::local_when(v.replaced_at, now)
+                ),
+                v.note.text.lines().count().to_string(),
+                change,
+            ]
+        })
+        .collect();
+    print::print_table(&["VERSION", "REPLACED", "LINES", "CHANGE"], &rows);
     Ok(())
 }
 

@@ -1154,6 +1154,88 @@ fn notes_are_kept_with_their_session() {
 }
 
 #[test]
+fn a_notes_older_versions_are_kept_to_see_and_bring_back() {
+    let Some(t) = TestEnv::new("note-versions") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "one"]);
+    let stderr = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
+    let out = t.run(&["note", "one", "--versions"]);
+    assert!(out.status.success() && stderr(&out).contains("demo/one has no older versions"));
+    t.ok(&["note", "one", "--set", "- [ ] a\n- [ ] b\n- [ ] c"]);
+    t.ok(&["note", "one", "--pin", "2"]);
+    // Replaced whole, as an agent's --set may, then added to.
+    t.ok(&["note", "one", "--set", "- [x] a"]);
+    t.ok(&["note", "one", "--append", "- [ ] d"]);
+    // Columns two spaces apart at least; a time has one between its parts.
+    let versions = || -> Vec<Vec<String>> {
+        let list = t.ok(&["note", "one", "--versions"]);
+        let cells = |l: &str| -> Vec<String> {
+            let cells = l.split("  ").map(str::trim).filter(|c| !c.is_empty());
+            cells.map(str::to_string).collect()
+        };
+        list.lines().map(cells).collect()
+    };
+    let rows = versions();
+    assert_eq!(rows[0], ["VERSION", "REPLACED", "LINES", "CHANGE"]);
+    // Each with its lines and what the change replacing it removed and
+    // added.
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows[1][0], "1");
+    assert!(rows[1][1].starts_with("just now, "), "{rows:?}");
+    assert_eq!(rows[1][2..], ["1", "-0 +1"]);
+    assert_eq!(rows[2][2..], ["3", "-3 +1"]);
+    assert_eq!(
+        t.ok(&["note", "one", "--version", "2"]),
+        "- [ ] a\n- [ ] b\n- [ ] c\n"
+    );
+    let out = t.run(&["note", "one", "--version", "3"]);
+    assert!(!out.status.success() && stderr(&out).contains("2 older versions, so no version 3"));
+
+    // Brought back with its pin; what it replaced is kept in turn.
+    let out = t.ok(&["note", "one", "--restore", "2"]);
+    assert!(
+        out.contains("Brought back the note of demo/one as it was just now"),
+        "{out}"
+    );
+    assert_eq!(t.ok(&["note", "one"]), "- [ ] a\n- [ ] b\n- [ ] c\n");
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+    assert_eq!(
+        t.ok(&["note", "one", "--version", "1"]),
+        "- [x] a\n- [ ] d\n"
+    );
+    assert!(
+        t.ok(&["note", "one", "--restore", "3"])
+            .contains("as version 3 has it already")
+    );
+    // Its pin too: the text alike, the pin moved, it's brought back, and
+    // no version is made of a pin.
+    t.ok(&["note", "one", "--unpin"]);
+    let out = t.ok(&["note", "one", "--restore", "3"]);
+    assert!(
+        out.contains("Brought back") && !out.contains("version 1 now"),
+        "{out}"
+    );
+    assert_eq!(versions().len(), 4);
+    assert_eq!(t.session("one", false).unwrap()["note_pin"], 1);
+    // A note removed comes back too.
+    t.ok(&["note", "one", "--clear"]);
+    assert_eq!(versions()[1][2..], ["3", "-3 +0"]);
+    let out = t.ok(&["note", "one", "--restore", "1"]);
+    assert!(
+        out.contains("Brought back") && !out.contains("version 1 now"),
+        "{out}"
+    );
+    assert_eq!(t.ok(&["note", "one"]), "- [ ] a\n- [ ] b\n- [ ] c\n");
+    assert!(
+        !t.run(&["note", "one", "--restore", "1", "--set", "x"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn a_projects_note_is_its_own() {
     let Some(t) = TestEnv::new("pnotes") else {
         return;

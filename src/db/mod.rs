@@ -12,7 +12,7 @@ use rusqlite::{
 };
 
 use crate::model::{Event, Project, Session, State};
-use crate::note::{Note, Whose};
+use crate::note::{Note, Version, Whose};
 
 mod events;
 mod notes;

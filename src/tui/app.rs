@@ -781,9 +781,16 @@ impl App {
                 Side::Session => ("[", "project's"),
                 Side::Project => ("]", "session's"),
             };
-            format!(
-                "The {whose} note has unsaved changes: {key} shows it, :wqa saves both, :qa! leaves them"
-            )
+            match open.other().is_some_and(NoteEditor::on_version) {
+                true => format!(
+                    "The {whose} note shows an older version: {key} shows it, :wqa brings it back \
+                     and saves this one, :qa! leaves both as saved"
+                ),
+                false => format!(
+                    "The {whose} note has unsaved changes: {key} shows it, :wqa saves both, :qa! \
+                     leaves them"
+                ),
+            }
         };
         let other_dirty = open.other().is_some_and(|e| e.dirty());
         // Markers left in are saved only on purpose.
@@ -859,6 +866,10 @@ impl App {
             }
             note::Outcome::External => Some(Op::EditNote(open.shown().whose.clone())),
             note::Outcome::Reload => Some(Op::ReloadNote(open.shown().whose.clone())),
+            note::Outcome::Step(step) => Some(Op::NoteVersion {
+                whose: open.shown().whose.clone(),
+                step,
+            }),
             note::Outcome::Fail(why) => {
                 self.fail(why);
                 None

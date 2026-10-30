@@ -869,6 +869,49 @@ fn notes_are_written_pinned_and_shown_in_the_tui() {
         "TODO\n- [ ] first\n- [ ] second, done\n"
     );
 
+    // :earlier shows the note as it was before its last change in its place;
+    // a change saved meanwhile adds a version, and steps still go from the
+    // one shown. :w brings it back over the note as it is.
+    let step = |command: &str| {
+        term.keys(&[":"]);
+        term.text(command);
+        term.keys(&["Enter"]);
+    };
+    let shown = "older version, as it was";
+    term.keys(&["s", "o"]);
+    step("earlier");
+    term.wait_for("the version shown", "Version 1 of ");
+    term.wait_for("its title", "older version, as it was just now");
+    let theirs = "TODO, from an agent\n- [ ] first\n- [ ] second, done";
+    t.ok(&["note", "one", "--set", theirs]);
+    term.wait_for("the change said", "external change");
+    step("earlier");
+    term.wait_for("the one before it", "Version 3 of ");
+    step("later");
+    term.wait_for("back to it", "Version 2 of ");
+    step("later");
+    term.wait_for("the one the agent replaced", "Version 1 of ");
+    step("later");
+    term.wait_for("the note as saved", "The note of demo/one as saved");
+    term.wait_for_gone("no version shown", shown);
+    step("earlier 2");
+    term.wait_for("two back", "Version 2 of ");
+    term.keys(&[":", "w", "Enter"]);
+    term.wait_for("the save", "Saved the note of demo/one");
+    term.wait_for_gone("the note again", shown);
+    term.keys(&[":", "q", "Enter"]);
+    term.wait_for_gone("the editor closed", "╭ ✎ demo/one ");
+    assert_eq!(t.ok(&["note", "one"]), "TODO\n- [ ] first\n- [ ] second\n");
+    // Brought back from the CLI in turn.
+    t.ok(&["note", "one", "--restore", "1"]);
+    assert_eq!(t.ok(&["note", "one"]), format!("{theirs}\n"));
+    t.ok(&[
+        "note",
+        "one",
+        "--set",
+        "TODO\n- [ ] first\n- [ ] second, done",
+    ]);
+
     // The project's note: p o, then [ and ] between it and the session's,
     // each keeping its changes, which :q doesn't leave; :wqa saves both.
     t.ok(&["note", "--project", "demo", "--set", "backlog"]);

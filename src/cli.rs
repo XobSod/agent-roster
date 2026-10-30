@@ -410,4 +410,14 @@ pub struct NoteArgs {
     /// Unpin its pinned line: the preview shows its first lines
     #[arg(long, conflicts_with_all = ["set", "append", "clear", "edit"])]
     pub unpin: bool,
+    /// List the versions kept of it, as it was before each of its last
+    /// changes, the latest first
+    #[arg(long, conflicts_with_all = ["set", "append", "clear", "edit", "pin", "unpin"])]
+    pub versions: bool,
+    /// Print version N of it (1: as it was before its last change)
+    #[arg(long, value_name = "N", conflicts_with_all = ["set", "append", "clear", "edit", "pin", "unpin", "versions"])]
+    pub version: Option<usize>,
+    /// Bring back version N of it; the note it replaces is kept as a version
+    #[arg(long, value_name = "N", conflicts_with_all = ["set", "append", "clear", "edit", "pin", "unpin", "versions", "version"])]
+    pub restore: Option<usize>,
 }

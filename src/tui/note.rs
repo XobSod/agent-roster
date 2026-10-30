@@ -16,7 +16,7 @@ use edtui::{EditorEventHandler, EditorMode, EditorState, Index2, Lines};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input;
-use crate::note::{self, Note, Noted, Whose};
+use crate::note::{self, Note, Noted, Version, Whose};
 
 /// Columns a tab takes, in the editor and where its lines are counted.
 pub const TAB_WIDTH: usize = 4;
@@ -60,6 +60,9 @@ pub struct NoteEditor {
     pub base: Option<Note>,
     /// Saved by another since `base`, as roster last read it.
     pub external: bool,
+    /// A version of the note shown in its place (`:earlier`), until it's
+    /// saved or the note is taken as saved.
+    pub version: Option<Version>,
     /// The lines before the last key, for the pin to follow its line.
     lines: Vec<String>,
     /// `Z` or `m`, waiting for its second key.
@@ -102,6 +105,10 @@ pub enum Outcome {
     External,
     /// Take the note as saved now, leaving changes.
     Reload,
+    /// Show the version `n` older than the one shown (or the note), in the
+    /// note's place, or with a negative `n` newer: as far as the oldest
+    /// kept, and past the newest, the note as saved (`:earlier`, `:later`).
+    Step(isize),
     /// Say why not.
     Fail(String),
     /// Say this (not an error).
@@ -265,6 +272,7 @@ impl NoteEditor {
             saved: (text, pin),
             base: n.note.clone(),
             external: false,
+            version: None,
             lines,
             pending: None,
             command: None,
@@ -373,6 +381,24 @@ impl NoteEditor {
         self.pin = self.saved.1;
         self.base = note.cloned();
         self.external = false;
+        self.version = None;
+    }
+
+    /// Shows `version` in place of the note as saved now (`current`), as
+    /// changes to it: `:w` brings it back over the note, `:e!` goes back to
+    /// the note.
+    pub fn show_version(&mut self, version: Version, current: Option<&Note>) {
+        self.saved(current);
+        self.replace(&version.note.text);
+        self.pin = version.note.pin;
+        self.version = Some(version);
+    }
+
+    /// Showing a version as it was kept, not changed since.
+    pub fn on_version(&self) -> bool {
+        self.version
+            .as_ref()
+            .is_some_and(|v| note::tidy(&self.text()) == v.note.text && self.pin == v.note.pin)
     }
 
     /// Takes `note` as saved now, leaving changes; the cursor stays where it
@@ -412,6 +438,7 @@ impl NoteEditor {
         self.saved = current.map_or((String::new(), None), |n| (n.text.clone(), n.pin));
         self.base = current.cloned();
         self.external = false;
+        self.version = None;
         let mut state = self.state.borrow_mut();
         state.mode = EditorMode::Normal;
         state.cursor = Index2::new(merged.first.unwrap_or(0), 0);
@@ -571,10 +598,27 @@ impl NoteEditor {
 
     /// A `:` command.
     fn run(&mut self, typed: &str) -> Outcome {
-        let (command, force) = match typed.strip_suffix('!') {
-            Some(command) => (command, true),
-            None => (typed, false),
+        let (word, count) = match typed.split_once(' ') {
+            Some((word, count)) => (word, Some(count.trim())),
+            None => (typed, None),
         };
+        let (command, force) = match word.strip_suffix('!') {
+            Some(command) => (command, true),
+            None => (word, false),
+        };
+        let not_a_command = || {
+            Outcome::Fail(format!(
+                "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
+                 changes, :e! takes the note as saved; :wa, :wqa and :qa! act on both notes; \
+                 :earlier and :later show its versions)"
+            ))
+        };
+        match command {
+            "ea" | "earlier" => return self.step(true, count, force),
+            "lat" | "later" => return self.step(false, count, force),
+            _ if count.is_some() => return not_a_command(),
+            _ => {}
+        }
         let save = |all, close| Outcome::Save { all, close, force };
         match command {
             "" if !force => Outcome::None,
@@ -589,9 +633,18 @@ impl NoteEditor {
             "wqa" | "wqall" | "xa" | "xall" => save(true, true),
             "q" | "quit" | "qa" | "qall" if !force && self.dirty() => {
                 let a = if command.starts_with("qa") { "a" } else { "" };
-                Outcome::Fail(format!(
-                    "The note has unsaved changes: :wq{a} saves them, :q{a}! leaves them"
-                ))
+                Outcome::Fail(match (self.on_version(), a) {
+                    (true, "") => "An older version is shown in place of the note: :q! closes, \
+                                   leaving the note as it is; :wq brings the version back"
+                        .into(),
+                    (true, _) => "An older version is shown in place of the note: :qa! closes, \
+                                  leaving the notes as saved; :wqa brings the version back and \
+                                  saves the other's changes"
+                        .into(),
+                    (false, _) => format!(
+                        "The note has unsaved changes: :wq{a} saves them, :q{a}! leaves them"
+                    ),
+                })
             }
             "q" | "quit" => Outcome::Close { all: false },
             "qa" | "qall" => Outcome::Close { all: force },
@@ -599,11 +652,38 @@ impl NoteEditor {
                 "The note has unsaved changes: :e! leaves them and takes it as saved".into(),
             ),
             "e" | "edit" => Outcome::Reload,
-            _ => Outcome::Fail(format!(
-                "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
-                 changes, :e! takes the note as saved; :wa, :wqa and :qa! act on both notes)"
-            )),
+            _ => not_a_command(),
         }
+    }
+
+    /// `:earlier` (`earlier`) or `:later`, `count` versions (1 if none): an
+    /// older version of the note shown in its place, or a newer one, back to
+    /// the note as saved; over changes of yours only if `force`d. Where it
+    /// lands is for the app to tell, from the versions kept now.
+    fn step(&self, earlier: bool, count: Option<&str>, force: bool) -> Outcome {
+        // As vim's `:earlier 2f`, counting writes: each version is one.
+        let versions = count.map(|c| c.strip_suffix('f').unwrap_or(c));
+        let n = match versions.map(str::parse::<usize>) {
+            None => 1,
+            Some(Ok(n)) if n > 0 => n,
+            Some(_) => {
+                return Outcome::Fail(format!(
+                    "Not a count of versions: {}",
+                    count.unwrap_or_default()
+                ));
+            }
+        };
+        if !earlier && self.version.is_none() {
+            return Outcome::Notice("No later version than the note as saved".into());
+        }
+        if !force && self.dirty() && !self.on_version() {
+            let command = if earlier { "earlier" } else { "later" };
+            return Outcome::Fail(format!(
+                "The note has unsaved changes: :w saves them, :{command}! leaves them"
+            ));
+        }
+        let n = n.min(isize::MAX as usize) as isize;
+        Outcome::Step(if earlier { n } else { -n })
     }
 
     /// `:x` and `ZZ`: saves if changed, and closes.
@@ -675,12 +755,21 @@ impl NoteEditor {
             &[("Enter", "run"), ("Esc", "cancel")]
         } else {
             match self.mode() {
+                EditorMode::Normal if self.version.is_some() => &[
+                    (":w", "bring it back"),
+                    (":e!", "back to the note"),
+                    (":earlier", "older"),
+                    (":later", "newer"),
+                    (":q!", "close, leave it"),
+                    ("C-g", "$EDITOR"),
+                ],
                 EditorMode::Normal => &[
                     ("i", "insert"),
                     (":w", "save"),
                     (":wq", "save and close"),
                     (":q!", "close, leave changes"),
                     ("mm", "pin a line"),
+                    (":earlier", "older versions"),
                     ("C-g", "$EDITOR"),
                 ],
                 EditorMode::Insert => &[("Esc", "normal mode"), ("C-g", "$EDITOR")],
@@ -692,11 +781,30 @@ impl NoteEditor {
             .iter()
             .map(|(k, what)| (k.to_string(), *what))
             .collect();
-        if self.external && self.command.is_none() && self.mode() == EditorMode::Normal {
+        if self.external
+            && self.version.is_none()
+            && self.command.is_none()
+            && self.mode() == EditorMode::Normal
+        {
             hints.insert(4, (":e!".into(), "take it as saved"));
         }
         hints
     }
+}
+
+/// Which of the versions `kept` (from 1, the latest) a step of `step` older
+/// (negative: newer) lands on from the one `shown`, or from the note: as far
+/// as the oldest, and past the newest 0, the note as saved; None if there's
+/// no older one to go to. From where the one shown is now, whatever changes
+/// saved since numbered it; one let go meanwhile was older than all those
+/// kept.
+pub fn step_to(kept: &[Version], shown: Option<&Version>, step: isize) -> Option<usize> {
+    let from = shown.map_or(0, |shown| {
+        let at = kept.iter().position(|k| k == shown);
+        at.map_or(kept.len() + 1, |i| i + 1)
+    });
+    let to = from.saturating_add_signed(step).min(kept.len());
+    (step <= 0 || to > from).then_some(to)
 }
 
 /// A key with Shift as edtui's keys have it: on capitals (`A`), not on other
@@ -769,6 +877,95 @@ mod tests {
             })
             .filter(|o| *o != Outcome::None)
             .collect()
+    }
+
+    #[test]
+    fn earlier_and_later_show_the_versions_kept_in_its_place() {
+        let mut e = editor(Some("now"), None);
+        let notice = |o: &[Outcome]| matches!(o, [Outcome::Notice(_)]);
+        let fail = |o: &[Outcome]| matches!(o, [Outcome::Fail(_)]);
+        assert!(notice(&keys(&mut e, ":later\n")));
+        assert_eq!(keys(&mut e, ":earlier\n"), [Outcome::Step(1)]);
+        assert_eq!(keys(&mut e, ":earlier 2f\n"), [Outcome::Step(2)]);
+        assert!(fail(&keys(&mut e, ":earlier 10m\n")));
+        assert!(fail(&keys(&mut e, ":earlier f\n")));
+        assert!(fail(&keys(&mut e, ":earlier 0\n")));
+        assert!(fail(&keys(&mut e, ":w now\n")));
+        let note = |text: &str| Note {
+            text: text.into(),
+            pin: Some(0),
+            at: 1,
+        };
+        // In place of the note as saved now, which a save would replace.
+        let now = note("saved since");
+        e.show_version(version("one"), Some(&now));
+        assert_eq!((e.text().as_str(), e.pin), ("one", Some(0)));
+        assert_eq!(e.base, Some(now.clone()));
+        assert!(e.dirty() && !e.untouched());
+        assert_eq!(keys(&mut e, ":ea 2\n"), [Outcome::Step(2)]);
+        assert_eq!(keys(&mut e, ":lat 5\n"), [Outcome::Step(-5)]);
+        assert_eq!(keys(&mut e, ":later 1f\n"), [Outcome::Step(-1)]);
+        assert_eq!(
+            keys(&mut e, &format!(":ea {}\n", usize::MAX)),
+            [Outcome::Step(isize::MAX)]
+        );
+        // :q says what's shown; :q! closes.
+        let q = keys(&mut e, ":q\n");
+        assert!(matches!(&q[..], [Outcome::Fail(why)] if why.contains("older version")));
+        assert_eq!(keys(&mut e, ":q!\n"), [Outcome::Close { all: false }]);
+        let qa = keys(&mut e, ":qa\n");
+        assert!(matches!(&qa[..], [Outcome::Fail(why)] if why.contains(":wqa brings the version")));
+        // Changed, it's yours: left only with `!`.
+        keys(&mut e, "x");
+        assert!(fail(&keys(&mut e, ":earlier\n")));
+        assert!(fail(&keys(&mut e, ":later\n")));
+        assert_eq!(keys(&mut e, ":earlier! 1\n"), [Outcome::Step(1)]);
+        // Saved, it's the note again.
+        e.saved(Some(&note("ne")));
+        assert_eq!(e.version, None);
+        assert!(notice(&keys(&mut e, ":later\n")));
+        // So with changes of yours made to the note as saved.
+        keys(&mut e, "x");
+        assert!(fail(&keys(&mut e, ":earlier\n")));
+        // A version just as the note is now isn't a change to keep you in.
+        let mut e = editor(Some("same"), None);
+        e.show_version(version("same"), e.base.clone().as_ref());
+        assert_eq!(keys(&mut e, ":q\n"), [Outcome::Close { all: false }]);
+    }
+
+    fn version(text: &str) -> Version {
+        Version {
+            note: Note {
+                text: text.into(),
+                pin: if text == "same" { None } else { Some(0) },
+                at: 1,
+            },
+            replaced_at: 2,
+            change: None,
+        }
+    }
+
+    #[test]
+    fn a_step_lands_from_where_the_version_shown_is_now() {
+        let kept: Vec<Version> = ["c", "b", "a"].map(version).into();
+        let at = |text: &str| Some(version(text));
+        assert_eq!(step_to(&kept, None, 1), Some(1));
+        assert_eq!(step_to(&kept, None, 7), Some(3));
+        assert_eq!(step_to(&kept, at("c").as_ref(), 1), Some(2));
+        assert_eq!(step_to(&kept, at("b").as_ref(), -1), Some(1));
+        assert_eq!(step_to(&kept, at("b").as_ref(), -9), Some(0));
+        assert_eq!(step_to(&kept, at("a").as_ref(), 1), None);
+        assert_eq!(step_to(&[], None, 1), None);
+        // Shown as version 1, then another change saved: it's version 2 now.
+        let later: Vec<Version> = ["d", "c", "b", "a"].map(version).into();
+        assert_eq!(step_to(&later, at("c").as_ref(), 1), Some(3));
+        assert_eq!(step_to(&later, at("c").as_ref(), -1), Some(1));
+        assert_eq!(step_to(&later, at("c").as_ref(), -2), Some(0));
+        // Let go meanwhile: older than all those kept.
+        assert_eq!(step_to(&later[..2], at("a").as_ref(), 1), None);
+        assert_eq!(step_to(&later[..2], at("a").as_ref(), -1), Some(2));
+        assert_eq!(step_to(&kept, at("c").as_ref(), isize::MAX), Some(3));
+        assert_eq!(step_to(&kept, at("a").as_ref(), isize::MIN), Some(0));
     }
 
     #[test]

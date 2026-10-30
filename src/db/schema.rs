@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 18;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -66,6 +66,19 @@ CREATE TABLE events (
     at         INTEGER NOT NULL,
     payload    TEXT
 );
+CREATE TABLE note_versions (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    note        TEXT NOT NULL,
+    note_pin    INTEGER,
+    note_at     INTEGER,
+    replaced_at INTEGER NOT NULL,
+    removed     INTEGER,
+    added       INTEGER
+);
+CREATE INDEX note_versions_session ON note_versions(session_id);
+CREATE INDEX note_versions_project ON note_versions(project_id);
 ";
 
 /// What was spent: the agents' files, by number, each as it was when saved
@@ -216,6 +229,25 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
             "ALTER TABLE sessions ADD COLUMN conversation_begun INTEGER NOT NULL DEFAULT 0;
          UPDATE sessions SET conversation_begun = 1 WHERE turns > 0;",
         ),
+    ),
+    (
+        17,
+        Sql("CREATE TABLE note_versions (
+             id          INTEGER PRIMARY KEY,
+             session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+             project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+             note        TEXT NOT NULL,
+             note_pin    INTEGER,
+             note_at     INTEGER,
+             replaced_at INTEGER NOT NULL
+         );
+         CREATE INDEX note_versions_session ON note_versions(session_id);
+         CREATE INDEX note_versions_project ON note_versions(project_id);"),
+    ),
+    (
+        18,
+        Sql("ALTER TABLE note_versions ADD COLUMN removed INTEGER;
+         ALTER TABLE note_versions ADD COLUMN added INTEGER;"),
     ),
 ];
 

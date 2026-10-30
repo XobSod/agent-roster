@@ -343,6 +343,14 @@ pub fn ago(elapsed_ms: i64) -> String {
     }
 }
 
+/// How long ago, said: `just now`, `5m ago`, `3h ago`.
+pub fn ago_said(elapsed_ms: i64) -> String {
+    match ago(elapsed_ms) {
+        now if now == "now" => "just now".into(),
+        ago => format!("{ago} ago"),
+    }
+}
+
 /// A model's name, short: a Claude model's family wherever it is in it
 /// (`claude-haiku-4-5-2025…`, `claude-3-5-sonnet-…`, `us.anthropic.claude-
 /// opus-…` → `haiku`, `sonnet`, `opus`), else the name cut to 10

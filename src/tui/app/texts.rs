@@ -406,10 +406,7 @@ impl App {
             value.insert(0, Span::styled(format!("  {label:<14}"), muted));
             Line::from(value)
         };
-        let ago = |at: i64| match crate::util::ago(now - at) {
-            just if just == "now" => "just now".to_string(),
-            ago => format!("{ago} ago"),
-        };
+        let ago = |at: i64| crate::util::ago_said(now - at);
         let mut lines = vec![match (s.deleted_at, s.exit_status) {
             (Some(at), _) => Line::from(format!("Archived {}.", ago(at))),
             (None, Some(code)) => Line::from(format!(

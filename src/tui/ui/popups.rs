@@ -297,6 +297,10 @@ pub(super) fn draw_form(f: &mut Frame, form: &Form, area: Rect) {
                     cursor = Some((LABEL + 3 + shown.width(), lines.len()));
                 }
                 left.push(Span::raw(shown));
+                // What a value typed is, e.g. a branch that's there already.
+                if let Some(note) = field.notes.get(field.value.trim()) {
+                    left.push(Span::styled(format!("  {note}"), Style::new().fg(MUTED)));
+                }
             }
             Kind::Choice(_) | Kind::Combo(_) => {
                 let style = if field.value == "default" {

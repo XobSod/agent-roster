@@ -155,6 +155,7 @@ pub(super) fn perform(
         }),
         Op::SetUnread(id, unread) => roster.set_unread(&id, unread).map(|()| String::new()),
         Op::NewSession {
+            works_in,
             project,
             agent,
             name,
@@ -165,7 +166,7 @@ pub(super) fn perform(
             busy(terminal, app, format!("Starting {agent} in {project}…"))?;
             let prompted = prompt.is_some();
             let request = NewSession {
-                works_in: Default::default(),
+                works_in,
                 project,
                 name,
                 agent: Some(agent),

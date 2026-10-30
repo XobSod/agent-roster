@@ -120,7 +120,10 @@ several agents work on one repository without touching each other's files.
 the commit the checkout is on (`--worktree fix-auth --base main` names both; a branch
 that exists is checked out as it is, and one checked out elsewhere can't be twice).
 `--in <session or directory>` starts a session in a worktree there is, another
-session's say, which they then share. Worktrees go in roster's state directory, a
+session's say, which they then share. In the new-session form (`s n`), *Works in*
+does the same for a project in git: the checkout, a new worktree (its branch and
+what it's made from; a branch that's there, or the checkout's changes not committed,
+noted as you go), or one that exists. Worktrees go in roster's state directory, a
 folder per project (`directory` under `[worktrees]` puts them elsewhere). Roster only
 makes the place and says how it stands: committing, merging and rebasing are the
 agents' work, when you ask them. A session's directory is fixed: to go on in another

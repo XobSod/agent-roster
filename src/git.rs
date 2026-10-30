@@ -91,6 +91,42 @@ pub fn commit(dir: &Path, rev: &str) -> Result<String> {
     .with_context(|| format!("{rev} names no commit"))
 }
 
+/// The repository's default branch: its remote's, if it has a local
+/// branch of that name, else `main` or `master`, whichever there is.
+pub fn default_branch(dir: &Path) -> Option<String> {
+    let remote = git(
+        dir,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .ok()
+    .and_then(|r| r.strip_prefix("origin/").map(str::to_string));
+    remote
+        .into_iter()
+        .chain(["main".to_string(), "master".to_string()])
+        .find(|b| branch_exists(dir, b))
+}
+
+/// The local branches, the latest committed to first.
+pub fn branches(dir: &Path) -> Vec<String> {
+    let listed = git(
+        dir,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    );
+    listed
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
 pub fn branch_exists(dir: &Path, branch: &str) -> bool {
     yes(
         dir,
@@ -274,6 +310,7 @@ pub(crate) mod tests {
         assert_eq!(toplevel(&main), Some(main.canonicalize().unwrap()));
         assert_eq!(toplevel(tmp.path()), None);
         assert_eq!(current_branch(&main).as_deref(), Some("main"));
+        assert_eq!(default_branch(&main).as_deref(), Some("main"));
         assert!(branch_name_valid(&main, "fix/auth"));
         assert!(!branch_name_valid(&main, "bad..name"));
         assert!(!branch_name_valid(&main, "-x"));
@@ -296,6 +333,7 @@ pub(crate) mod tests {
         std::fs::write(wt.join("c.txt"), "c\n").unwrap();
         assert_eq!(changed_files(&wt).unwrap(), 1);
         assert_eq!(unmerged(&main, "fix", "main").unwrap(), 1);
+        assert_eq!(branches(&main).len(), 2);
         // Not with what's not committed, unless forced.
         assert!(remove_worktree(&main, &wt, false).is_err());
         remove_worktree(&main, &wt, true).unwrap();

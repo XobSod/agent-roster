@@ -45,6 +45,7 @@ pub enum Op {
     },
     SetUnread(String, bool),
     NewSession {
+        works_in: crate::engine::WorksIn,
         project: String,
         agent: String,
         name: Option<String>,

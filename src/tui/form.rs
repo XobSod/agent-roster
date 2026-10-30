@@ -32,6 +32,59 @@ pub enum Id {
     /// What an adopted conversation goes on with.
     RunOn,
     Copy,
+    /// Where a new session works: its project's checkout, or a worktree.
+    WorksIn,
+    /// A new worktree's branch, and what it's made from.
+    Branch,
+    Base,
+    /// A worktree there is, to work in.
+    Worktree,
+}
+
+/// Where a new session works (`Id::WorksIn`).
+const CHECKOUT: &str = "checkout";
+const NEW_WORKTREE: &str = "new worktree";
+const EXISTING_WORKTREE: &str = "existing worktree";
+
+/// What the new-session form knows of a project's repository, read once
+/// as the project is chosen.
+#[derive(Clone, Debug, Default)]
+struct Repo {
+    /// Its local branches, the latest committed to first.
+    branches: Vec<String>,
+    default_branch: Option<String>,
+    /// The branch the checkout is on.
+    head: Option<String>,
+    /// Where each branch checked out is.
+    checked_out: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Its worktrees, the checkout aside.
+    worktrees: Vec<std::path::PathBuf>,
+    /// Files changed in the checkout, not committed.
+    changed: usize,
+}
+
+impl Repo {
+    /// The repository `origin` is in; None outside git.
+    fn read(origin: &Path) -> Option<Repo> {
+        use crate::git;
+        let top = git::toplevel(origin)?;
+        let listed: Vec<git::Listed> = (git::worktrees(&top).unwrap_or_default().into_iter())
+            .filter(|w| !w.prunable)
+            .collect();
+        Some(Repo {
+            branches: git::branches(&top),
+            default_branch: git::default_branch(&top),
+            head: git::current_branch(origin),
+            checked_out: (listed.iter())
+                .filter_map(|w| Some((w.branch.clone()?, w.path.clone())))
+                .collect(),
+            worktrees: (listed.iter())
+                .map(|w| w.path.clone())
+                .filter(|p| *p != top)
+                .collect(),
+            changed: git::changed_files(origin).unwrap_or(0),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +178,8 @@ pub struct Form {
     /// for.
     filled_from: Option<(String, String)>,
     models: Models,
+    /// The new-session form's projects' repositories, by project, as read.
+    repos: std::collections::HashMap<String, Option<Repo>>,
 }
 
 /// What forms know of agents' models.
@@ -240,6 +295,9 @@ impl Form {
     pub fn new_chat(projects: &[Project], chats: &Project, agents: &[String]) -> Form {
         let mut form = Form::new_session(projects, Some(chats), agents);
         form.title = "New chat".into();
+        // Chats work in their own directory.
+        let worktree = [Id::WorksIn, Id::Branch, Id::Base, Id::Worktree];
+        form.fields.retain(|f| !worktree.contains(&f.id));
         if let Some(i) = form.fields.iter().position(|f| f.id == Id::Prompt) {
             form.focus = i;
         }
@@ -295,6 +353,16 @@ impl Form {
             // The agent's name in the project (a role, say); its title is
             // another thing, the task it's on.
             Field::new(Id::Name, "Agent name", text("automatic"), ""),
+            // Only for a project in git (`Form::update`).
+            Field::new(
+                Id::WorksIn,
+                "Works in",
+                Kind::Choice(vec![CHECKOUT.into()]),
+                CHECKOUT,
+            ),
+            Field::new(Id::Branch, "Branch", text("the agent name"), ""),
+            Field::new(Id::Base, "From", Kind::Combo(vec!["HEAD".into()]), "HEAD"),
+            Field::new(Id::Worktree, "Worktree", Kind::Combo(Vec::new()), ""),
             model_field(DEFAULT),
             effort_field(DEFAULT),
             Field::new(
@@ -441,6 +509,7 @@ impl Form {
             projects,
             filled_from: None,
             models: Models::known(),
+            repos: Default::default(),
         };
         form.update();
         form
@@ -661,6 +730,7 @@ impl Form {
         let Some(p) = self.projects.iter().find(|p| p.name == project).cloned() else {
             return;
         };
+        self.update_works_in(&p);
         let project_agent = p.agent.clone().unwrap_or_else(|| self.default_agent());
         if self.filled_from.as_ref().map(|(p, _)| p) != Some(&project)
             && let Some(f) = self.field_mut(Id::Agent).filter(|f| !f.edited)
@@ -684,6 +754,102 @@ impl Form {
         self.filled_from = Some(filled);
         // The agent may have changed.
         self.update();
+    }
+
+    /// Where a new session in `p` works: a choice only for a project in
+    /// git; a new worktree's branch and base, an existing one's path, each
+    /// shown when it's the one chosen; what a choice means, noted.
+    fn update_works_in(&mut self, p: &Project) {
+        let repo = (self.repos.entry(p.name.clone()))
+            .or_insert_with(|| Repo::read(&p.origin))
+            .clone();
+        let Some(f) = self.field_mut(Id::WorksIn) else {
+            return;
+        };
+        let mut choices = vec![CHECKOUT.to_string()];
+        if let Some(repo) = &repo {
+            choices.push(NEW_WORKTREE.into());
+            if !repo.worktrees.is_empty() {
+                choices.push(EXISTING_WORKTREE.into());
+            }
+        }
+        if !choices.contains(&f.value) {
+            f.value = CHECKOUT.into();
+        }
+        f.hidden = repo.is_none();
+        f.kind = Kind::Choice(choices);
+        f.notes = (repo.iter())
+            .filter(|r| r.changed > 0)
+            .map(|r| {
+                let files = if r.changed == 1 { "file" } else { "files" };
+                let note = format!(
+                    "the checkout has {} {files} changed, not committed: the worktree won't have them",
+                    r.changed
+                );
+                (NEW_WORKTREE.to_string(), note)
+            })
+            .collect();
+        let works_in = f.value.clone();
+        let repo = repo.unwrap_or_default();
+        let branch = self.value(Id::Branch).trim().to_string();
+        let exists = repo.branches.contains(&branch);
+        if let Some(f) = self.field_mut(Id::Branch) {
+            f.hidden = works_in != NEW_WORKTREE;
+            f.notes = (repo.branches.iter())
+                .map(|b| {
+                    let note = match repo.checked_out.get(b) {
+                        Some(at) => format!(
+                            "checked out in {}: pick it as an existing worktree",
+                            crate::util::short_path(at)
+                        ),
+                        None => "there already: checked out as it is".into(),
+                    };
+                    (b.clone(), note)
+                })
+                .collect();
+        }
+        if let Some(f) = self.field_mut(Id::Base) {
+            // A branch there already isn't made from anything.
+            f.hidden = works_in != NEW_WORKTREE || exists;
+            let mut choices = vec!["HEAD".to_string()];
+            choices.extend(repo.default_branch.clone());
+            choices.extend(repo.branches.iter().cloned());
+            choices.dedup();
+            let mut seen = std::collections::HashSet::new();
+            choices.retain(|c| seen.insert(c.clone()));
+            f.kind = Kind::Combo(choices);
+            f.notes = (repo.head.iter())
+                .map(|head| {
+                    (
+                        "HEAD".to_string(),
+                        format!("{head}, as the checkout is now"),
+                    )
+                })
+                .collect();
+        }
+        if let Some(f) = self.field_mut(Id::Worktree) {
+            f.hidden = works_in != EXISTING_WORKTREE;
+            let paths: Vec<String> = (repo.worktrees.iter())
+                .map(|w| crate::util::short_path(w))
+                .collect();
+            if !paths.contains(&f.value) {
+                f.value = paths.first().cloned().unwrap_or_default();
+            }
+            f.kind = Kind::Combo(paths);
+        }
+    }
+
+    /// Where the new session is to work, as the form says.
+    fn works_in(&self) -> crate::engine::WorksIn {
+        use crate::engine::WorksIn;
+        match self.value(Id::WorksIn) {
+            NEW_WORKTREE => WorksIn::New {
+                branch: self.setting(Id::Branch),
+                base: self.setting(Id::Base).filter(|b| b != "HEAD"),
+            },
+            EXISTING_WORKTREE => WorksIn::Existing(expand_tilde(self.value(Id::Worktree).trim())),
+            _ => WorksIn::Checkout,
+        }
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Outcome {
@@ -832,6 +998,7 @@ impl Form {
                 }
             }
             Purpose::NewSession => Op::NewSession {
+                works_in: self.works_in(),
                 project: required(Id::Project, "The project")?,
                 agent: self.value(Id::Agent).to_string(),
                 name: self.setting(Id::Name),
@@ -987,6 +1154,64 @@ mod tests {
     }
 
     #[test]
+    fn a_project_in_git_offers_a_worktree_to_work_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::git::tests::repo(&repo);
+        crate::git::tests::sh(&repo, &["branch", "older"]);
+        let mut p = project("alpha", None);
+        p.origin = repo.clone();
+        let mut form = Form::new_session(&[p], None, &agents());
+        let shown = |form: &Form, id| form.field(id).is_some_and(|f| !f.hidden);
+        assert!(shown(&form, Id::WorksIn));
+        assert!(!shown(&form, Id::Branch) && !shown(&form, Id::Base));
+        // No worktree there yet: nothing existing to pick.
+        let Some(Kind::Choice(choices)) = form.field(Id::WorksIn).map(|f| f.kind.clone()) else {
+            panic!()
+        };
+        assert_eq!(choices, [CHECKOUT, NEW_WORKTREE]);
+        form.focus = form
+            .fields
+            .iter()
+            .position(|f| f.id == Id::WorksIn)
+            .unwrap();
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::WorksIn), NEW_WORKTREE);
+        assert!(shown(&form, Id::Branch) && shown(&form, Id::Base));
+        let Some(Kind::Combo(bases)) = form.field(Id::Base).map(|f| f.kind.clone()) else {
+            panic!()
+        };
+        assert_eq!(bases[..2], ["HEAD", "main"]);
+        assert!(bases.contains(&"older".to_string()));
+        assert_eq!(
+            form.field(Id::Base).unwrap().notes["HEAD"],
+            "main, as the checkout is now"
+        );
+        // A branch there is checked out as it is, from nothing; one checked
+        // out says where.
+        let branch = form.field(Id::Branch).unwrap();
+        assert!(branch.notes["older"].starts_with("there already"));
+        assert!(branch.notes["main"].starts_with("checked out in"));
+        form.focus = form.fields.iter().position(|f| f.id == Id::Branch).unwrap();
+        type_text(&mut form, "older");
+        assert!(!shown(&form, Id::Base));
+        let Op::NewSession { works_in, .. } = submit(&mut form) else {
+            panic!()
+        };
+        assert_eq!(
+            works_in,
+            crate::engine::WorksIn::New {
+                branch: Some("older".into()),
+                base: None,
+            }
+        );
+        // A chat doesn't have it.
+        let chats = project("chats", None);
+        let form = Form::new_chat(std::slice::from_ref(&chats), &chats, &agents());
+        assert!(form.field(Id::WorksIn).is_none());
+    }
+
+    #[test]
     fn new_project_is_named_after_its_directory() {
         let mut form = Form::new_project("/src/my app", &agents());
         assert_eq!(form.value(Id::Name), "my-app");
@@ -1114,11 +1339,12 @@ mod tests {
         form.on_key(key(KeyCode::Right));
         assert_eq!(form.value(Id::Project), "beta");
         assert_eq!(form.value(Id::Model), "default");
-        form.focus = 5;
+        form.focus = form.fields.iter().position(|f| f.id == Id::Prompt).unwrap();
         type_text(&mut form, "fix the tests");
         assert_eq!(
             submit(&mut form),
             Op::NewSession {
+                works_in: Default::default(),
                 project: "beta".into(),
                 agent: "claude".into(),
                 name: None,

@@ -39,6 +39,7 @@ impl Roster {
         }
         conversations.sort_by_key(|c| std::cmp::Reverse(c.modified));
         let mut found = Vec::new();
+        let mut by_worktree = crate::engine::ByWorktree::default();
         for conversation in conversations {
             let known = session(&conversation.agent, &conversation.id);
             let project = projects
@@ -46,7 +47,9 @@ impl Roster {
                 .filter(|p| conversation.cwd.starts_with(&p.origin))
                 .max_by_key(|p| p.origin.components().count())
                 .cloned()
-                .or_else(|| self.project_by_worktree(&conversation.cwd, &projects));
+                .or_else(|| {
+                    self.project_by_worktree(&conversation.cwd, &projects, &mut by_worktree)
+                });
             if project.is_none() && !all {
                 continue;
             }
@@ -130,8 +133,11 @@ impl Roster {
         // A copy's conversation is its agent's to name as it starts: Claude
         // and pi are given an id, codex reports its own.
         let fork_from = req.fork.then(|| c.id.clone());
-        // Where it ran, if a worktree: there again, made again if it's gone.
+        // Where it ran, if a worktree: there again, made again if it's gone
+        // (and taken back, if the session then can't be).
+        let gone = !c.cwd.exists();
         let worktree = self.adopted_worktree(&project, &c.cwd)?;
+        let remade = worktree.clone().filter(|_| gone);
         let (conversation_id, transcript_path) = if req.fork {
             (None, None)
         } else {
@@ -140,7 +146,7 @@ impl Roster {
                 Some(c.path.to_string_lossy().into_owned()),
             )
         };
-        self.create_session(request, |s| {
+        let created = self.create_session(request, |s| {
             s.workdir = c.cwd.clone();
             s.worktree = worktree;
             s.conversation_id = conversation_id;
@@ -156,7 +162,16 @@ impl Roster {
             if s.model.is_none() {
                 s.running_model = c.model.clone();
             }
-        })
+        });
+        // Not if the session was saved before failing to start: it's there.
+        if let (Err(_), Some(w)) = (&created, &remade) {
+            let kept = (self.db.sessions(true)?.iter())
+                .any(|s| s.worktree.as_ref().is_some_and(|sw| sw.root == w.root));
+            if !kept {
+                crate::engine::undo_worktree(w);
+            }
+        }
+        created
     }
 
     /// Where the conversation `req` adopts is open, as far as its agent tells

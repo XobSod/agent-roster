@@ -106,6 +106,7 @@ mod tests {
             made: false,
             set_up: true,
             trusted_in: None,
+            branch_made: false,
         });
         std::fs::write(repo.join("b.txt"), "b\n").unwrap();
         let mut reads = Reads::default();

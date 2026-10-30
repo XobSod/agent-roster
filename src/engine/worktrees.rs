@@ -10,10 +10,16 @@ use crate::model::Worktree;
 pub const WORKTREE_SETUP: &str = ".agent-roster.worktree";
 
 /// Removes the worktree `w` made a moment ago, for a session that couldn't
-/// be: the branch too, if it was made with it, having nothing of its own.
-pub(super) fn undo_worktree(w: &Worktree) {
-    if git::remove_worktree(&w.repo, &w.root, false).is_ok() && w.base.is_some() {
-        git::delete_branch(&w.repo, &w.branch, true).ok();
+/// be: its branch too, if it was made with it, having nothing of its own.
+pub fn undo_worktree(w: &Worktree) {
+    if git::remove_worktree(&w.repo, &w.root, false).is_ok() {
+        if w.branch_made {
+            git::delete_branch(&w.repo, &w.branch, true).ok();
+        }
+        // Its project's folder, once it's left empty.
+        if let Some(parent) = w.root.parent() {
+            fs::remove_dir(parent).ok();
+        }
     }
 }
 
@@ -90,7 +96,8 @@ impl Roster {
             false => worktree.root.join(&within),
         };
         if !dir.is_dir() {
-            if worktree.made {
+            // One made now, not one there was (another session's, say).
+            if matches!(works_in, WorksIn::New { .. }) {
                 undo_worktree(&worktree);
             }
             bail!(
@@ -129,13 +136,13 @@ impl Roster {
         }
         // What it's counted against: the branch the checkout is on, as it
         // moves, rather than the commit it was on; for a branch that was
-        // there, the repository's default one.
+        // there, the repository's default one, unless it's that one.
         let (from, recorded) = match (exists, base) {
             (true, _) => {
                 self.notices.push(format!(
                     "Branch {branch} is there already: checked out as it is"
                 ));
-                (None, git::default_branch(top))
+                (None, git::default_branch(top).filter(|d| d != branch))
             }
             (false, None | Some("HEAD")) => {
                 let head = git::commit(checkout, "HEAD")?;
@@ -179,10 +186,20 @@ impl Roster {
                 .with_context(|| format!("can't make {}", parent.display()))?;
         }
         git::add_worktree(checkout, &root, branch, from.as_deref())?;
+        let made = |root: PathBuf| Worktree {
+            root,
+            repo: top.to_path_buf(),
+            branch: branch.to_string(),
+            base: recorded.clone(),
+            made: true,
+            branch_made: !exists,
+            set_up: !checkout.join(WORKTREE_SETUP).is_file(),
+            trusted_in: None,
+        };
         let root = match root.canonicalize() {
             Ok(root) => root,
             Err(e) => {
-                git::remove_worktree(checkout, &root, true).ok();
+                undo_worktree(&made(root.clone()));
                 bail!("can't find the worktree made at {}: {e}", root.display());
             }
         };
@@ -193,15 +210,7 @@ impl Roster {
                 project.name
             ));
         }
-        Ok(Worktree {
-            root,
-            repo: top.to_path_buf(),
-            branch: branch.to_string(),
-            base: recorded,
-            made: true,
-            set_up: !checkout.join(WORKTREE_SETUP).is_file(),
-            trusted_in: None,
-        })
+        Ok(made(root))
     }
 
     /// The worktree `at` names, of `project`'s repository: a session's,
@@ -259,6 +268,7 @@ impl Roster {
             branch,
             base: theirs.iter().find_map(|w| w.base.clone()),
             made: theirs.iter().any(|w| w.made),
+            branch_made: false,
             set_up: true,
             trusted_in: None,
         }))
@@ -268,31 +278,78 @@ impl Roster {
 impl Roster {
     /// The project a conversation that ran in `dir`, in no project's
     /// directory, belongs to by its worktree: the project of the repository
-    /// a worktree there is of, or the project one of roster's that's gone
-    /// was made for.
-    pub(crate) fn project_by_worktree(&self, dir: &Path, projects: &[Project]) -> Option<Project> {
+    /// a worktree there is of, whose place in it holds where the
+    /// conversation ran, the deepest; or the project one of roster's that's
+    /// gone was made for. What's worked out is kept in `found`, for the next.
+    pub(crate) fn project_by_worktree(
+        &self,
+        dir: &Path,
+        projects: &[Project],
+        found: &mut ByWorktree,
+    ) -> Option<Project> {
+        if let Some(known) = found.by_dir.get(dir) {
+            return known.clone();
+        }
+        let project = self.worktree_project(dir, projects, found);
+        found.by_dir.insert(dir.to_path_buf(), project.clone());
+        project
+    }
+
+    fn worktree_project(
+        &self,
+        dir: &Path,
+        projects: &[Project],
+        found: &mut ByWorktree,
+    ) -> Option<Project> {
         if !dir.exists() {
-            let made = dir.strip_prefix(self.worktrees_dir()).ok()?;
-            let name = made.components().next()?.as_os_str().to_string_lossy();
+            let name = self.made_for(dir)?.0;
             return projects.iter().find(|p| p.name == name).cloned();
         }
         // A worktree's root has a `.git` file, not a directory: only then
         // is git asked.
-        let linked = dir.ancestors().any(|a| a.join(".git").is_file());
-        if !linked {
+        if !dir.ancestors().any(|a| a.join(".git").is_file()) {
             return None;
         }
-        let repo = git::repository(dir)?;
-        (projects.iter())
-            .filter(|p| git::repository(&p.origin).as_ref() == Some(&repo))
-            .max_by_key(|p| p.origin.components().count())
-            .cloned()
+        let top = git::toplevel(dir)?;
+        let repo = git::repository(&top)?;
+        let dir = dir.canonicalize().ok()?;
+        let within = dir.strip_prefix(&top).ok()?;
+        let places = found.places.get_or_insert_with(|| {
+            (projects.iter())
+                .filter_map(|p| {
+                    let top = git::toplevel(&p.origin)?;
+                    let origin = p.origin.canonicalize().ok()?;
+                    let within = origin.strip_prefix(&top).ok()?.to_path_buf();
+                    Some((p.clone(), git::repository(&top)?, within))
+                })
+                .collect()
+        });
+        (places.iter())
+            .filter(|(_, r, place)| *r == repo && within.starts_with(place))
+            .max_by_key(|(_, _, place)| place.components().count())
+            .map(|(p, ..)| p.clone())
+    }
+
+    /// For a directory in one of roster's worktrees: the project it was made
+    /// for and the worktree's directory's name, by its path.
+    fn made_for(&self, dir: &Path) -> Option<(String, String)> {
+        let ours = self.worktrees_dir();
+        let canonical = ours.canonicalize().ok();
+        let rest = dir
+            .strip_prefix(&ours)
+            .ok()
+            .or_else(|| dir.strip_prefix(canonical.as_ref()?).ok())?;
+        let mut parts = rest
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned());
+        Some((parts.next()?, parts.next()?))
     }
 
     /// The worktree a conversation adopted into `project` ran in, at `dir`:
-    /// one there is, of its repository, or one of roster's that's gone, made
-    /// again now from its branch, if that's there and free; None for the
-    /// checkout, or a directory that's no worktree.
+    /// one there is, of its repository, on a branch; or one of roster's
+    /// that's gone, made again now from its branch, if that's there and
+    /// free. None for the checkout, a detached worktree (adopted there, as
+    /// any directory), or a directory that's no worktree.
     pub(crate) fn adopted_worktree(
         &mut self,
         project: &Project,
@@ -302,27 +359,32 @@ impl Roster {
             return Ok(None);
         };
         if dir.exists() {
-            if !git::same_repository(dir, &top) {
+            if !git::same_repository(dir, &top) || git::current_branch(dir).is_none() {
                 return Ok(None);
             }
             return self.existing_worktree(project, &top, &dir.to_string_lossy());
         }
-        let ours = self.worktrees_dir().join(&project.name);
-        let Some(name) = (dir.strip_prefix(&ours).ok())
-            .and_then(|rest| rest.components().next())
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        let Some((made_for, name)) = (self.made_for(dir))
+            .filter(|(p, _)| *p == project.name)
+            .filter(|_| self.worktrees_dir().is_absolute())
         else {
             return Ok(None);
         };
-        let root = ours.join(&name);
-        let Some(branch) = git::branches(&top)
-            .into_iter()
-            .find(|b| git::directory_name(b) == name)
-        else {
-            bail!(
+        let root = self.worktrees_dir().join(made_for).join(&name);
+        let branches: Vec<String> = (git::branches(&top).into_iter())
+            .filter(|b| git::directory_name(b) == name)
+            .collect();
+        let branch = match &branches[..] {
+            [branch] => branch.clone(),
+            [] => bail!(
                 "it ran in a worktree, {}, that's gone, and so is its branch: it can't be adopted there",
                 root.display()
-            );
+            ),
+            _ => bail!(
+                "it ran in a worktree, {}, that's gone, whose branch could be any of {}",
+                root.display(),
+                branches.join(", ")
+            ),
         };
         if let Some(at) = git::checked_out(&top, &branch)? {
             bail!(
@@ -331,7 +393,10 @@ impl Roster {
                 at.display()
             );
         }
-        fs::create_dir_all(&ours).with_context(|| format!("can't make {}", ours.display()))?;
+        if let Some(parent) = root.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("can't make {}", parent.display()))?;
+        }
         git::add_worktree_again(&project.origin, &root, &branch)?;
         self.notices.push(format!(
             "Made its worktree, {}, again from branch {branch}",
@@ -339,14 +404,24 @@ impl Roster {
         ));
         Ok(Some(Worktree {
             root: root.canonicalize()?,
-            repo: top,
+            repo: top.clone(),
+            base: git::default_branch(&top).filter(|d| *d != branch),
             branch,
-            base: None,
             made: true,
+            branch_made: false,
             set_up: !project.origin.join(WORKTREE_SETUP).is_file(),
             trusted_in: None,
         }))
     }
+}
+
+/// What adopting has worked out of worktrees, for each conversation after
+/// the first: the projects' places in their repositories, and the project
+/// each directory belongs to.
+#[derive(Default)]
+pub struct ByWorktree {
+    places: Option<Vec<(Project, PathBuf, PathBuf)>>,
+    by_dir: std::collections::HashMap<PathBuf, Option<Project>>,
 }
 
 /// A worktree sessions deleted for good work in, as it is now: whether it
@@ -418,7 +493,11 @@ impl Roster {
                 false => 0,
             };
             let goes = stays.is_none();
-            let branch = (goes && git::branch_exists(&w.repo, &w.branch)).then(|| Branch {
+            // Not the branch its others are counted against, nor the default.
+            let shared = w.base.as_ref() == Some(&w.branch)
+                || git::default_branch(&w.repo).as_ref() == Some(&w.branch);
+            let deletable = goes && !shared && git::branch_exists(&w.repo, &w.branch);
+            let branch = deletable.then(|| Branch {
                 name: w.branch.clone(),
                 base: w.base.clone(),
                 unmerged: (w.base.as_deref())
@@ -456,9 +535,13 @@ impl Roster {
                 ));
                 continue;
             }
+            // Gone already: git forgets it, and it alone, if it hadn't.
             let removed = match l.root.exists() {
                 true => git::remove_worktree(&l.repo, &l.root, how.discard_changes),
-                false => git::prune_worktrees(&l.repo),
+                false => {
+                    git::remove_worktree(&l.repo, &l.root, true).ok();
+                    Ok(())
+                }
             };
             if let Err(e) = removed {
                 said.push(format!("Its worktree, {at}, stays: {e:#}"));
@@ -598,9 +681,9 @@ pub fn branches_question(leaving: &[Leaving], discard: bool) -> Option<String> {
 /// How a worktree stands against its base, as read now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Standing {
-    /// Commits its branch has that its base hasn't, and the other way.
-    pub ahead: usize,
-    pub behind: usize,
+    /// Commits its branch has that its base hasn't, and the other way;
+    /// None if its base can't be found.
+    pub ahead_behind: Option<(usize, usize)>,
     /// Files changed and not committed, untracked ones included.
     pub changed: usize,
     /// What changed against its base, committed or not: files, lines added
@@ -615,13 +698,10 @@ pub fn standing(w: &Worktree) -> Option<Standing> {
     }
     let changed = git::changed_files(&w.root).ok()?;
     let base = w.base.as_deref();
-    let (ahead, behind) = base
-        .and_then(|b| git::ahead_behind(&w.root, b).ok())
-        .unwrap_or_default();
+    let ahead_behind = base.and_then(|b| git::ahead_behind(&w.root, b).ok());
     let diff = base.and_then(|b| git::diff_stat(&w.root, b).ok());
     Some(Standing {
-        ahead,
-        behind,
+        ahead_behind,
         changed,
         diff,
     })
@@ -637,16 +717,42 @@ pub fn base_said(base: &str) -> &str {
 
 /// How `standing` is said briefly, on a card: what there's something to
 /// say of, each.
-pub fn standing_brief(standing: &Standing) -> Vec<String> {
-    [
-        (standing.ahead, "ahead"),
-        (standing.behind, "behind"),
+pub fn standing_brief(w: &Worktree, standing: &Standing) -> Vec<String> {
+    let (ahead, behind) = standing.ahead_behind.unwrap_or_default();
+    let mut brief: Vec<String> = [
+        (ahead, "ahead"),
+        (behind, "behind"),
         (standing.changed, "changed"),
     ]
     .into_iter()
     .filter(|(n, _)| *n > 0)
     .map(|(n, what)| format!("{n} {what}"))
-    .collect()
+    .collect();
+    if let Some(base) = w
+        .base
+        .as_deref()
+        .filter(|_| standing.ahead_behind.is_none())
+    {
+        brief.insert(0, format!("{} gone", base_said(base)));
+    }
+    brief
+}
+
+/// How the worktree `w` stands, said short, for a line beside others: its
+/// branch and base, what there's something to say of, and the lines it
+/// changed against its base.
+pub fn standing_short(w: &Worktree, standing: Option<&Standing>) -> String {
+    let mut parts = vec![match &w.base {
+        Some(base) => format!("{} ← {}", w.branch, base_said(base)),
+        None => w.branch.clone(),
+    }];
+    if let Some(st) = standing {
+        parts.extend(standing_brief(w, st));
+        if let Some((_, added, removed)) = st.diff.filter(|d| d.0 > 0) {
+            parts.push(format!("+{added} −{removed}"));
+        }
+    }
+    parts.join(" · ")
 }
 
 /// How the worktree `w` stands, said whole: its branch and base, how far
@@ -658,12 +764,13 @@ pub fn standing_said(w: &Worktree, standing: Option<&Standing>) -> String {
         None => w.branch.clone(),
     }];
     if let Some(st) = standing {
-        if w.base.is_some() {
-            parts.push(match (st.ahead, st.behind) {
-                (0, 0) => "even with it".into(),
-                (a, 0) => format!("{a} ahead"),
-                (0, b) => format!("{b} behind"),
-                (a, b) => format!("{a} ahead, {b} behind"),
+        if let Some(base) = &w.base {
+            parts.push(match st.ahead_behind {
+                None => format!("{} can't be found", base_said(base)),
+                Some((0, 0)) => "even with it".into(),
+                Some((a, 0)) => format!("{a} ahead"),
+                Some((0, b)) => format!("{b} behind"),
+                Some((a, b)) => format!("{a} ahead, {b} behind"),
             });
         }
         if st.changed > 0 {
@@ -757,5 +864,38 @@ mod tests {
             " Worktrees that stay: /w/c (roster didn't make it)."
         );
         assert_eq!(staying_said(&one), "");
+
+        // How one stands: a base that can't be found isn't taken for even.
+        let w = Worktree {
+            root: "/w/fix".into(),
+            repo: "/r".into(),
+            branch: "fix".into(),
+            base: Some("gone".into()),
+            made: true,
+            branch_made: true,
+            set_up: true,
+            trusted_in: None,
+        };
+        let lost = Standing {
+            ahead_behind: None,
+            changed: 1,
+            diff: None,
+        };
+        assert_eq!(
+            standing_said(&w, Some(&lost)),
+            "fix ← gone · gone can't be found · 1 file changed, not committed"
+        );
+        let even = Standing {
+            ahead_behind: Some((0, 0)),
+            changed: 0,
+            diff: Some((2, 5, 1)),
+        };
+        assert_eq!(
+            standing_said(&w, Some(&even)),
+            "fix ← gone · even with it · +5 −1 in 2 files"
+        );
+        assert_eq!(standing_short(&w, Some(&even)), "fix ← gone · +5 −1");
+        // Briefly too, on a card.
+        assert_eq!(standing_brief(&w, &lost), ["gone gone", "1 changed"]);
     }
 }

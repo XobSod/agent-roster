@@ -345,11 +345,14 @@ pub(super) fn card(
             left.push(Span::styled(format!(" ← {base}"), Style::new().fg(FAINT)));
         }
         let brief = standing
-            .map(crate::engine::standing_brief)
+            .map(|st| crate::engine::standing_brief(w, st))
             .unwrap_or_default();
-        let right = match brief.is_empty() {
+        let brief = format!("{} ", brief.join(" · "));
+        // Too narrow for both, the branch: it's what the line is for.
+        let room = width.saturating_sub(left.iter().map(Span::width).sum::<usize>() + 1);
+        let right = match brief.trim().is_empty() || brief.width() > room {
             true => Vec::new(),
-            false => vec![Span::styled(format!("{} ", brief.join(" · ")), meta_style)],
+            false => vec![Span::styled(brief, meta_style)],
         };
         lines.push(fit(width, left, right));
     }

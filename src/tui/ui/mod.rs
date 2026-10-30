@@ -173,13 +173,12 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     // The session's statistics: what roster counts and what the agent can tell.
     if let Some(s) = app.selected_session() {
         let mut parts = crate::stats::summary(s, app.preview.stats.as_ref(), now);
-        // Where it works, first: what it did there is what's looked for.
+        // Where it works, first, short: what it did there is what's looked
+        // for; the rest follows as there's room.
         if let Some(w) = &s.worktree {
             let standing = app.worktrees.standing.get(&s.id);
-            parts.insert(
-                0,
-                format!("⎇ {}", crate::engine::standing_said(w, standing)),
-            );
+            let short = crate::engine::standing_short(w, standing);
+            parts.insert(0, format!("⎇ {short}"));
         }
         // First, where it shows whatever the width.
         if app.titling.iter().any(|t| t.id == s.id) {

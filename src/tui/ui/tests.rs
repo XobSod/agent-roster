@@ -350,6 +350,7 @@ fn a_worktree_sessions_card_says_its_branch_and_how_it_stands() {
         made: true,
         set_up: true,
         trusted_in: None,
+        branch_made: false,
     });
     app.set_data(app.projects.clone(), sessions);
     // Nothing to say yet: its branch alone, between its title and its agent.
@@ -369,8 +370,7 @@ fn a_worktree_sessions_card_says_its_branch_and_how_it_stands() {
     app.worktrees.standing.insert(
         "a1".into(),
         crate::engine::Standing {
-            ahead: 3,
-            behind: 0,
+            ahead_behind: Some((3, 0)),
             changed: 2,
             diff: Some((4, 120, 30)),
         },
@@ -381,9 +381,7 @@ fn a_worktree_sessions_card_says_its_branch_and_how_it_stands() {
     let screen = render(&app, 160, 24);
     assert!(screen.contains("3 ahead · 2 changed"), "{screen}");
     assert!(
-        screen.contains(
-            "⎇ fix-auth ← main · 3 ahead · 2 files changed, not committed · +120 −30 in 4 files"
-        ),
+        screen.contains("⎇ fix-auth ← main · 3 ahead · 2 changed · +120 −30 ·"),
         "{screen}"
     );
 }

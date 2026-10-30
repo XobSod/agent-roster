@@ -232,6 +232,25 @@ fn a_worktree_gone_is_made_again_from_its_branch() {
         err.contains("and so is its branch five: it can't start"),
         "{err}"
     );
+    // Deleting one whose worktree git has forgotten too goes as any.
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "six",
+        "--worktree",
+    ]);
+    let six = fs::canonicalize(t.path("state/agent-roster/worktrees/demo/six")).unwrap();
+    t.ok(&["stop", "--yes", "six"]);
+    fs::remove_dir_all(&six).unwrap();
+    git(&repo, &["worktree", "prune"]);
+    let out = t.ok(&["rm", "--yes", "--delete-branch", "six"]);
+    assert!(
+        out.contains("Removed its worktree") && out.contains("Deleted its branch six"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -310,6 +329,27 @@ fn a_conversation_that_ran_in_a_worktree_is_adopted_into_its_repositorys_project
     assert_eq!(
         (&w["path"], &w["branch"], &w["made_by_roster"]),
         (&json!(elsewhere), &json!("mine"), &json!(false))
+    );
+    // A detached one: adopted there, as any directory, no worktree of
+    // roster's.
+    let detached = t.path("detached");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            detached.to_str().unwrap(),
+        ],
+    );
+    let detached = fs::canonicalize(&detached).unwrap();
+    t.conversation("c0ffee03", &detached, "Detached");
+    t.ok(&["adopt", "c0ffee03", "--name", "detached"]);
+    let s = t.session("detached", false).unwrap();
+    assert_eq!(
+        (&s["project"], &s["worktree"]),
+        (&json!("demo"), &Value::Null)
     );
     // One of roster's, gone since with its session, its branch kept: made
     // again where it was.
@@ -423,6 +463,22 @@ fn what_a_worktree_is_made_from_and_what_deleting_one_with_changes_asks() {
     t.ok(&["rm", "--yes", "--discard-changes", "--keep-branch", "b"]);
     assert!(!root.exists());
     assert!(!git(&repo, &["branch", "--list", "b"]).is_empty());
+    // The default branch, the checkout on another: deleting doesn't offer
+    // to delete it.
+    git(&repo, &["switch", "-q", "side"]);
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "m",
+        "--worktree",
+        "main",
+    ]);
+    t.ok(&["rm", "--yes", "m"]);
+    assert!(!git(&repo, &["branch", "--list", "main"]).is_empty());
+    git(&repo, &["switch", "-q", "main"]);
     // A directory for them inside the repository itself, refused; nor a
     // relative one.
     let config = t.config_dir().join("config.toml");
@@ -458,7 +514,40 @@ fn a_project_in_a_subdirectory_works_there_in_its_worktrees_and_goes_with_them()
     fs::write(repo.join("api/x.txt"), "x\n").unwrap();
     git(&repo, &["add", "api/x.txt"]);
     git(&repo, &["commit", "-q", "-m", "api"]);
+    // A branch from before the subdirectory: the session can't work there,
+    // and the branch, roster's not to undo, stays.
+    git(&repo, &["branch", "older", "HEAD~1"]);
     t.ok(&["project", "add", "api", repo.join("api").to_str().unwrap()]);
+    let out = t.run(&[
+        "new",
+        "api",
+        "--agent",
+        "echo",
+        "--name",
+        "o",
+        "--worktree",
+        "older",
+    ]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't in the worktree"));
+    assert!(!git(&repo, &["branch", "--list", "older"]).is_empty());
+    assert!(!t.path("state/agent-roster/worktrees/api/older").exists());
+    // Nor is another session's worktree it can't work in undone: it's theirs.
+    t.ok(&[
+        "new",
+        "demo",
+        "--agent",
+        "echo",
+        "--name",
+        "o2",
+        "--worktree",
+        "older",
+    ]);
+    let theirs = fs::canonicalize(t.path("state/agent-roster/worktrees/demo/older")).unwrap();
+    let out = t.run(&[
+        "new", "api", "--agent", "echo", "--name", "o3", "--in", "o2",
+    ]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't in the worktree"));
+    assert!(theirs.join("a.txt").exists());
     t.ok(&["new", "api", "--agent", "echo", "--name", "w", "--worktree"]);
     let root = fs::canonicalize(t.path("state/agent-roster/worktrees/api/w")).unwrap();
     assert_eq!(

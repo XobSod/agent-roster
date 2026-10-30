@@ -224,12 +224,6 @@ pub fn add_worktree_again(repo: &Path, path: &Path, branch: &str) -> Result<()> 
     Ok(())
 }
 
-/// Lets git forget the worktrees whose directories are gone.
-pub fn prune_worktrees(repo: &Path) -> Result<()> {
-    git(repo, &["worktree", "prune"])?;
-    Ok(())
-}
-
 /// Removes the worktree at `path`; with `force`, though it has changes
 /// not committed. Git refuses a locked one either way.
 pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> Result<()> {
@@ -412,9 +406,8 @@ pub(crate) mod tests {
         add_worktree(&main, &wt, "other", Some("main")).unwrap();
         std::fs::remove_dir_all(&wt).unwrap();
         assert!(worktrees(&main).unwrap()[1].prunable);
-        prune_worktrees(&main).unwrap();
-        assert_eq!(worktrees(&main).unwrap().len(), 1);
-        add_worktree(&main, &wt, "other", None).unwrap();
+        // Made again where git still has it.
+        add_worktree_again(&main, &wt, "other").unwrap();
         assert_eq!(current_branch(&wt).as_deref(), Some("other"));
     }
 

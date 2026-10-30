@@ -57,6 +57,8 @@ struct Repo {
     head: Option<String>,
     /// Where each branch checked out is.
     checked_out: std::collections::HashMap<String, std::path::PathBuf>,
+    /// The checkout's working tree's root.
+    top: std::path::PathBuf,
     /// Its worktrees, the checkout aside.
     worktrees: Vec<std::path::PathBuf>,
     /// Files changed in the checkout, not committed.
@@ -83,6 +85,7 @@ impl Repo {
                 .filter(|p| *p != top)
                 .collect(),
             changed: git::changed_files(origin).unwrap_or(0),
+            top,
         })
     }
 }
@@ -180,6 +183,8 @@ pub struct Form {
     models: Models,
     /// The new-session form's projects' repositories, by project, as read.
     repos: std::collections::HashMap<String, Option<Repo>>,
+    /// The project the worktree to work in was picked for.
+    worktree_of: Option<String>,
 }
 
 /// What forms know of agents' models.
@@ -510,6 +515,7 @@ impl Form {
             filled_from: None,
             models: Models::known(),
             repos: Default::default(),
+            worktree_of: None,
         };
         form.update();
         form
@@ -791,22 +797,35 @@ impl Form {
             .collect();
         let works_in = f.value.clone();
         let repo = repo.unwrap_or_default();
-        let branch = self.value(Id::Branch).trim().to_string();
+        // What a branch there is says, checked out or not.
+        let said = |b: &str| match repo.checked_out.get(b) {
+            Some(at) if *at == repo.top => "the checkout is on it".to_string(),
+            Some(at) => format!(
+                "checked out in {}: pick it as an existing worktree",
+                crate::util::short_path(at)
+            ),
+            None => "there already: checked out as it is".into(),
+        };
+        // Left empty, it's the agent's name, if one's given.
+        let typed = self.value(Id::Branch).trim().to_string();
+        let name = self.value(Id::Name).trim().to_string();
+        let branch = if typed.is_empty() {
+            name.clone()
+        } else {
+            typed
+        };
         let exists = repo.branches.contains(&branch);
         if let Some(f) = self.field_mut(Id::Branch) {
             f.hidden = works_in != NEW_WORKTREE;
             f.notes = (repo.branches.iter())
-                .map(|b| {
-                    let note = match repo.checked_out.get(b) {
-                        Some(at) => format!(
-                            "checked out in {}: pick it as an existing worktree",
-                            crate::util::short_path(at)
-                        ),
-                        None => "there already: checked out as it is".into(),
-                    };
-                    (b.clone(), note)
-                })
+                .map(|b| (b.clone(), said(b)))
                 .collect();
+            if let Kind::Text { placeholder, .. } = &mut f.kind {
+                *placeholder = match repo.branches.contains(&name) {
+                    true => format!("the agent name: {}", said(&name)),
+                    false => "the agent name".into(),
+                };
+            }
         }
         if let Some(f) = self.field_mut(Id::Base) {
             // A branch there already isn't made from anything.
@@ -827,12 +846,19 @@ impl Form {
                 })
                 .collect();
         }
+        // Another project's worktree isn't this one's.
+        let other_project = self.worktree_of.as_deref() != Some(p.name.as_str());
+        self.worktree_of = Some(p.name.clone());
         if let Some(f) = self.field_mut(Id::Worktree) {
+            if other_project {
+                f.edited = false;
+            }
             f.hidden = works_in != EXISTING_WORKTREE;
             let paths: Vec<String> = (repo.worktrees.iter())
                 .map(|w| crate::util::short_path(w))
                 .collect();
-            if !paths.contains(&f.value) {
+            // One typed (a session, a directory in one) is kept as typed.
+            if !f.edited && !paths.contains(&f.value) {
                 f.value = paths.first().cloned().unwrap_or_default();
             }
             f.kind = Kind::Combo(paths);
@@ -843,9 +869,13 @@ impl Form {
     fn works_in(&self) -> crate::engine::WorksIn {
         use crate::engine::WorksIn;
         match self.value(Id::WorksIn) {
+            // What's hidden (From, for a branch there already) isn't asked for.
             NEW_WORKTREE => WorksIn::New {
                 branch: self.setting(Id::Branch),
-                base: self.setting(Id::Base).filter(|b| b != "HEAD"),
+                base: (self.field(Id::Base).is_some_and(|f| !f.hidden))
+                    .then(|| self.setting(Id::Base))
+                    .flatten()
+                    .filter(|b| b != "HEAD"),
             },
             EXISTING_WORKTREE => WorksIn::Existing(expand_tilde(self.value(Id::Worktree).trim())),
             _ => WorksIn::Checkout,
@@ -1187,11 +1217,15 @@ mod tests {
             form.field(Id::Base).unwrap().notes["HEAD"],
             "main, as the checkout is now"
         );
-        // A branch there is checked out as it is, from nothing; one checked
-        // out says where.
+        // A branch there is checked out as it is, from nothing; the
+        // checkout's own says so.
         let branch = form.field(Id::Branch).unwrap();
         assert!(branch.notes["older"].starts_with("there already"));
-        assert!(branch.notes["main"].starts_with("checked out in"));
+        assert_eq!(branch.notes["main"], "the checkout is on it");
+        // A From picked, then a branch there typed: From goes, and isn't sent.
+        form.focus = form.fields.iter().position(|f| f.id == Id::Base).unwrap();
+        form.on_key(key(KeyCode::Right));
+        assert_eq!(form.value(Id::Base), "main");
         form.focus = form.fields.iter().position(|f| f.id == Id::Branch).unwrap();
         type_text(&mut form, "older");
         assert!(!shown(&form, Id::Base));

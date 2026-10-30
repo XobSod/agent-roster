@@ -44,6 +44,10 @@ pub struct Worktree {
     pub base: Option<String>,
     /// Made by roster, which removes it once no session works in it.
     pub made: bool,
+    /// Its branch made with it, so nothing but roster's: undone with it if
+    /// its session can't be.
+    #[serde(default)]
+    pub branch_made: bool,
     /// Set up by its project's setup script, or needing none.
     pub set_up: bool,
     /// The agent's config its folder's trust was written in

@@ -164,7 +164,10 @@ impl Roster {
             s.worktree = Some(worktree);
         }
         if let Err(e) = self.db.insert_session(&s) {
-            if let Some(w) = s.worktree.as_ref().filter(|w| w.made) {
+            // One made now for it, not one there was.
+            if let Some(w) = s.worktree.as_ref()
+                && matches!(req.works_in, WorksIn::New { .. })
+            {
                 undo_worktree(w);
             }
             return Err(e);

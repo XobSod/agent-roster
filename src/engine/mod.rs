@@ -36,13 +36,14 @@ pub use self::{
     sessions::{Defaults, NewSession},
     starting::{StartCheck, Starting, start_check},
     worktrees::{
-        Deleting, Leaving, Standing, WORKTREE_SETUP, WorksIn, base_said, branches_question,
-        changes_question, standing, standing_brief, standing_said, staying_said,
+        ByWorktree, Deleting, Leaving, Standing, WORKTREE_SETUP, WorksIn, base_said,
+        branches_question, changes_question, standing, standing_brief, standing_said,
+        standing_short, staying_said, undo_worktree,
     },
 };
 
 // What one job has that the others use.
-use self::{processes::*, prompts::*, sessions::*, worktrees::*};
+use self::{processes::*, prompts::*, sessions::*};
 
 /// What's said of a config roster's tmux didn't take: what tmux said first
 /// (a long message is cut at its end), and that roster goes on.

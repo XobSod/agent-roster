@@ -220,6 +220,7 @@ mod tests {
             made: true,
             set_up: true,
             trusted_in: None,
+            branch_made: false,
         });
         let StartCheck::Confirm(question) = start_check(&s, Starting::Start) else {
             panic!()

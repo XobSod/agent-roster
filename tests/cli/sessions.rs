@@ -149,13 +149,18 @@ fn session_lifecycle() {
     assert_eq!(shells(&t), (json!("idle"), json!(true), json!(0)));
     t.ok(&["read", "one"]);
     // Told it ended as a prompt of its own: it goes on by itself, nothing
-    // to read till that turn ends.
+    // to read till that turn ends. The notice holds the result, long or not.
     t.report(&id, "prompt", &payload);
     t.report(&id, "working", &left("t2"));
     t.report(&id, "idle", &payload);
     assert_eq!(shells(&t), (json!("working"), json!(true), json!(1)));
+    let result = format!(
+        "<result>{}</result>\n</task-notification>",
+        "x".repeat(5000)
+    );
     let woken = json!({"session_id": "conv-1", "transcript_path": transcript,
-        "hook_event_name": "UserPromptSubmit", "prompt": notice("t2")});
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": notice("t2").replace("</task-notification>", &result)});
     t.report(&id, "prompt", &woken.to_string());
     assert_eq!(shells(&t), (json!("working"), json!(false), json!(0)));
     t.report(&id, "idle", &payload);

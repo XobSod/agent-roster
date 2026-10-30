@@ -21,7 +21,9 @@ const MAX_PAYLOAD: u64 = 1 << 20;
 /// tool's input and output, whole files and command output among them (22
 /// MB of a day's events). Top-level values longer than this aren't stored,
 /// but for their plain members no longer than `MAX_MEMBER` (a long
-/// command's description, a long output's background task).
+/// command's description, a long output's background task). A prompt is
+/// kept whole: Claude's notice that a task it left running ended comes as
+/// one, the task's result in it, and is read.
 const MAX_VALUE: usize = 4096;
 const MAX_MEMBER: usize = 256;
 
@@ -74,8 +76,8 @@ fn stored(payload: &str) -> String {
         return payload.to_string();
     };
     let mut changed = false;
-    object.retain(|_, v| {
-        if v.to_string().len() <= MAX_VALUE {
+    object.retain(|k, v| {
+        if k == "prompt" || v.to_string().len() <= MAX_VALUE {
             return true;
         }
         changed = true;
@@ -102,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_values_are_left_out_but_for_their_short_members() {
+    fn long_values_are_left_out_but_for_their_short_members_and_a_prompt() {
         let output = "x".repeat(MAX_VALUE * 2);
         let edit = "y".repeat(MAX_MEMBER * 2);
         let payload = format!(
@@ -114,6 +116,9 @@ mod tests {
             serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
                 "tool_response": {"backgroundTaskId": "b1", "interrupted": false}})
         );
+        let notice = format!("<task-notification>\n<result>{output}</result>");
+        let prompt = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": notice});
+        assert_eq!(stored(&prompt.to_string()), prompt.to_string());
         let short = r#"{"session_id":"c-1",  "model":"claude-opus-5-5"}"#;
         assert_eq!(stored(short), short);
         assert_eq!(stored("not json"), "not json");

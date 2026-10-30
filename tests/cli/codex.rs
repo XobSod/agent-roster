@@ -690,3 +690,63 @@ fn a_sessions_folder_is_trusted_in_its_agent_when_asked() {
     });
     assert!(!proj.join("config.toml").exists());
 }
+
+#[test]
+fn rosters_hooks_are_trusted_in_codex_as_a_session_starts_unless_told_not_to() {
+    let Some(t) = TestEnv::new("codex-hooks") else {
+        return;
+    };
+    with_fake_codex(&t);
+    let proj = t.path("proj");
+    t.ok(&["project", "add", "demo", proj.to_str().unwrap()]);
+    let codex_config = t.codex_dir().join("config.toml");
+    // The hashes the run was given trust in, by key; None if none.
+    let trust = |name: &str| -> Option<toml::Table> {
+        t.wait_for("codex up", |t| {
+            t.ok(&["show", name]).contains("fake codex:")
+        });
+        let argv = fs::read_to_string(t.codex_dir().join("argv")).unwrap();
+        let state = argv.lines().find_map(|a| a.strip_prefix("hooks.state="))?;
+        let table: toml::Table = toml::from_str(&format!("state = {state}")).unwrap();
+        Some(table["state"].as_table().unwrap().clone())
+    };
+    let key = |event: &str| format!("/<session-flags>/config.toml:{event}:0:0");
+    // By default: each of roster's, by the hash codex's server gives, for
+    // that run alone; not the project's, and codex's config untouched.
+    t.ok(&["new", "demo", "--name", "on"]);
+    let state = trust("on").expect("roster's hooks trusted");
+    for event in ["session_start", "pre_tool_use", "stop", "subagent_stop"] {
+        let hash = state[&key(event)]["trusted_hash"].as_str();
+        assert_eq!(
+            hash,
+            Some(format!("sha256:fake-{event}").as_str()),
+            "{event}"
+        );
+    }
+    assert!(
+        state.keys().all(|k| k.starts_with("/<session-flags>/")),
+        "{state:?}"
+    );
+    assert!(!codex_config.exists());
+    // One codex trusts already isn't given again.
+    let trusted = format!(
+        "[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:fake-stop\"\n",
+        key("stop")
+    );
+    fs::write(&codex_config, &trusted).unwrap();
+    t.ok(&["new", "demo", "--name", "again"]);
+    let state = trust("again").expect("roster's hooks trusted");
+    assert!(state.contains_key(&key("session_start")) && !state.contains_key(&key("stop")));
+    assert_eq!(fs::read_to_string(&codex_config).unwrap(), trusted);
+    // Told not to: codex asks, as it would.
+    t.ok(&["config", "set", "agents.codex.trust_roster_hooks", "false"]);
+    t.ok(&["new", "demo", "--name", "off"]);
+    assert_eq!(trust("off"), None);
+    // A launch an older roster built, still running as this one replaced it.
+    let old = t.run(&["trust-folder", "codex", "--", "true"]);
+    assert!(
+        old.status.success(),
+        "{}",
+        String::from_utf8_lossy(&old.stderr)
+    );
+}

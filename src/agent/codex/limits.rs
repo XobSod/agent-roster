@@ -1,48 +1,23 @@
 //! What codex's account has used of its limits: asked of codex's own server
-//! (`codex app-server`, its JSON-RPC protocol on stdin and stdout), and
-//! written by codex in its rollouts with every response, the same figures.
+//! (`server`), and written by codex in its rollouts with every response, the
+//! same figures.
 
 use anyhow::{Result, bail};
-use serde_json::{Value, json};
+use serde_json::Value;
 
+use super::server::{self, answer, requests};
 use crate::launch::Input;
 use crate::usage::{Usage, Window};
 use crate::util::{local_when, now_ms};
-
-/// The requests asking codex's server for the limits: the handshake its
-/// protocol starts with, then `account/rateLimits/read`, answered as id 2.
-fn requests() -> String {
-    let lines = [
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-               "params": {"clientInfo": {"name": "roster", "version": env!("CARGO_PKG_VERSION")}}}),
-        json!({"jsonrpc": "2.0", "method": "initialized"}),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"}),
-    ];
-    lines.iter().map(|l| format!("{l}\n")).collect()
-}
-
-/// The answer to request 2 among the complete lines codex's server printed.
-fn answer(printed: &[u8]) -> Option<Value> {
-    let complete = &printed[..printed.iter().rposition(|b| *b == b'\n')? + 1];
-    complete
-        .split(|b| *b == b'\n')
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        .find(|v| v["id"] == 2)
-}
 
 /// Asks codex's server, run as `command`; it serves until its stdin ends,
 /// which it's given once it has answered. None if codex has no account to ask
 /// about (not logged in, or on an API key).
 pub(super) fn ask(command: String, ask: &crate::agent::Ask<'_>) -> Option<Result<Usage>> {
-    let requests = requests();
+    let requests = requests("account/rateLimits/read", None);
     let answered = |printed: &[u8]| answer(printed).is_some();
     let question = crate::agent::Question {
-        argv: vec![
-            command,
-            "app-server".into(),
-            "-c".into(),
-            "check_for_update_on_startup=false".into(),
-        ],
+        argv: server::argv(command, []),
         input: Some(Input {
             text: requests.as_bytes(),
             answered: &answered,
@@ -149,24 +124,7 @@ pub(super) fn limits(limits: &Value, at: i64) -> Option<Usage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_servers_answer_is_found_among_what_it_prints() {
-        let printed = concat!(
-            r#"{"id":1,"result":{"userAgent":"roster/0.164.0"}}"#,
-            "\n",
-            r#"{"method":"remoteControl/status/changed","params":{"status":"disabled"}}"#,
-            "\n",
-            r#"{"id":2,"result":{}}"#,
-        );
-        // Its line not finished yet.
-        assert_eq!(answer(printed.as_bytes()), None);
-        let printed = format!("{printed}\n");
-        assert_eq!(
-            answer(printed.as_bytes()),
-            Some(json!({"id": 2, "result": {}}))
-        );
-    }
+    use serde_json::json;
 
     #[test]
     fn the_servers_answer_gives_the_windows_and_resets_left() {

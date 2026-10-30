@@ -1,11 +1,26 @@
 #!/bin/sh
-# Its server, as asked for the account's limits: it answers each request,
-# and serves until its stdin ends.
+# Its server, as asked for the account's limits or its hooks: it answers
+# each request, and serves until its stdin ends. The hooks it's given it
+# lists as roster's (`$ROSTER_EXE`), keyed by event as codex keys them, each
+# with a hash of its own, trusted if its config has that hash; and a
+# project's hook, not trusted, running roster's report all the same.
 if [ "$1" = app-server ]; then
   in=$(( $(date +%s) + 3600 ))
+  hooks=$(printf '{"key":"%s/.codex/hooks.json:stop:0:0","source":"project","command":"'"'"'%s'"'"' report x","currentHash":"sha256:project","trustStatus":"untrusted"}' "$PWD" "$ROSTER_EXE")
+  for a in "$@"; do
+    case "$a" in
+      hooks.*=*)
+        event=${a%%=*}; event=$(printf '%s' "${event#hooks.}" | sed 's/\([a-z]\)\([A-Z]\)/\1_\2/g' | tr 'A-Z' 'a-z')
+        status=untrusted
+        grep -qs "\"sha256:fake-$event\"" "$CODEX_HOME/config.toml" && status=trusted
+        hook=$(printf '{"key":"/<session-flags>/config.toml:%s:0:0","source":"sessionFlags","command":"'"'"'%s'"'"' report x","currentHash":"sha256:fake-%s","trustStatus":"%s"}' "$event" "$ROSTER_EXE" "$event" "$status")
+        hooks="$hooks,$hook" ;;
+    esac
+  done
   while read -r line; do
     case "$line" in
       *'"method":"initialize"'*) echo '{"id":1,"result":{"userAgent":"fake"}}' ;;
+      *'"method":"hooks/list"'*) printf '{"id":2,"result":{"data":[{"cwd":"%s","hooks":[%s]}]}}\n' "$PWD" "$hooks" ;;
       *'"method":"account/rateLimits/read"'*)
         echo '{"method":"remoteControl/status/changed","params":{"status":"disabled"}}'
         printf '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":7,"windowDurationMins":300,"resetsAt":%s},"secondary":{"usedPercent":13,"windowDurationMins":10080,"resetsAt":%s},"planType":"plus"}}}\n' "$in" "$in" ;;
@@ -33,6 +48,9 @@ case "$sub" in
   *) id=$(new_id) ;;
 esac
 started=no
+# What it was run with, an argument a line, as the screen may wrap it:
+# written before it says it's up.
+mkdir -p "$CODEX_HOME" && printf '%s\n' "$@" > "$CODEX_HOME/argv"
 echo "fake codex: $*"
 report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
 turn() {

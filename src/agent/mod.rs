@@ -262,6 +262,20 @@ pub trait Adapter: Sync {
         false
     }
 
+    /// Its command line `argv` with roster's own hooks in it (roster run as
+    /// `exe`) trusted for that run, as answering its review of them would
+    /// (`trust_roster_hooks`). Which it trusts already is found from the
+    /// environment this runs in, which must be the agent's own
+    /// (`trust_and_run`).
+    fn hooks_trusted(&self, argv: &[String], _exe: &str) -> Result<Vec<String>> {
+        Ok(argv.to_vec())
+    }
+
+    /// Whether it asks to trust hooks roster can trust for it (`hooks_trusted`).
+    fn trusts_hooks(&self) -> bool {
+        false
+    }
+
     /// Every file it keeps what it spent in (its conversations', started in
     /// roster or not), each with the id of the conversation it's of.
     fn token_files(&self) -> Vec<(std::path::PathBuf, String)> {
@@ -586,33 +600,55 @@ pub fn read_report(name: &str, payload: Option<&str>) -> Report {
     report
 }
 
-/// What `roster trust-folder <agent> -- <command…>` does, run by a session's
-/// launch script in its agent's place once the env files are sourced, so in
-/// the environment the agent gets (a `CODEX_HOME` of the project's, say):
-/// trusts the folder it's in for that agent (`Adapter::trust_folder`), then
-/// becomes the agent. What fails of the trust is said, and the agent asks as
-/// it would.
+/// What `roster trust [--folder] [--hooks] <agent> -- <command…>` does, run
+/// by a session's launch script in its agent's place once the env files are
+/// sourced, so in the environment the agent gets (a `CODEX_HOME` of the
+/// project's, say): trusts the folder it's in for that agent
+/// (`Adapter::trust_folder`), roster's hooks in its command
+/// (`Adapter::hooks_trusted`), or both, then becomes the agent. What fails of
+/// the trust is said, and the agent asks as it would.
 pub fn trust_and_run(args: &[String]) -> ! {
     use std::os::unix::process::CommandExt;
-    let (agent, argv) = match args {
+    let flags = args
+        .iter()
+        .take_while(|a| a.starts_with("--") && *a != "--");
+    let (mut folder, mut hooks) = (false, false);
+    for flag in flags.clone() {
+        match flag.as_str() {
+            "--folder" => folder = true,
+            "--hooks" => hooks = true,
+            _ => {
+                eprintln!("roster: trust takes --folder or --hooks, not {flag}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (agent, argv) = match &args[flags.count()..] {
         [agent, dash, argv @ ..] if dash == "--" && !argv.is_empty() => (agent, argv),
         _ => {
-            eprintln!("roster: trust-folder takes an agent, --, and its command");
+            eprintln!("roster: trust takes an agent, --, and its command");
             std::process::exit(2);
         }
     };
+    let name = crate::util::capitalize(agent);
     // The working directory as the agent will see it: links resolved.
     match std::env::current_dir() {
-        Ok(dir) => {
+        Ok(dir) if folder => {
             if let Err(e) = adapter(agent).trust_folder(&dir) {
-                eprintln!(
-                    "roster: couldn't trust {} in {}: {e:#}",
-                    dir.display(),
-                    crate::util::capitalize(agent)
-                );
+                eprintln!("roster: couldn't trust {} in {name}: {e:#}", dir.display());
             }
         }
+        Ok(_) => {}
         Err(e) => eprintln!("roster: can't tell which folder to trust: {e}"),
+    }
+    let mut argv = argv.to_vec();
+    if hooks {
+        let trusted = crate::util::own_exe()
+            .and_then(|exe| adapter(agent).hooks_trusted(&argv, &exe.to_string_lossy()));
+        match trusted {
+            Ok(trusted) => argv = trusted,
+            Err(e) => eprintln!("roster: couldn't trust roster's hooks in {name}: {e:#}"),
+        }
     }
     let e = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
     eprintln!("roster: can't run {}: {e}", argv[0]);

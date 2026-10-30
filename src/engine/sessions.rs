@@ -206,12 +206,18 @@ impl Roster {
             check_prompt_fits(&s.agent, text)?;
         }
         let prompt = launch.prompt.as_ref().map(|_| self.prompt_file(&s.id));
-        // Its folder trusted in its agent first, as asked, by roster run in
-        // its place: in its environment, once the env files are sourced.
+        // Its folder and roster's hooks trusted in its agent first, as
+        // asked, by roster run in its place: in its environment, once the
+        // env files are sourced.
         let mut command = launch.argv.clone();
-        if self.config.trust_project_folders() && agent::adapter(&s.agent).trusts_folders() {
-            let exe = self.exe.to_string_lossy().into_owned();
-            let head = [exe, "trust-folder".into(), s.agent.clone(), "--".into()];
+        let adapter = agent::adapter(&s.agent);
+        let folder = self.config.trust_project_folders() && adapter.trusts_folders();
+        let hooks = self.config.trusts_hooks(&s.agent) && adapter.trusts_hooks();
+        if folder || hooks {
+            let mut head = vec![self.exe.to_string_lossy().into_owned(), "trust".into()];
+            head.extend(folder.then(|| "--folder".to_string()));
+            head.extend(hooks.then(|| "--hooks".to_string()));
+            head.extend([s.agent.clone(), "--".into()]);
             command.splice(0..0, head);
         }
         let argv = self.wrapped(&s, prompt.as_deref(), &command)?;

@@ -309,6 +309,7 @@ fn kind_at(sections: &[Section], path: &[String]) -> Option<Kind> {
                 "args" => Some(Kind::Words),
                 "idle_after" => Some(Kind::Seconds),
                 "auto_title" => Some(Kind::Bool),
+                "trust_roster_hooks" if agent::adapter(name).trusts_hooks() => Some(Kind::Bool),
                 "fit_preview" => Some(Kind::Choice(vec![
                     "auto".into(),
                     "always".into(),
@@ -696,6 +697,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             effort,
             title_model,
             auto_title,
+            trust_roster_hooks,
         } = &agent;
         let own = format!("{name}'s own default");
         let p = |key: &'static str| -> Vec<&str> { vec!["agents", name, key] };
@@ -765,6 +767,13 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &p("auto_title"),
                 auto_title.unwrap_or(true),
                 "a title made after a conversation's first turn (it names no task itself)",
+            ));
+        }
+        if adapter.trusts_hooks() {
+            settings.push(bool_setting(
+                &p("trust_roster_hooks"),
+                trust_roster_hooks.unwrap_or(true),
+                "trust roster's own hooks as a session starts, so it doesn't ask to review them (for that run, its config untouched); a project's it asks about",
             ));
         }
         if !adapter.reports() {

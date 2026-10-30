@@ -194,10 +194,15 @@ pub enum Cmd {
     /// Called by agent hooks; always silent, always exits 0
     #[command(hide = true)]
     Report { kind: String },
-    /// Run by a session's launch in its agent's place: trusts the folder for
-    /// it, in its environment, then runs it (`trust_project_folders`)
+    /// Run by a session's launch in its agent's place: trusts the folder
+    /// (`trust_project_folders`), roster's hooks (`trust_roster_hooks`) or
+    /// both for it, in its environment, then runs it
     #[command(hide = true)]
-    TrustFolder {
+    Trust {
+        #[arg(long)]
+        folder: bool,
+        #[arg(long)]
+        hooks: bool,
         agent: String,
         #[arg(last = true)]
         argv: Vec<String>,

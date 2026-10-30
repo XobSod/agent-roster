@@ -57,6 +57,11 @@
 //! model = "sonnet"                # new sessions', unless they or their project pick
 //! effort = "high"                 # one; default: the agent's own
 //! title_model = "haiku"           # makes generated titles; default: model above
+//! [agents.codex]                  # codex is offered once installed; this only adds to it
+//! trust_roster_hooks = false      # default true: roster's own hooks trusted in codex as
+//!                                 # a session starts, so it doesn't ask to review them
+//!                                 # (for that run, its config untouched); a project's it
+//!                                 # asks about
 //! [agents.pi]                     # pi is offered once installed; this only adds to it
 //! args = ["--tui-mode", "regular"]
 //! title_model = "claude-haiku-4-5"
@@ -561,6 +566,9 @@ pub struct AgentConfig {
     /// For an agent that doesn't name its task itself (pi): a title made
     /// after its first turn (default true).
     pub auto_title: Option<bool>,
+    /// For an agent that asks to trust roster's hooks (codex): trusted as a
+    /// session starts, so it doesn't ask (default true).
+    pub trust_roster_hooks: Option<bool>,
 }
 
 impl AgentConfig {
@@ -623,6 +631,11 @@ impl Config {
         for (name, agent) in &config.agents {
             if agent.idle_after == Some(0) {
                 bail!("agents.{name}.idle_after must be at least 1 (seconds)");
+            }
+            if agent.trust_roster_hooks.is_some() && !crate::agent::adapter(name).trusts_hooks() {
+                bail!(
+                    "agents.{name}.trust_roster_hooks: {name} asks to trust no hooks of roster's"
+                );
             }
             if crate::agent::adapter(name).choices().is_none()
                 && (agent.model.is_some() || agent.effort.is_some())
@@ -706,6 +719,14 @@ impl Config {
 
     pub fn trust_project_folders(&self) -> bool {
         self.trust_project_folders.unwrap_or(false)
+    }
+
+    /// Whether roster's hooks are trusted in `agent` as its sessions start
+    /// (`trust_roster_hooks`).
+    pub fn trusts_hooks(&self, agent: &str) -> bool {
+        (self.agents.get(agent))
+            .and_then(|a| a.trust_roster_hooks)
+            .unwrap_or(true)
     }
 
     pub fn sidebar_usage(&self) -> bool {

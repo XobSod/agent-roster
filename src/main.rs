@@ -57,8 +57,17 @@ fn main() -> ExitCode {
     if args.get(1).map(String::as_str) == Some("report") {
         report::run(&args[2..]);
     }
-    if args.get(1).map(String::as_str) == Some("trust-folder") {
+    if args.get(1).map(String::as_str) == Some("trust") {
         crate::agent::trust_and_run(&args[2..]);
+    }
+    // `trust-folder`, as a launch built by an older roster runs it (one still
+    // running while its binary is replaced): taken as `trust --folder`.
+    if args.get(1).map(String::as_str) == Some("trust-folder") {
+        let args: Vec<String> = ["--folder".to_string()]
+            .into_iter()
+            .chain(args[2..].iter().cloned())
+            .collect();
+        crate::agent::trust_and_run(&args);
     }
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -194,7 +203,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Tokens { days, json } => print_tokens(r, days, json)?,
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
-        Cmd::Report { .. } | Cmd::TrustFolder { .. } => {}
+        Cmd::Report { .. } | Cmd::Trust { .. } => {}
         Cmd::Deliver { session } => cmd::sessions::deliver(r, session)?,
     }
     Ok(())

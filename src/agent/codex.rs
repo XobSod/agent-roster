@@ -9,6 +9,7 @@
 
 pub mod conversations;
 mod limits;
+mod server;
 mod shells;
 mod subagents;
 mod tokens;
@@ -296,6 +297,15 @@ impl Adapter for Codex {
         true
     }
 
+    /// Those codex's server says it doesn't trust (`trust::untrusted`).
+    fn hooks_trusted(&self, argv: &[String], exe: &str) -> Result<Vec<String>> {
+        Ok(trust::trusting(argv, &trust::untrusted(argv, exe)?))
+    }
+
+    fn trusts_hooks(&self) -> bool {
+        true
+    }
+
     fn trust_folder(&self, dir: &std::path::Path) -> Result<bool> {
         match conversations::codex_dir() {
             Some(home) => trust::trust(&home.join("config.toml"), dir),
@@ -358,9 +368,9 @@ impl Adapter for Codex {
 ///
 /// Codex runs a hook only once it's trusted, so it asks to review these the
 /// first time (and again if roster moves: the command is part of what's
-/// trusted). They're the same every run, so trusting them once does. Skipping
-/// the review instead (`--dangerously-bypass-hook-trust`) would skip it for
-/// every hook, the project's and your own too.
+/// trusted), unless roster trusts them for the run (`trust::trusting`).
+/// Skipping the review instead (`--dangerously-bypass-hook-trust`) would skip
+/// it for every hook, the project's and your own too.
 fn hooks(exe: &str) -> Vec<String> {
     let mut argv = Vec::new();
     for (event, matcher, kind) in HOOKS {

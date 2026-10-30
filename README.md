@@ -436,7 +436,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     settings, which roster doesn't change), and `title_model`, the model a generated
     title (`s t`) is made with (default: `model`; a small one, such as `haiku`, is
     quicker). pi names no task itself, so roster has it make a title after a
-    conversation's first turn; `auto_title = false` turns that off. Any other
+    conversation's first turn; `auto_title = false` turns that off. Codex asks to
+    review roster's hooks, which roster trusts for it as a session starts;
+    `trust_roster_hooks = false` leaves that to you ([Codex](#codex)). Any other
     agent goes in its own table and is then offered for new sessions (`roster config
     add-agent` makes one from a command line, as the settings view does):
 
@@ -484,10 +486,16 @@ is forked with `--fork`.
 
 Roster starts [Codex](https://github.com/openai/codex) with hooks of its own, given to
 each run as `-c hooks.<Event>=[…]` arguments, for its sessions only; your `~/.codex`
-config and hooks stay as they are. Codex runs a hook only once it's trusted, so the
-first time, it asks you to review roster's (and again if roster moves, since the
-command is part of what's trusted, and once more when roster listens to more of them):
-trust them, or roster can't follow it. They report its state: the tools it calls say
+config and hooks stay as they are. Codex runs a hook only once it's trusted, and asks
+you to review new or changed ones as it starts; roster's change when roster moves,
+since the command is part of what's trusted, and when roster listens to more of them.
+So roster trusts its own as a session starts, as answering that review would: by the
+hash Codex's server gives for each (`codex app-server`, about a third of a second; given
+up after 10 s), given to that run alone as `-c hooks.state=…`, your `config.toml` left
+as it is. Only roster's own: a project's or your own hooks Codex still asks about.
+`trust_roster_hooks = false` under `[agents.codex]` leaves roster's to you too: trust
+them, or roster can't follow it.
+They report its state: the tools it calls say
 working; a question it asks (`PermissionRequest`, or its question form in Plan mode)
 needs input; a `/compact` you run is working till it's done; the end of a turn is idle.
 A `/review` runs in a thread of Codex's own, whose end no hook reports: roster reads it

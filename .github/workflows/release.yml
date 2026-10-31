@@ -1,0 +1,31 @@
+# A pushed v* tag: the tests, the release build, and a draft release of it
+# with the tag's message as its notes, for a person to read and publish.
+# The steps are in ci/, to run anywhere.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # to make the draft release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # The token only where it's given: not on disk, for every build script
+          # and test to read.
+          persist-credentials: false
+      - run: ci/setup.sh
+      - run: ci/test.sh
+      - run: ci/dist.sh
+      - run: ci/release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

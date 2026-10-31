@@ -17,12 +17,23 @@ you're in, and `memory_warning = "1G"` marks the runaway build.</sub>
 
 ## Install
 
-Requires tmux ≥ 3.2, an agent on `PATH` (Claude Code, pi, Codex, or any CLI agent you
-[configure](#configure)), and to build it a recent stable Rust
-([rustup](https://rustup.rs)).
+Roster runs on Linux (WSL too), not macOS: it reads `/proc`. It needs tmux ≥ 3.2
+and an agent on `PATH` (Claude Code, pi, Codex, or any CLI agent you
+[configure](#configure)).
+
+Each [release](https://github.com/XobSod/agent-roster/releases) has roster built for
+x86_64 Linux, static, so it runs on any distribution. Into `~/.local/bin`:
 
 ```sh
-cargo install --git https://github.com/XobSod/agent-roster   # roster into ~/.cargo/bin
+v=v0.1.0; a=roster-$v-linux-x86_64
+curl -L --remote-name-all https://github.com/XobSod/agent-roster/releases/download/$v/$a.tar.gz{,.sha256}
+sha256sum -c $a.tar.gz.sha256 && tar -xzf $a.tar.gz && install -D $a/roster ~/.local/bin/roster
+```
+
+From source, with a recent stable Rust ([rustup](https://rustup.rs)):
+
+```sh
+cargo install --git https://github.com/XobSod/agent-roster --tag v0.1.0   # into ~/.cargo/bin; without --tag, master as it is
 ```
 
 From a clone:
@@ -683,6 +694,7 @@ newline.
 
 ```sh
 cargo test     # unit tests, plus end-to-end tests that need tmux
+ci/lint.sh && ci/test.sh   # all CI checks on each push: formatting, clippy, both crates' tests
 ```
 
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a

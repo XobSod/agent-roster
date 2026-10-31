@@ -307,6 +307,7 @@ mod tests {
                 shells: Vec::new(),
                 shells_ended: Vec::new(),
                 woken: false,
+                not_asked: false,
             }
         );
         assert_eq!(read_report(PI, Some("[1, 2]")), Report::default());

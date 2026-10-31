@@ -235,6 +235,19 @@ impl Adapter for Codex {
     /// the same, which ends with no `Stop` (`turn_ended`).
     fn report(&self, payload: &Value) -> Report {
         let report = super::hook_report(payload);
+        // Its permission asked of a reviewer of its own: no question for you.
+        // As the rollout the hook names had it then, a subagent's or a
+        // review's too.
+        let not_asked = payload["hook_event_name"] == "PermissionRequest"
+            && payload["transcript_path"].as_str().is_some_and(|path| {
+                let upto = payload[crate::report::TRANSCRIPT_SIZE].as_u64();
+                let reviewer = transcript::approvals_reviewer(std::path::Path::new(path), upto);
+                reviewer.as_deref() == Some("auto_review")
+            });
+        let report = Report {
+            not_asked,
+            ..report
+        };
         if let (Some(id), Some(path)) = (&report.conversation_id, &report.transcript_path)
             && !rollout_of(path, id)
         {
@@ -709,6 +722,46 @@ mod tests {
         let ids = |report: Report| report.shells.into_iter().map(|s| s.id).collect::<Vec<_>>();
         assert_eq!(ids(hook("Stop")), ["2001"]);
         assert!(ids(hook("PostToolUse")).is_empty());
+        // A permission asked: of you, or of a reviewer of codex's own, as its
+        // settings were as it asked.
+        let settings = |reviewer: &str| {
+            serde_json::json!({"timestamp": "2026-01-01T10:00:03.000Z", "type": "event_msg",
+                "payload": {"type": "thread_settings_applied",
+                    "thread_settings": {"approval_policy": "on-request", "approvals_reviewer": reviewer}}})
+            .to_string()
+                + "\n"
+        };
+        let asked_by = |reviewers: &[&str], upto: Option<usize>, more: Value| {
+            let text: String = reviewers.iter().map(|r| settings(r)).collect();
+            std::fs::write(&rollout, &text).unwrap();
+            let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest",
+                "session_id": "01a1", "transcript_path": rollout, "tool_name": "Bash"});
+            if let Some(upto) = upto {
+                payload[crate::report::TRANSCRIPT_SIZE] = upto.into();
+            }
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            Codex.report(&payload).not_asked
+        };
+        let asked = |reviewers: &[&str], upto| asked_by(reviewers, upto, serde_json::json!({}));
+        assert!(!asked(&["user"], None));
+        assert!(asked(&["user", "auto_review"], None));
+        // Changed back since: as it was then.
+        let first = settings("auto_review").len();
+        assert!(asked(&["auto_review", "user"], Some(first)));
+        assert!(!asked(&[], None));
+        // A reviewer it may have one day isn't taken for one that asks no one.
+        assert!(!asked(&["someone_else"], None));
+        // A subagent's, or a review's in a thread of its own: by its own
+        // rollout's settings.
+        let subagent = serde_json::json!({"agent_id": "019a", "agent_type": "worker"});
+        assert!(asked_by(&["auto_review"], None, subagent));
+        let review = dir.path().join("rollout-2026-01-01T10-00-00-01a2.jsonl");
+        std::fs::write(&review, settings("auto_review")).unwrap();
+        let in_review = serde_json::json!({"transcript_path": review});
+        assert!(asked_by(&["user"], None, in_review));
         // A payload of another shape reports nothing, and isn't an error.
         assert_eq!(Codex.report(&Value::Null), Report::default());
     }

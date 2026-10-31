@@ -408,6 +408,93 @@ pub(super) fn last_effort(path: &std::path::Path) -> Option<String> {
     entry["payload"]["effort"].as_str().map(String::from)
 }
 
+/// Who decides what codex asks permission for, as the rollout at `path`
+/// last said as far as byte `upto` (its settings, applied as they change
+/// and with each turn): `user`, or a reviewer of its own (`auto_review`).
+/// Looked for as far back as a long turn writes (`REVIEWER_REACH`).
+pub(super) fn approvals_reviewer(path: &std::path::Path, upto: Option<u64>) -> Option<String> {
+    let reviewer = |e: &serde_json::Value| {
+        let p = &e["payload"];
+        (p["approvals_reviewer"].as_str())
+            .or(p["thread_settings"]["approvals_reviewer"].as_str())
+            .map(String::from)
+    };
+    // Each turn says it as it starts (`turn_context`): not back past that.
+    let entry = last_entry_back(
+        path,
+        upto,
+        REVIEWER_REACH,
+        br#""approvals_reviewer":""#,
+        Some(br#""type":"task_started""#),
+        |e| reviewer(e).is_some(),
+    )?;
+    reviewer(&entry)
+}
+
+/// How far back from a permission's hook its settings are looked for: a
+/// turn's tool output can run to many MB since it began.
+const REVIEWER_REACH: u64 = 64 * 1024 * 1024;
+
+/// The last entry holding `needle` that `wanted` takes, in the rollout at
+/// `path` as far as byte `upto` (its end if not given), looked for back
+/// from there a MB at a time, at most `reach` bytes, and not past a piece
+/// holding `stop`: each such line alone parsed, whole however the pieces
+/// cut it.
+fn last_entry_back(
+    path: &std::path::Path,
+    upto: Option<u64>,
+    reach: u64,
+    needle: &[u8],
+    stop: Option<&[u8]>,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    const PIECE: u64 = 1024 * 1024;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut end = upto.map_or(len, |upto| upto.min(len));
+    let floor = end.saturating_sub(reach);
+    // The start of the piece read before, its first line cut: read whole
+    // with the piece before it.
+    let mut rest: Vec<u8> = Vec::new();
+    while end > floor {
+        let start = end.saturating_sub(PIECE).max(floor);
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut piece = Vec::new();
+        file.by_ref()
+            .take(end - start)
+            .read_to_end(&mut piece)
+            .ok()?;
+        piece.extend_from_slice(&rest);
+        // Its first line, unless it starts the file, may go on before it.
+        let first = match start {
+            0 => 0,
+            _ => memchr::memchr(b'\n', &piece).map_or(piece.len(), |i| i + 1),
+        };
+        // After the last `stop` in it, if there's one: before it isn't looked.
+        let stopped =
+            stop.and_then(|stop| memchr::memmem::rfind(&piece[first..], stop).map(|at| first + at));
+        let from_here = stopped.unwrap_or(first);
+        let found = memchr::memmem::rfind_iter(&piece[from_here..], needle).find_map(|at| {
+            let at = from_here + at;
+            let from = memchr::memrchr(b'\n', &piece[..at])
+                .map_or(0, |i| i + 1)
+                .max(first);
+            let to = memchr::memchr(b'\n', &piece[at..]).map_or(piece.len(), |i| at + i);
+            serde_json::from_slice(&piece[from..to])
+                .ok()
+                .filter(|entry| wanted(entry))
+        });
+        if found.is_some() || stopped.is_some() {
+            return found;
+        }
+        piece.truncate(first);
+        rest = piece;
+        end = start;
+    }
+    None
+}
+
 /// What the account had used of its limits as the rollout at `path` last
 /// said, as of when it said so (the entry's `timestamp`, which codex gives
 /// every line: the file changes with whatever codex writes after): codex
@@ -447,13 +534,27 @@ fn last_entry(
     needle: &[u8],
     wanted: impl Fn(&serde_json::Value) -> bool,
 ) -> Option<serde_json::Value> {
+    last_entry_upto(path, None, needle, wanted)
+}
+
+/// `last_entry`, of the rollout as far as byte `upto`, if given: as long as
+/// it was then.
+fn last_entry_upto(
+    path: &std::path::Path,
+    upto: Option<u64>,
+    needle: &[u8],
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 1024 * 1024;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let end = upto.map_or(len, |upto| upto.min(len));
+    file.seek(SeekFrom::Start(end.saturating_sub(TAIL))).ok()?;
     let mut tail = Vec::new();
-    file.read_to_end(&mut tail).ok()?;
+    file.take(end - end.saturating_sub(TAIL))
+        .read_to_end(&mut tail)
+        .ok()?;
     memchr::memmem::rfind_iter(&tail, needle).find_map(|at| {
         let start = memchr::memrchr(b'\n', &tail[..at]).map_or(0, |i| i + 1);
         let end = memchr::memchr(b'\n', &tail[at..]).map_or(tail.len(), |i| at + i);
@@ -634,6 +735,39 @@ mod tests {
             vec![turn("four, edited", 9, 15_500, window)],
         );
         [first, second, third]
+    }
+
+    #[test]
+    fn who_decides_its_permissions_is_found_however_long_its_turn_has_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let settings = json!({"type": "event_msg", "payload": {"type": "thread_settings_applied",
+            "thread_settings": {"approvals_reviewer": "auto_review"}}})
+        .to_string();
+        // Tool output since, more than a MB of it, in lines the pieces cut.
+        let output = json!({"type": "response_item", "payload": {"type": "function_call_output",
+            "output": "x".repeat(700_000)}})
+        .to_string();
+        let lines = [settings.clone(), output.clone(), output.clone(), output];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(
+            approvals_reviewer(&path, None).as_deref(),
+            Some("auto_review")
+        );
+        // As far as the hook had it written: before the settings, none.
+        assert_eq!(approvals_reviewer(&path, Some(10)), None);
+        // A turn's own, the last.
+        let turn = json!({"type": "turn_context", "payload": {"approvals_reviewer": "user"}});
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}{turn}\n")).unwrap();
+        assert_eq!(approvals_reviewer(&path, None).as_deref(), Some("user"));
+        // A turn begun since that says none (an older codex's): none, not
+        // the turn's before, looked for no further back.
+        let started = json!({"type": "event_msg", "payload": {"type": "task_started"}});
+        let silent = json!({"type": "turn_context", "payload": {"model": "gpt-6-luna"}});
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}{started}\n{silent}\n")).unwrap();
+        assert_eq!(approvals_reviewer(&path, None), None);
     }
 
     #[test]

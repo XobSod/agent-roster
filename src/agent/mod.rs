@@ -485,6 +485,10 @@ pub struct Report {
     /// A prompt it was given by itself: told that something it left running
     /// ended, not by you.
     pub woken: bool,
+    /// A permission it asked that no one is asked to give: decided by a
+    /// reviewer of the agent's own (codex's `auto_review`), so its work goes
+    /// on rather than waiting for you.
+    pub not_asked: bool,
     /// Its transcript was there as it reported (`report::TRANSCRIPT_SIZE`):
     /// its conversation has had a message, whatever roster saw of it.
     #[serde(skip)]

@@ -513,7 +513,13 @@ impl Session {
             self.shells.remove(id);
         }
         self.add_shells(&report.shells, e.at);
-        match e.kind.as_str() {
+        // A permission no one is asked for (decided by the agent's own
+        // reviewer): work going on.
+        let kind = match e.kind.as_str() {
+            "needs-input" if report.not_asked => "working",
+            kind => kind,
+        };
+        match kind {
             "subagent-start" => {
                 if let Some(id) = &report.subagent {
                     self.subagents.insert(
@@ -1164,6 +1170,21 @@ pub mod tests {
         s.running_effort = Some("low".into());
         s.state = State::Working;
         assert_eq!(s.effort_label().as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn a_permission_no_one_is_asked_for_is_work() {
+        let mut s = session("a");
+        apply(&mut s, "working", 1_000);
+        s.unread = false;
+        let not_asked = Report {
+            not_asked: true,
+            ..Report::default()
+        };
+        s.apply(&event("needs-input", 2_000), &not_asked);
+        assert_eq!((s.state, s.unread), (State::Working, false));
+        apply(&mut s, "needs-input", 3_000);
+        assert_eq!((s.state, s.unread), (State::NeedsInput, true));
     }
 
     #[test]

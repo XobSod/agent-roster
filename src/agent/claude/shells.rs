@@ -51,6 +51,10 @@ pub(super) fn read(payload: &Value, report: &mut Report) {
                     from: (payload.get(crate::report::TRANSCRIPT_SIZE))
                         .and_then(Value::as_u64)
                         .unwrap_or(0),
+                    // Its ids are its own, never given again.
+                    call: None,
+                    called: None,
+                    ends_as: Vec::new(),
                 });
             }
         }
@@ -94,6 +98,8 @@ pub(super) fn ended(transcript: &Path, from: u64) -> Option<(ShellEnds, u64)> {
                 at,
                 told,
                 line: start,
+                started: None,
+                also: Vec::new(),
             };
             ids.extend(task_ids(&notice).into_iter().map(end));
         }
@@ -198,6 +204,9 @@ mod tests {
             started: None,
             ran: 4000,
             from: 1234,
+            call: None,
+            called: None,
+            ends_as: Vec::new(),
         };
         assert_eq!(report.shells, [shell]);
         assert!(!report.woken);
@@ -300,6 +309,8 @@ mod tests {
             at,
             told,
             line: start(n),
+            started: None,
+            also: Vec::new(),
         };
         assert_eq!(found[0], end("b1", at, false, 2));
         assert_eq!(found[1], end("b2", None, true, 5));

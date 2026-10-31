@@ -433,14 +433,14 @@ pub(super) fn approvals_reviewer(path: &std::path::Path, upto: Option<u64>) -> O
 
 /// How far back from a permission's hook its settings are looked for: a
 /// turn's tool output can run to many MB since it began.
-const REVIEWER_REACH: u64 = 64 * 1024 * 1024;
+pub(super) const REVIEWER_REACH: u64 = 64 * 1024 * 1024;
 
 /// The last entry holding `needle` that `wanted` takes, in the rollout at
 /// `path` as far as byte `upto` (its end if not given), looked for back
 /// from there a MB at a time, at most `reach` bytes, and not past a piece
 /// holding `stop`: each such line alone parsed, whole however the pieces
 /// cut it.
-fn last_entry_back(
+pub(super) fn last_entry_back(
     path: &std::path::Path,
     upto: Option<u64>,
     reach: u64,

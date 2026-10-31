@@ -32,6 +32,13 @@ const MAX_MEMBER: usize = 256;
 /// is told from what it wrote before.
 pub const TRANSCRIPT_SIZE: &str = "roster_transcript_size";
 
+/// What roster adds to the payload of a turn cut short (`interrupted`):
+/// what its session's processes run, each with when it started
+/// (`procs::session_commands`), for an agent that doesn't say whether a
+/// command it was waiting on runs on (codex). Read as it's reported: by the
+/// time it's folded, that command may have ended, its end written after.
+pub const RUNNING: &str = "roster_running";
+
 pub fn run(args: &[String]) -> ! {
     std::panic::set_hook(Box::new(|_| {}));
     let _ = std::panic::catch_unwind(|| report(args));
@@ -55,22 +62,24 @@ fn report(args: &[String]) -> Result<()> {
     };
     // Never create the database or run migrations from a hook.
     let conn = Connection::open_with_flags(
-        db,
+        &db,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     // As long as roster itself waits: a report lost while roster writes
     // (eight subagents starting at once, say) is a state wrong
     // till the agent's next; the agent waits only while roster writes.
     conn.busy_timeout(Duration::from_secs(5))?;
-    let payload = stored(payload);
+    let running = (kind == "interrupted").then(|| crate::procs::session_commands(&session, &db));
+    let payload = stored(payload, running);
     let payload = (!payload.is_empty()).then_some(payload.as_str());
     crate::db::insert_event(&conn, &session, kind, now_ms(), payload)
 }
 
 /// The payload as it's stored: without its long top-level values, but for
-/// their short plain members, and with its transcript's size; as it is if it
-/// isn't a JSON object.
-fn stored(payload: &str) -> String {
+/// their short plain members, with its transcript's size, and with what its
+/// session's processes run (`RUNNING`), if given; as it is if it isn't a
+/// JSON object.
+fn stored(payload: &str, running: Option<Vec<crate::procs::SessionCommand>>) -> String {
     use serde_json::Value;
     let Ok(mut object) = serde_json::from_str::<serde_json::Map<String, Value>>(payload) else {
         return payload.to_string();
@@ -93,8 +102,11 @@ fn stored(payload: &str) -> String {
         .map(|m| m.len());
     if let Some(size) = size {
         object.insert(TRANSCRIPT_SIZE.into(), size.into());
-    } else if !changed {
+    } else if !changed && running.is_none() {
         return payload.to_string();
+    }
+    if let Some(running) = running {
+        object.insert(RUNNING.into(), serde_json::json!(running));
     }
     Value::Object(object).to_string()
 }
@@ -110,7 +122,7 @@ mod tests {
         let payload = format!(
             r#"{{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":"{output}","tool_response":{{"stdout":"{output}","oldString":"{edit}","structuredPatch":[1],"backgroundTaskId":"b1","interrupted":false}}}}"#
         );
-        let kept: serde_json::Value = serde_json::from_str(&stored(&payload)).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&stored(&payload, None)).unwrap();
         assert_eq!(
             kept,
             serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
@@ -118,10 +130,28 @@ mod tests {
         );
         let notice = format!("<task-notification>\n<result>{output}</result>");
         let prompt = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": notice});
-        assert_eq!(stored(&prompt.to_string()), prompt.to_string());
+        assert_eq!(stored(&prompt.to_string(), None), prompt.to_string());
         let short = r#"{"session_id":"c-1",  "model":"claude-opus-5-5"}"#;
-        assert_eq!(stored(short), short);
-        assert_eq!(stored("not json"), "not json");
+        assert_eq!(stored(short, None), short);
+        assert_eq!(stored("not json", None), "not json");
+    }
+
+    #[test]
+    fn a_turn_cut_short_gets_what_its_sessions_processes_run() {
+        let running = vec![crate::procs::SessionCommand {
+            pid: 41,
+            started: 1_000,
+            argv: vec!["sh".to_string(), "-c".into(), "sleep 30".into()],
+            call: Some("exec-1".into()),
+            cwd: None,
+        }];
+        let kept: serde_json::Value =
+            serde_json::from_str(&stored(r#"{"hook_event_name":"Interrupt"}"#, Some(running)))
+                .unwrap();
+        assert_eq!(
+            kept[RUNNING],
+            serde_json::json!([{"pid": 41, "started": 1_000, "argv": ["sh", "-c", "sleep 30"], "call": "exec-1"}])
+        );
     }
 
     #[test]
@@ -130,10 +160,10 @@ mod tests {
         let path = dir.path().join("c.jsonl");
         std::fs::write(&path, "0123456789").unwrap();
         let payload = serde_json::json!({"transcript_path": path}).to_string();
-        let kept: serde_json::Value = serde_json::from_str(&stored(&payload)).unwrap();
+        let kept: serde_json::Value = serde_json::from_str(&stored(&payload, None)).unwrap();
         assert_eq!(kept[TRANSCRIPT_SIZE], 10);
         // Not there (yet): nothing said.
         let gone = serde_json::json!({"transcript_path": dir.path().join("none")}).to_string();
-        assert_eq!(stored(&gone), gone);
+        assert_eq!(stored(&gone, None), gone);
     }
 }

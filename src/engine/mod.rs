@@ -105,14 +105,47 @@ pub struct Roster {
 }
 
 /// How far a session's transcript has been read for the ends of what its
-/// agent left running (`Adapter::shells_ended`), and those found, by id:
-/// when each was written (else read), whether its agent was told it then,
-/// and where. An id may have several, as codex gives a later command the id
-/// of one that's over. A refresh reads only what was written since.
+/// agent left running (`Adapter::shells_ended`), and those found, by id. An
+/// id may have several, as codex gives a later command the id of one that's
+/// over. A refresh reads only what was written since.
 struct ShellsRead {
     path: String,
     upto: u64,
-    ended: HashMap<String, Vec<(i64, bool, u64)>>,
+    ended: HashMap<String, Vec<Seen>>,
+    /// The same ends again by what each ran, where said
+    /// (`ShellEnd::also`), for a shell whose id went unsaid: one each.
+    by_what: Vec<ByWhat>,
+}
+
+/// An end of a shell's, as read: when it was written (else read), whether
+/// its agent was told it then, where, and when its command started, if said.
+#[derive(Clone, Copy)]
+struct Seen {
+    at: i64,
+    told: bool,
+    line: u64,
+    started: Option<i64>,
+}
+
+/// The ends written at `lines`, by whatever they're told by, taken: no
+/// other shell's, as `taken` notes for every shell's (`ShellsFound`).
+fn take(by_what: &mut [ByWhat], lines: &[u64], taken: &mut Vec<(String, u64)>) {
+    for end in by_what
+        .iter_mut()
+        .filter(|e| !e.taken && lines.contains(&e.seen.line))
+    {
+        end.taken = true;
+        taken.push((end.what.clone(), end.seen.line));
+    }
+}
+
+/// An end by what its command ran (`ShellsRead::by_what`): with its id, and
+/// whether a shell was told by it already, an end being one command's.
+struct ByWhat {
+    what: String,
+    id: String,
+    seen: Seen,
+    taken: bool,
 }
 
 /// How long an end queued for its agent while it waits is left to the turn
@@ -121,6 +154,10 @@ struct ShellsRead {
 /// Longer than a report may wait for the database (`report`'s busy
 /// timeout), so a slow one still comes first.
 const SHELL_END_GRACE_MS: i64 = 10_000;
+
+/// How much later than a shell is known to have started its command may
+/// say it did (ms): what an agent writes and what it ran are timed apart.
+const SHELL_START_SLACK_MS: i64 = 1_000;
 
 /// How much further than its shells' own mark a transcript is read with
 /// none of their ends in it before that's saved with them, so the next
@@ -134,17 +171,18 @@ fn shells_ended(
     read: &mut HashMap<String, ShellsRead>,
     s: &Session,
     now: i64,
-) -> (Vec<(String, i64)>, Option<u64>) {
+) -> crate::db::ShellsFound {
     let (Some(path), Some(first)) = (
         s.transcript_path.as_deref(),
         s.shells.values().map(|shell| shell.from).min(),
     ) else {
-        return (Vec::new(), None);
+        return crate::db::ShellsFound::default();
     };
     let fresh = || ShellsRead {
         path: path.to_string(),
         upto: first.saturating_sub(agent::adapter(&s.agent).shell_slack()),
         ended: HashMap::new(),
+        by_what: Vec::new(),
     };
     let known = read.entry(s.id.clone()).or_insert_with(fresh);
     // Another conversation's (cleared since).
@@ -153,33 +191,113 @@ fn shells_ended(
     }
     if let Some((ends, upto)) = agent::adapter(&s.agent).shells_ended(Path::new(path), known.upto) {
         for end in ends {
-            let seen = (end.at.unwrap_or(now).min(now), end.told, end.line);
+            let seen = Seen {
+                at: end.at.unwrap_or(now).min(now),
+                told: end.told,
+                line: end.line,
+                started: end.started,
+            };
+            for what in end.also {
+                let id = end.id.clone();
+                let taken = false;
+                known.by_what.push(ByWhat {
+                    what,
+                    id,
+                    seen,
+                    taken,
+                });
+            }
             known.ended.entry(end.id).or_default().push(seen);
         }
         known.upto = upto;
     }
-    // Each one's end, written after its mark: when first, and whether told
-    // then or after.
+    // An end of a shell's: written after its mark, of a command started by
+    // the time it was and not before the call starting it, and not one
+    // another shell took (`Shell::taken`).
     let slack = agent::adapter(&s.agent).shell_slack();
-    let found: Vec<(&String, i64, bool)> = (s.shells.iter())
-        .filter_map(|(id, shell)| {
-            let after = shell.from.saturating_sub(slack);
-            let own = known.ended.get(id)?.iter().filter(|end| end.2 >= after);
-            let (at, told) = own.fold(None, |found, &(at, told, _)| match found {
-                None => Some((at, told)),
-                Some((first, was)) => Some((first.min(at), was || told)),
-            })?;
-            Some((id, at, told))
-        })
+    let fits = |shell: &crate::model::Shell, end: &Seen| {
+        end.line >= shell.from.saturating_sub(slack)
+            && !shell.taken.contains(&end.line)
+            && end.started.is_none_or(|t| {
+                t <= shell.started + SHELL_START_SLACK_MS
+                    && shell.called.is_none_or(|c| t >= c - SHELL_START_SLACK_MS)
+            })
+    };
+    // By its id: when first, and whether told then or after.
+    let mut found: Vec<(&String, i64, bool)> = Vec::new();
+    let mut taken: Vec<(String, u64)> = Vec::new();
+    for (id, shell) in s
+        .shells
+        .iter()
+        .filter(|(_, shell)| shell.ends_as.is_empty())
+    {
+        let Some(ends) = known.ended.get(id) else {
+            continue;
+        };
+        let own: Vec<&Seen> = ends.iter().filter(|end| fits(shell, end)).collect();
+        let Some((at, told)) = own.iter().fold(None, |found, end| match found {
+            None => Some((end.at, end.told)),
+            Some((first, was)) => Some((first.min(end.at), was || end.told)),
+        }) else {
+            continue;
+        };
+        found.push((id, at, told));
+        // Its, so no other shell's by what it ran.
+        let lines: Vec<u64> = (known.by_what.iter())
+            .filter(|end| end.id == *id && own.iter().any(|o| o.line == end.seen.line))
+            .map(|end| end.seen.line)
+            .collect();
+        take(&mut known.by_what, &lines, &mut taken);
+    }
+    // One whose id went unsaid, by what it ran: the first end that fits,
+    // not one that fits a shell known by its id, in the order they were
+    // started; one named by the id codex gave its command first, and an end
+    // naming the id of another's command left to that one.
+    let mut unsaid: Vec<(&String, &crate::model::Shell)> = (s.shells.iter())
+        .filter(|(_, shell)| !shell.ends_as.is_empty())
         .collect();
+    unsaid.sort_by_key(|(id, shell)| (shell.called.unwrap_or(shell.started), id.as_str()));
+    // Codex's id for its command, where its process said: the first of what
+    // it ends as, its command's text last.
+    let exact =
+        |shell: &crate::model::Shell| (shell.ends_as.len() > 1).then(|| shell.ends_as[0].clone());
+    let named: Vec<String> = unsaid
+        .iter()
+        .filter_map(|(_, shell)| exact(shell))
+        .collect();
+    for (id, shell) in unsaid {
+        let own = exact(shell);
+        let by_id = |end: &ByWhat| {
+            (s.shells.get(&end.id))
+                .is_some_and(|other| other.ends_as.is_empty() && fits(other, &end.seen))
+        };
+        let anothers = |line: u64| {
+            (known.by_what.iter()).any(|e| {
+                e.seen.line == line && named.contains(&e.what) && own.as_ref() != Some(&e.what)
+            })
+        };
+        let usable = |end: &ByWhat| !end.taken && !by_id(end) && fits(shell, &end.seen);
+        let end = (known.by_what.iter())
+            .find(|end| own.as_ref() == Some(&end.what) && usable(end))
+            .or_else(|| {
+                (known.by_what.iter()).find(|end| {
+                    shell.ends_as.contains(&end.what) && usable(end) && !anothers(end.seen.line)
+                })
+            });
+        if let Some(end) = end {
+            found.push((id, end.seen.at, end.seen.told));
+            let line = end.seen.line;
+            take(&mut known.by_what, &[line], &mut taken);
+        }
+    }
     // Waiting, an end only queued is the turn's it starts on it, for now.
     let ended = (found.iter())
         .filter(|(_, at, told)| !s.awaiting || *told || now - at >= SHELL_END_GRACE_MS)
         .map(|(id, at, _)| (id.to_string(), *at))
         .collect();
-    let saved = (found.is_empty() && known.upto >= first.saturating_add(SHELL_READ_SAVED))
+    let read = (found.is_empty() && known.upto >= first.saturating_add(SHELL_READ_SAVED))
         .then_some(known.upto);
-    (ended, saved)
+    crate::db::ShellsFound { ended, read, taken }
 }
 
 impl Roster {
@@ -314,7 +432,10 @@ impl Roster {
                                 if s.stale(now)
                                     && let Some(path) = transcript
                                 {
-                                    s.add_shells(&adapter.shells_left(path), now);
+                                    s.add_shells(
+                                        &adapter.shells_left(&s.id, &self.paths.db(), path),
+                                        now,
+                                    );
                                 }
                                 // Its transcript saying the turn ended since,
                                 // not interrupted: there's its answer to read,
@@ -663,6 +784,11 @@ mod tests {
     use super::*;
     use crate::model::Shell;
 
+    /// What's found of ended shells and how far it was read.
+    fn pair(found: crate::db::ShellsFound) -> (Vec<(String, i64)>, Option<u64>) {
+        (found.ended, found.read)
+    }
+
     /// A Claude session waiting (or not) on shells `ids`, its transcript at
     /// `path`, as long as `from` when they were reported.
     fn on_shells(path: &Path, ids: &[&str], from: u64, awaiting: bool) -> Session {
@@ -674,6 +800,10 @@ mod tests {
                 what: None,
                 started: 0,
                 from,
+                call: None,
+                called: None,
+                ends_as: Vec::new(),
+                taken: Vec::new(),
             };
             s.shells.insert(id.to_string(), shell);
         }
@@ -689,6 +819,100 @@ mod tests {
     }
 
     #[test]
+    fn an_end_told_by_what_it_ran_is_one_shells_whichever_roster_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let ran = |id: &str, started: i64, ms: i64| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+                "item": {"type": "CommandExecution", "process_id": id, "command": ["sh", "-c", "sleep 30"]},
+                "started_at_ms": started, "completed_at_ms": ms}})
+            .to_string()
+                + "\n"
+        };
+        std::fs::write(&rollout, ran("7001", 10_100, 40_000)).unwrap();
+        let what = {
+            let (ends, _) = agent::adapter("codex").shells_ended(&rollout, 0).unwrap();
+            ends[0].also.first().cloned()
+        };
+        let cut = |called: i64| Shell {
+            started: called + 2_000,
+            called: Some(called),
+            ends_as: what.clone().into_iter().collect(),
+            ..Default::default()
+        };
+        let mut s = on_shells(&rollout, &[], 0, false);
+        s.agent = "codex".into();
+        s.shells.insert("cut-c1".into(), cut(10_000));
+        s.shells.insert("cut-c2".into(), cut(10_001));
+        // Its id given since to a command started after it ended: that one's
+        // isn't it, so it ends the one cut short.
+        let later = Shell {
+            started: 41_500,
+            called: Some(41_000),
+            ..Default::default()
+        };
+        s.shells.insert("7001".into(), later);
+        // Its process naming another id than its end does: by what it ran.
+        s.shells
+            .get_mut("cut-c1")
+            .unwrap()
+            .ends_as
+            .insert(0, "exec-other".into());
+        let found = shells_ended(&mut HashMap::new(), &s, 50_000);
+        assert_eq!(found.ended, [("cut-c1".to_string(), 40_000)]);
+        // Taken, it's no other's, read by another roster process too.
+        assert!(s.shells_ended(&found.ended));
+        assert!(s.ends_taken(&found.taken));
+        assert!(
+            shells_ended(&mut HashMap::new(), &s, 50_000)
+                .ended
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_end_naming_a_shells_command_is_that_shells_not_anothers_by_what_it_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let ran = |item: &str, started: i64, ms: i64| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+                "item": {"type": "CommandExecution", "id": item, "process_id": "7001",
+                    "command": ["sh", "-c", "sleep 30"]},
+                "started_at_ms": started, "completed_at_ms": ms}})
+            .to_string()
+                + "\n"
+        };
+        // Two the same cut short, each by its own process's id, its text after.
+        std::fs::write(&rollout, ran("exec-b", 10_100, 20_000)).unwrap();
+        let hash = {
+            let (ends, _) = agent::adapter("codex").shells_ended(&rollout, 0).unwrap();
+            ends[0].also[1].clone()
+        };
+        let mut s = on_shells(&rollout, &[], 0, false);
+        s.agent = "codex".into();
+        for (key, item, called) in [("cut-a", "exec-a", 1_000), ("cut-b", "exec-b", 10_000)] {
+            let shell = Shell {
+                started: 12_000,
+                called: Some(called),
+                ends_as: vec![item.to_string(), hash.clone()],
+                ..Default::default()
+            };
+            s.shells.insert(key.into(), shell);
+        }
+        let mut read = HashMap::new();
+        // The second's end: the second's, though the first, called first,
+        // runs the same.
+        let found = shells_ended(&mut read, &s, 50_000);
+        assert_eq!(found.ended, [("cut-b".to_string(), 20_000)]);
+        assert!(s.shells_ended(&found.ended));
+        s.ends_taken(&found.taken);
+        let text = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{text}{}", ran("exec-a", 1_100, 31_000))).unwrap();
+        let found = shells_ended(&mut read, &s, 50_000);
+        assert_eq!(found.ended, [("cut-a".to_string(), 31_000)]);
+    }
+
+    #[test]
     fn shells_ends_are_read_on_from_where_the_last_read_stopped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.jsonl");
@@ -701,7 +925,7 @@ mod tests {
         let later = at(t1) + SHELL_END_GRACE_MS;
         let s = on_shells(&path, &["b1"], early.len() as u64 + 50, false);
         assert_eq!(
-            shells_ended(&mut read, &s, later),
+            pair(shells_ended(&mut read, &s, later)),
             (vec![("b1".to_string(), at(t1))], None)
         );
         // Read on from there: an end seen before its shell was known counts
@@ -712,24 +936,24 @@ mod tests {
         )
         .unwrap();
         let s = on_shells(&path, &["b3"], 0, false);
-        assert_eq!(shells_ended(&mut read, &s, later), (Vec::new(), None));
+        assert_eq!(pair(shells_ended(&mut read, &s, later)), (Vec::new(), None));
         let s = on_shells(&path, &["b2"], 0, false);
         assert_eq!(
-            shells_ended(&mut read, &s, later).0,
+            shells_ended(&mut read, &s, later).ended,
             [("b2".to_string(), at(t2))]
         );
         // Waiting on it, a fresh end only queued is left to the turn its
         // agent starts on it; one it was told already isn't.
         let s = on_shells(&path, &["b2"], 0, true);
-        assert!(shells_ended(&mut read, &s, at(t2) + 1).0.is_empty());
-        assert_eq!(shells_ended(&mut read, &s, later + 1_000).0.len(), 1);
+        assert!(shells_ended(&mut read, &s, at(t2) + 1).ended.is_empty());
+        assert_eq!(shells_ended(&mut read, &s, later + 1_000).ended.len(), 1);
         let told = serde_json::json!({"type": "attachment", "timestamp": t2, "attachment": {
             "type": "queued_command", "prompt": "<task-notification>\n<task-id>b5</task-id>\n</task-notification>"}});
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, format!("{text}{told}\n")).unwrap();
         let s = on_shells(&path, &["b5"], 0, true);
         assert_eq!(
-            shells_ended(&mut read, &s, at(t2) + 1).0,
+            shells_ended(&mut read, &s, at(t2) + 1).ended,
             [("b5".to_string(), at(t2))]
         );
         // A shell with an end known, even one held back, isn't read past.
@@ -737,12 +961,15 @@ mod tests {
         let filler = format!("{}\n", "z".repeat(SHELL_READ_SAVED as usize));
         std::fs::write(&path, format!("{text}{filler}")).unwrap();
         let s = on_shells(&path, &["b2"], 0, true);
-        assert_eq!(shells_ended(&mut read, &s, at(t2) + 1), (Vec::new(), None));
+        assert_eq!(
+            pair(shells_ended(&mut read, &s, at(t2) + 1)),
+            (Vec::new(), None)
+        );
         // Another conversation (cleared): read from its shells' mark there.
         let other = dir.path().join("d.jsonl");
         std::fs::write(&other, notice("b1", t1)).unwrap();
         let s = on_shells(&other, &["b2"], 0, false);
-        assert_eq!(shells_ended(&mut read, &s, later), (Vec::new(), None));
+        assert_eq!(pair(shells_ended(&mut read, &s, later)), (Vec::new(), None));
         // Codex's are looked for from where each was seen running: an end
         // of its id before that is another command's, its id given again.
         let rollout = dir.path().join("rollout.jsonl");
@@ -757,10 +984,10 @@ mod tests {
         let mut s = on_shells(&rollout, &["7001"], before.len() as u64, false);
         s.agent = "codex".into();
         let mut codex = HashMap::new();
-        assert!(shells_ended(&mut codex, &s, later).0.is_empty());
+        assert!(shells_ended(&mut codex, &s, later).ended.is_empty());
         std::fs::write(&rollout, format!("{before}{}", end("7001", 2_000))).unwrap();
         assert_eq!(
-            shells_ended(&mut codex, &s, later).0,
+            shells_ended(&mut codex, &s, later).ended,
             [("7001".to_string(), 2_000)]
         );
         // Each one's from its own mark: another's, earlier, isn't its.
@@ -772,14 +999,77 @@ mod tests {
         s.shells.get_mut("7002").unwrap().from = mark + end("7002", 3_000).len() as u64;
         let mut codex = HashMap::new();
         assert_eq!(
-            shells_ended(&mut codex, &s, later).0,
+            shells_ended(&mut codex, &s, later).ended,
             [("7001".to_string(), 2_000)]
         );
         let text = std::fs::read_to_string(&rollout).unwrap();
         std::fs::write(&rollout, format!("{text}{}", end("7002", 4_000))).unwrap();
         assert_eq!(
-            shells_ended(&mut codex, &s, later).0,
+            shells_ended(&mut codex, &s, later).ended,
             [("7001".to_string(), 2_000), ("7002".to_string(), 4_000)]
+        );
+        // One cut short, known by what it runs: an end of one started after
+        // it was, or before its call, isn't its; nor is an end of a shell
+        // known by its id; and an end is one shell's.
+        let ran = |id: &str, started: i64, ms: i64| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+                "item": {"type": "CommandExecution", "process_id": id, "command": ["sh", "-c", "sleep 30"]},
+                "started_at_ms": started, "completed_at_ms": ms}})
+            .to_string()
+                + "\n"
+        };
+        let what = |rollout: &Path| {
+            let (ends, _) = agent::adapter("codex").shells_ended(rollout, 0).unwrap();
+            ends[0].also.first().cloned()
+        };
+        std::fs::write(&rollout, ran("7003", 60_000, 70_000)).unwrap();
+        let cut = |s: &mut Session, id: &str, called: i64| {
+            let shell = crate::model::Shell {
+                started: called + 12_000,
+                called: Some(called),
+                ends_as: what(&rollout).into_iter().collect(),
+                ..Default::default()
+            };
+            s.shells.insert(id.to_string(), shell);
+        };
+        let mut s = on_shells(&rollout, &[], 0, false);
+        s.agent = "codex".into();
+        cut(&mut s, "cut-c1", 45_000);
+        let by_id = Shell {
+            started: 50_000,
+            ..Default::default()
+        };
+        s.shells.insert("7004".into(), by_id);
+        let mut codex = HashMap::new();
+        // Started after it was seen cut short.
+        assert!(shells_ended(&mut codex, &s, later).ended.is_empty());
+        let text = std::fs::read_to_string(&rollout).unwrap();
+        let more = [
+            // Started before its call: another command's.
+            ran("7005", 40_000, 80_000),
+            // A shell's by its id.
+            ran("7004", 46_000, 81_000),
+            // Its own.
+            ran("7006", 46_000, 82_000),
+        ];
+        std::fs::write(&rollout, format!("{text}{}", more.concat())).unwrap();
+        let mut ended = shells_ended(&mut codex, &s, later).ended;
+        ended.sort();
+        assert_eq!(
+            ended,
+            [("7004".to_string(), 81_000), ("cut-c1".to_string(), 82_000)]
+        );
+        // Another the same, cut short at once: an end each, none of those
+        // taken, by what it ran or by its id.
+        s.shells.remove("7004");
+        s.shells.remove("cut-c1");
+        cut(&mut s, "cut-c2", 45_001);
+        assert!(shells_ended(&mut codex, &s, later).ended.is_empty());
+        let text = std::fs::read_to_string(&rollout).unwrap();
+        std::fs::write(&rollout, format!("{text}{}", ran("7007", 46_000, 90_000))).unwrap();
+        assert_eq!(
+            shells_ended(&mut codex, &s, later).ended,
+            [("cut-c2".to_string(), 90_000)]
         );
         // Read far past its shells' mark with no end: that's to be saved.
         let long = format!("{}\n", "y".repeat(SHELL_READ_SAVED as usize));
@@ -787,7 +1077,7 @@ mod tests {
         let s = on_shells(&other, &["b4"], 0, false);
         let mut read = HashMap::new();
         assert_eq!(
-            shells_ended(&mut read, &s, later),
+            pair(shells_ended(&mut read, &s, later)),
             (Vec::new(), Some(long.len() as u64))
         );
     }

@@ -1086,6 +1086,10 @@ fn a_card_on_its_shells_alone_is_working_and_unread() {
         what: Some("Run the full test suite".into()),
         started: now - 180_000,
         from: 0,
+        call: None,
+        called: None,
+        ends_as: Vec::new(),
+        taken: Vec::new(),
     };
     s.shells = [("b9".to_string(), shell)].into();
     app.set_data(app.projects.clone(), sessions);

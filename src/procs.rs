@@ -156,6 +156,372 @@ fn started(pid: i32) -> Option<u64> {
     Some(parse_stat(pid, &stat, 1, 1)?.started)
 }
 
+/// The command lines of the processes of roster session `session` of the
+/// roster keeping its database at `db` (by the `ROSTER_SESSION` and
+/// `ROSTER_DB` they inherited), each with its pid and when it started (ms):
+/// the most
+/// recent `MAX_COMMANDS`, none longer than `MAX_COMMAND` (bytes). For an
+/// agent that doesn't say whether a command it was waiting on runs on
+/// (codex's, cut short by Esc): none if `/proc` can't be read.
+pub fn session_commands(session: &str, db: &Path) -> Vec<SessionCommand> {
+    // SAFETY: sysconf only reads a system constant; getuid can't fail.
+    let (ticks, me) = unsafe {
+        (
+            libc::sysconf(libc::_SC_CLK_TCK).max(1) as i64,
+            libc::getuid(),
+        )
+    };
+    let (Some(boot), Ok(entries)) = (boot_ms(), fs::read_dir("/proc")) else {
+        return Vec::new();
+    };
+    let file = |path: &Path| fs::metadata(path).ok().map(|m| (m.dev(), m.ino()));
+    let ours = file(db);
+    let same_db = |its: &[u8]| {
+        its == db.as_os_str().as_bytes()
+            || ours.is_some_and(|f| file(Path::new(OsStr::from_bytes(its))) == Some(f))
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if !entry.metadata().is_ok_and(|m| m.uid() == me) {
+            continue;
+        }
+        let Some(start) = started(pid) else {
+            continue;
+        };
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if cmdline.is_empty() || cmdline.len() > MAX_COMMAND {
+            continue;
+        }
+        let env = fs::read(entry.path().join("environ")).unwrap_or_default();
+        if !session_in(&env).is_some_and(|(id, its_db)| id == session && same_db(its_db)) {
+            continue;
+        }
+        let argv = (cmdline.split(|b| *b == 0))
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect();
+        let call = (env.split(|b| *b == 0))
+            .find_map(|var| var.strip_prefix(b"CODEX_TOOL_CALL_ID="))
+            .filter(|id| !id.is_empty())
+            .map(|id| String::from_utf8_lossy(id).into_owned());
+        let cwd = (fs::read_link(entry.path().join("cwd")).ok())
+            .map(|dir| dir.to_string_lossy().into_owned());
+        found.push(SessionCommand {
+            pid,
+            started: boot + start as i64 * 1000 / ticks,
+            argv,
+            call,
+            cwd,
+        });
+    }
+    found.sort_by_key(|c| std::cmp::Reverse(c.started));
+    found.truncate(MAX_COMMANDS);
+    found
+}
+
+/// One of a session's processes, as `session_commands` reads it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionCommand {
+    pub pid: i32,
+    /// When it started (ms).
+    pub started: i64,
+    pub argv: Vec<String>,
+    /// The id its agent gave the command it runs, where its environment
+    /// says (codex's `CODEX_TOOL_CALL_ID`, which its end names too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
+    /// Where it runs: what a relative path in its command line is relative
+    /// to (`./script`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// Those of `commands` that started between `from` and `to` (ms, as far as
+/// given) running `cmd` (`runs`), the first started first.
+pub fn running_in(
+    commands: &[SessionCommand],
+    cmd: &str,
+    dir: Option<&str>,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Vec<SessionCommand> {
+    let mut found: Vec<SessionCommand> = (commands.iter())
+        .filter(|c| {
+            from.is_none_or(|f| c.started >= f)
+                && to.is_none_or(|t| c.started <= t)
+                && runs(&c.argv, &[c.cwd.as_deref(), dir], cmd)
+        })
+        .cloned()
+        .collect();
+    found.sort_by_key(|c| c.started);
+    found
+}
+
+/// The session's processes, read now, running `cmd`, started between
+/// `from` and `to` (`session_commands`, `running_in`).
+pub fn running(
+    session: &str,
+    db: &Path,
+    cmd: &str,
+    dir: Option<&str>,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Vec<SessionCommand> {
+    running_in(&session_commands(session, db), cmd, dir, from, to)
+}
+
+/// How many of a session's processes `session_commands` keeps: the most
+/// recent, a payload holding them.
+const MAX_COMMANDS: usize = 64;
+/// The longest command line it keeps (bytes).
+const MAX_COMMAND: usize = 2048;
+
+/// Whether a process's command line runs `cmd`: as a shell's
+/// (`sh -c <cmd>`), or as the command itself once the shell gave way to it
+/// (a script's interpreter, if any, before it): its words as
+/// `util::one_line` has them, or as the shell splits a simple command.
+fn runs(argv: &[String], dirs: &[Option<&str>], cmd: &str) -> bool {
+    use crate::util::one_line;
+    if argv.len() >= 3
+        && argv[argv.len() - 2].starts_with('-')
+        && argv[argv.len() - 2].contains('c')
+        && one_line(&argv[argv.len() - 1]) == cmd
+    {
+        return true;
+    }
+    let name = |word: &str| word.rsplit('/').next().unwrap_or(word).to_string();
+    // Where the command's words start: at its first, or, a script run by its
+    // shebang, at its path, after the interpreter and the arguments its
+    // shebang gives it (`#!/usr/bin/env -S python3 -W default`).
+    let starts = |k: usize| {
+        k == 0
+            || (argv[k].contains('/')
+                && (dirs.iter()).any(|dir| {
+                    shebang(&Path::new(dir.unwrap_or("/")).join(&argv[k])).is_some_and(|line| {
+                        name(&argv[0]) == name(&line[0]) && argv[1..k] == line[1..]
+                    })
+                }))
+    };
+    // As the shell splits it, a command by its path; or as written.
+    let words = words(cmd).filter(|w| !w.is_empty());
+    let as_written = |k: usize, first: String| {
+        let rest = argv[k + 1..].iter().map(String::as_str);
+        one_line(
+            &std::iter::once(first.as_str())
+                .chain(rest)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ) == cmd
+    };
+    (0..argv.len()).filter(|&k| starts(k)).any(|k| {
+        words
+            .as_ref()
+            .is_some_and(|w| name(&argv[k]) == name(&w[0]) && argv[k + 1..] == w[1..])
+            || as_written(k, argv[k].clone())
+            || as_written(k, name(&argv[k]))
+    })
+}
+
+/// What the script at `path` is run by, as its first line (`#!`) says: the
+/// interpreter's command line it's given after, as the interpreter gets it.
+/// As Linux runs it: the interpreter, and the rest of the line as one
+/// argument; `env` gives way to the program it's given, its `-S` splitting
+/// the rest into words. None for what isn't an executable file starting
+/// so, read only if it's a plain file (a pipe or a terminal could keep a
+/// read waiting).
+fn shebang(path: &Path) -> Option<Vec<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return None;
+    }
+    let mut file = (fs::File::options().read(true))
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    let mut head = [0u8; 256];
+    let n = file.read(&mut head).ok()?;
+    let line = head[..n].strip_prefix(b"#!")?;
+    let line = &line[..memchr::memchr(b'\n', line).unwrap_or(line.len())];
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim_matches([' ', '\t']);
+    let (interpreter, arg) = match line.split_once([' ', '\t']) {
+        Some((interpreter, arg)) => (interpreter, Some(arg.trim_matches([' ', '\t']))),
+        None => (line, None),
+    };
+    if interpreter.is_empty() {
+        return None;
+    }
+    let arg = arg.filter(|a| !a.is_empty());
+    if interpreter.rsplit('/').next() == Some("env") {
+        let arg = arg?;
+        return match arg.strip_prefix("-S") {
+            Some(words) => env_split(words).filter(|w| !w.is_empty()),
+            None => Some(vec![arg.to_string()]),
+        };
+    }
+    Some(
+        [interpreter]
+            .into_iter()
+            .chain(arg)
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// The words `env -S` splits `line` into: at blanks (a carriage return,
+/// so a CRLF line's end, among them) and `\_`, quotes (`'…'`, `"…"`) and
+/// backslashes taken off as it takes them, the rest of it from a word
+/// starting `#` or from `\c` left out. None for what it
+/// would expand (`${…}`), which can't be told from the line alone, and for
+/// what it takes for an error (a `$` alone, an unknown `\` sequence).
+fn env_split(line: &str) -> Option<Vec<String>> {
+    fn part(words: &mut Vec<String>, word: &mut String, quoted: &mut bool) {
+        if !word.is_empty() || *quoted {
+            words.push(std::mem::take(word));
+            *quoted = false;
+        }
+    }
+    let mut words = Vec::new();
+    let (mut word, mut quoted) = (String::new(), false);
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c' => part(&mut words, &mut word, &mut quoted),
+            '#' if word.is_empty() && !quoted => break,
+            '$' => return None,
+            // Taken as written, but for `\\` and `\'`.
+            '\'' => {
+                quoted = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        '\\' => match chars.next()? {
+                            c @ ('\\' | '\'') => word.push(c),
+                            c => word.extend(['\\', c]),
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            '"' => {
+                quoted = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '$' => return None,
+                        '\\' => word.push(env_escape(chars.next()?)?),
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => match chars.next()? {
+                // A blank, parting words.
+                '_' => part(&mut words, &mut word, &mut quoted),
+                'c' => break,
+                c => word.push(env_escape(c)?),
+            },
+            c => word.push(c),
+        }
+    }
+    part(&mut words, &mut word, &mut quoted);
+    Some(words)
+}
+
+/// What `env -S` takes a backslash and `c` for, within double quotes or
+/// none; None for what it doesn't (`\c` within double quotes among them).
+fn env_escape(c: char) -> Option<char> {
+    match c {
+        'n' => Some('\n'),
+        't' => Some('\t'),
+        'r' => Some('\r'),
+        'f' => Some('\x0c'),
+        'v' => Some('\x0b'),
+        '_' => Some(' '),
+        '\\' | '\'' | '"' | '#' | '$' => Some(c),
+        _ => None,
+    }
+}
+
+/// The words of `cmd` as a POSIX shell splits a simple command, its
+/// variables set before it (`A=1 cmd`) left out, quotes and backslashes
+/// taken off; None for anything else (a list, a pipe, an expansion, a
+/// redirection), whose shell may stay its own process.
+fn words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let (mut word, mut quoted) = (String::new(), false);
+    let mut chars = cmd.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if !word.is_empty() || quoted {
+                    words.push(std::mem::take(&mut word));
+                    quoted = false;
+                }
+            }
+            '\\' => word.push(chars.next()?),
+            '\'' => {
+                quoted = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => word.push(c),
+                    }
+                }
+            }
+            '"' => {
+                quoted = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '$' | '`' => return None,
+                        '\\' => match chars.next()? {
+                            c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                            c => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '$' | '`' | '*' | '?' | '[' | '{' | '}'
+            | '~' | '#' | '\n' => return None,
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() || quoted {
+        words.push(word);
+    }
+    let assignment = |w: &String| {
+        w.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    let first = words.iter().position(|w| !assignment(w))?;
+    Some(words.split_off(first))
+}
+
+/// When the machine started, in ms, as `/proc/stat` says (`btime`).
+fn boot_ms() -> Option<i64> {
+    let stat = fs::read_to_string("/proc/stat").ok()?;
+    let line = stat.lines().find_map(|l| l.strip_prefix("btime "))?;
+    Some(line.trim().parse::<i64>().ok()? * 1000)
+}
+
 /// `root` and every process under it.
 fn descendants(all: &[Process], root: i32) -> Vec<i32> {
     let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
@@ -681,6 +1047,186 @@ mod tests {
         assert!(!child.wait().unwrap().success());
         assert!(!held.signal(libc::SIGKILL));
         assert!(Held::new(&p).is_none());
+    }
+
+    #[test]
+    fn a_command_is_found_running_in_its_session_as_started_then() {
+        let now = crate::util::now_ms();
+        let db = Path::new("/nowhere/roster.db");
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30; true"])
+            .env("ROSTER_SESSION", "test-running")
+            .env("ROSTER_DB", db)
+            .env("CODEX_TOOL_CALL_ID", "exec-procs")
+            .spawn()
+            .unwrap();
+        let found = |session: &str, cmd: &str, from: i64, to: i64| {
+            running(session, db, cmd, None, Some(now + from), Some(now + to)).len()
+        };
+        // Its start is read to the clock's tick.
+        let mut n = 0;
+        for _ in 0..50 {
+            n = found("test-running", "sleep 30; true", -2_000, 5_000);
+            if n == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(n, 1);
+        // With the id its agent gave the command, as its environment says.
+        let read = running("test-running", db, "sleep 30; true", None, None, None);
+        assert_eq!(read[0].call.as_deref(), Some("exec-procs"));
+        // Another session's, another command, or started at another time:
+        // not it.
+        assert_eq!(found("other", "sleep 30; true", -2_000, 5_000), 0);
+        let elsewhere = Path::new("/elsewhere/roster.db");
+        assert_eq!(
+            running(
+                "test-running",
+                elsewhere,
+                "sleep 30; true",
+                None,
+                None,
+                None
+            )
+            .len(),
+            0
+        );
+        assert_eq!(found("test-running", "sleep 31", -2_000, 5_000), 0);
+        assert_eq!(found("test-running", "sleep 30; true", -60_000, -30_000), 0);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // The command itself, the shell gone, or a script by its
+        // interpreter.
+        let argv = |line: &str| line.split('|').map(String::from).collect::<Vec<_>>();
+        assert!(runs(&argv("sleep|30"), &[None], "sleep 30"));
+        assert!(runs(
+            &argv("/usr/bin/zsh|-lc|sleep 30; echo done"),
+            &[None],
+            "sleep 30; echo done"
+        ));
+        assert!(!runs(&argv("vim|notes"), &[None], "sleep 30"));
+        // A script, run by its shebang: after what that gives its
+        // interpreter, and only there.
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, shebang: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.path().join(name);
+            fs::write(&path, format!("{shebang}\nbody\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let npm = script("npm", "#!/usr/bin/env node");
+        let waiter = script("waiter", "#!/usr/bin/env -S python3 -W default");
+        let tool = script("tool", "#!/usr/bin/python3 -u");
+        let two = script("two", "#!/usr/bin/python3 -W default");
+        let monitor = script("monitor.py", "#!/usr/bin/env python3");
+        let quoted = script(
+            "quoted",
+            "#!/usr/bin/env -S python3 -W 'ignore:message with spaces:UserWarning'",
+        );
+        let filter = "ignore:message with spaces:UserWarning";
+        assert!(runs(
+            &["python3".into(), "-W".into(), filter.into(), quoted.clone()],
+            &[None],
+            "./quoted"
+        ));
+        let crlf = script("crlf", "#!/usr/bin/env -S python3 -u\r");
+        assert!(runs(
+            &["python3".into(), "-u".into(), crlf.clone()],
+            &[None],
+            "./crlf"
+        ));
+        // As env -S splits: quotes and backslashes off, a comment left out,
+        // what it would expand not guessed at.
+        // As GNU env 9.4 has it.
+        let split = |line: &str| env_split(line).map(|w| w.join("|"));
+        for (line, words) in [
+            (r#"a "b \"c\"" d\_e #f g"#, Some(r#"a|b "c"|d|e"#)),
+            (r"a\_\_b \_c", Some("a|b|c")),
+            (r#""a\_b\#c" a#b \#c"#, Some("a b#c|a#b|#c")),
+            (
+                r"'a\\b' 'it\'s' 'x\ny' 'a\cb' '$x' '${HOME}'",
+                Some(r"a\b|it's|x\ny|a\cb|$x|${HOME}"),
+            ),
+            (r#"a'b'c"d"e "" x"#, Some("abcde||x")),
+            (r#""a" b\c d"#, Some("a|b")),
+            (r"a\$b a\tb", Some("a$b|a\tb")),
+            ("python3 ${OPTS}", None),
+            ("a$b", None),
+            (r#""$x""#, None),
+            (r#""a\cb""#, None),
+            (r"a\qb", None),
+            (r"a\ b", None),
+            (r"x\", None),
+            ("'a", None),
+            // A line ending CRLF, and blanks as env takes them.
+            ("python3 -u\r", Some("python3|-u")),
+            ("a\x0bb\x0cc", Some("a|b|c")),
+            ("'a\rb' \"c\rd\"", Some("a\rb|c\rd")),
+        ] {
+            assert_eq!(split(line).as_deref(), words, "{line}");
+        }
+        let run = |line: String, cmd: &str| runs(&argv(&line), &[None], cmd);
+        // Relative to where it runs.
+        let here = dir.path().to_str().unwrap();
+        assert!(runs(
+            &argv("python3|-W|default|./waiter"),
+            &[Some(here)],
+            "./waiter"
+        ));
+        assert!(!runs(
+            &argv("python3|-W|default|./waiter"),
+            &[Some("/")],
+            "./waiter"
+        ));
+        // Moved elsewhere since it started: by where its command was run.
+        assert!(runs(
+            &argv("python3|-W|default|./waiter"),
+            &[Some("/"), Some(here)],
+            "./waiter"
+        ));
+        assert!(run(format!("node|{npm}|run|dev"), "npm run dev"));
+        assert!(run(format!("python3|-W|default|{waiter}"), "./waiter"));
+        assert!(run(format!("/usr/bin/python3|-u|{tool}|x"), "tool x"));
+        // The rest of a shebang's line one argument, as Linux gives it.
+        assert!(run(format!("/usr/bin/python3|-W default|{two}"), "./two"));
+        assert!(!run(format!("/usr/bin/python3|-W|default|{two}"), "./two"));
+        // Not a plain executable file: not read, nor waited on (a pipe no
+        // one writes to).
+        let fifo = dir.path().join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(!run(format!("cat|{}", fifo.display()), "sleep 30"));
+        let plain = dir.path().join("plain");
+        fs::write(&plain, "#!/usr/bin/env node\n").unwrap();
+        assert!(!run(format!("node|{}", plain.display()), "plain"));
+        // Not what the shebang gives it, nor a script's own arguments.
+        assert!(!run(format!("python3|-W|error|{waiter}"), "./waiter"));
+        assert!(!run(
+            format!("python3|{monitor}|/usr/bin/sleep|30"),
+            "/usr/bin/sleep 30"
+        ));
+        assert!(!run(format!("node|{npm}|run|dev"), "dev"));
+        // As the shell splits it, quoted, or after its variables.
+        assert!(runs(&argv("sleep|30"), &[None], r#"sleep "30""#));
+        assert!(runs(
+            &argv("/bin/echo|a b|it's"),
+            &[None],
+            r#"echo 'a b' it\'s"#
+        ));
+        assert!(runs(&argv("sleep|30"), &[None], "TZ=UTC A=1 sleep 30"));
+        // Its words from the start, or a script's after its interpreter:
+        // not a command's argument that happens to be named alike.
+        assert!(!runs(&argv("cat|ls"), &[None], "ls"));
+        assert!(!runs(&argv("vim|/x/ls"), &[None], "ls"));
+        assert!(!runs(&argv("watch|sleep|30"), &[None], "sleep 30"));
+        assert!(!runs(&argv("python3|tool.py|/x/ls"), &[None], "ls"));
+        assert!(!runs(&argv("sleep|30"), &[None], "sleep 30 | cat"));
+        assert!(!runs(&argv("sleep|30"), &[None], r#"sleep "$N""#));
     }
 
     #[test]

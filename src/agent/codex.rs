@@ -270,7 +270,14 @@ impl Adapter for Codex {
         let shells = match path {
             Some(path) if ended => {
                 let upto = payload[crate::report::TRANSCRIPT_SIZE].as_u64();
-                shells::left(path, upto)
+                // What its session's processes ran as it was cut short.
+                let commands: Vec<crate::procs::SessionCommand> =
+                    serde_json::from_value(payload[crate::report::RUNNING].clone())
+                        .unwrap_or_default();
+                let running = |cmd: &str, dir: Option<&str>, from, to| {
+                    crate::procs::running_in(&commands, cmd, dir, from, to)
+                };
+                shells::left(path, upto, &running)
             }
             _ => Vec::new(),
         };
@@ -281,8 +288,16 @@ impl Adapter for Codex {
         }
     }
 
-    fn shells_left(&self, transcript: &std::path::Path) -> Vec<super::Backgrounded> {
-        shells::left(transcript, None)
+    fn shells_left(
+        &self,
+        session: &str,
+        db: &std::path::Path,
+        transcript: &std::path::Path,
+    ) -> Vec<super::Backgrounded> {
+        let running = |cmd: &str, dir: Option<&str>, from, to| {
+            crate::procs::running(session, db, cmd, dir, from, to)
+        };
+        shells::left(transcript, None, &running)
     }
 
     fn shells_ended(

@@ -41,6 +41,20 @@ pub struct Shell {
     /// (bytes), give or take the little before it was reported: as long as
     /// the transcript was then, or as far as it's been read since.
     pub from: u64,
+    /// The tool call that started it, if its agent said
+    /// (`Backgrounded::call`), and when.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub called: Option<i64>,
+    /// What its end is told by instead of its id (`Backgrounded::ends_as`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ends_as: Vec<String>,
+    /// Where ends of what it ran are written that another shell took
+    /// (bytes): none of them its, though they'd fit, an end being one
+    /// command's, whichever roster process reads them next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taken: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -695,21 +709,47 @@ impl Session {
         true
     }
 
+    /// Ends of what its shells ran that one of them took (`ShellsFound::
+    /// taken`): left by the others told by that. Whether any was.
+    pub fn ends_taken(&mut self, taken: &[(String, u64)]) -> bool {
+        let mut left = false;
+        for (what, line) in taken {
+            for shell in self.shells.values_mut() {
+                if shell.ends_as.contains(what) && !shell.taken.contains(line) {
+                    shell.taken.push(*line);
+                    left = true;
+                }
+            }
+        }
+        left
+    }
+
     /// Commands it left running in the background, reported at `at`. One
     /// it has already (codex's, polled in a later turn) keeps what's known
     /// of it: what it does, when it started, where its end is looked for.
+    /// One a call other than the known one's started is another command,
+    /// given the id of one over since: it's that one's place it takes.
     pub fn add_shells(&mut self, shells: &[crate::agent::Backgrounded], at: i64) {
         for shell in shells {
-            let left = self
-                .shells
-                .entry(shell.id.clone())
-                .or_insert_with(|| Shell {
-                    what: None,
-                    started: shell.started.unwrap_or(at - shell.ran.max(0)),
-                    from: shell.from,
-                });
-            if left.what.is_none() {
-                left.what = shell.what.clone();
+            let new = || Shell {
+                what: shell.what.clone(),
+                started: shell.started.unwrap_or(at - shell.ran.max(0)),
+                from: shell.from,
+                call: shell.call.clone(),
+                called: shell.called,
+                ends_as: shell.ends_as.clone(),
+                taken: Vec::new(),
+            };
+            match self.shells.get_mut(&shell.id) {
+                Some(left) if shell.call.is_some() && left.call != shell.call => *left = new(),
+                Some(left) => {
+                    if left.what.is_none() {
+                        left.what = shell.what.clone();
+                    }
+                }
+                None => {
+                    self.shells.insert(shell.id.clone(), new());
+                }
             }
         }
     }
@@ -1399,6 +1439,9 @@ pub mod tests {
                 started: None,
                 ran: 0,
                 from: 500,
+                call: None,
+                called: None,
+                ends_as: Vec::new(),
             }],
             ..Report::default()
         };
@@ -1416,6 +1459,10 @@ pub mod tests {
             what: Some("Run the tests".into()),
             started: 2_000,
             from: 500,
+            call: None,
+            called: None,
+            ends_as: Vec::new(),
+            taken: Vec::new(),
         };
         assert_eq!(s.shells["b1"], shell);
         assert_eq!(s.at_work(2_000), 1);
@@ -1529,6 +1576,9 @@ pub mod tests {
             started: Some(10_000),
             ran: 0,
             from: 500,
+            call: Some("c1".into()),
+            called: None,
+            ends_as: Vec::new(),
         };
         // Found hours on (an interrupt noticed late): from when it started.
         s.add_shells(std::slice::from_ref(&dev), 9_000_000);
@@ -1546,6 +1596,10 @@ pub mod tests {
                 what: Some("npm run dev".into()),
                 started: 10_000,
                 from: 500,
+                call: Some("c1".into()),
+                called: None,
+                ends_as: Vec::new(),
+                taken: Vec::new(),
             }
         );
         // What it does, once said, where nothing was.
@@ -1560,6 +1614,31 @@ pub mod tests {
         );
         assert_eq!(s.shells["1234"].what.as_deref(), Some("npm run dev"));
         assert_eq!(s.shells["1234"].started, 10_000);
+        // Its id given to a command another call started, once it was
+        // over: that one, from where it was seen running.
+        let next = Backgrounded {
+            id: "1234".into(),
+            what: Some("cargo test".into()),
+            started: Some(9_700_000),
+            ran: 0,
+            from: 20_000,
+            call: Some("c2".into()),
+            called: None,
+            ends_as: Vec::new(),
+        };
+        s.add_shells(&[next], 9_800_000);
+        assert_eq!(
+            s.shells["1234"],
+            Shell {
+                what: Some("cargo test".into()),
+                started: 9_700_000,
+                from: 20_000,
+                call: Some("c2".into()),
+                called: None,
+                ends_as: Vec::new(),
+                taken: Vec::new(),
+            }
+        );
     }
 
     #[test]

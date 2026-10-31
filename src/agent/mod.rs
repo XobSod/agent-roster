@@ -236,8 +236,9 @@ pub trait Adapter: Sync {
 
     /// The commands its last turn left running in the background, as its
     /// transcript at `transcript` records them, for an agent whose hooks
-    /// don't say (codex's background terminals).
-    fn shells_left(&self, _transcript: &Path) -> Vec<Backgrounded> {
+    /// don't say (codex's background terminals), its session `session` of
+    /// the roster keeping its database at `db`.
+    fn shells_left(&self, _session: &str, _db: &Path, _transcript: &Path) -> Vec<Backgrounded> {
         Vec::new()
     }
 
@@ -513,6 +514,13 @@ pub struct ShellEnd {
     /// Where its line starts in the transcript (bytes): one before a shell's
     /// mark, but for its agent's `Adapter::shell_slack`, isn't its.
     pub line: u64,
+    /// When the command started (ms), if it says: one started after a shell
+    /// was, its id given again since, isn't that shell's.
+    pub started: Option<i64>,
+    /// What else it's told by: codex's, the id it gave the command and what
+    /// it ran, for a shell cut short whose id went unsaid
+    /// (`Backgrounded::ends_as`).
+    pub also: Vec<String>,
 }
 
 /// A command an agent left running in the background (`Report::shells`).
@@ -532,6 +540,17 @@ pub struct Backgrounded {
     /// (bytes), but for its agent's `Adapter::shell_slack`: how long it was
     /// as the command was reported, or where it was seen running.
     pub from: u64,
+    /// The tool call that started it, for an agent that may give its id to
+    /// another command once it's over (codex): one of a shell known, started
+    /// by another call, is that other command. None if it's only polled.
+    pub call: Option<String>,
+    /// When that call was made (ms), if said: an end of a command started
+    /// before isn't its.
+    pub called: Option<i64>,
+    /// What its end is told by instead of its id (`ShellEnd::also`), any of
+    /// them, for one whose id its agent never said (codex's command cut
+    /// short by Esc); none for one told by its id.
+    pub ends_as: Vec<String>,
 }
 
 /// A field that's there, even as null (missing ones get the default, None).

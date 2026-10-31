@@ -426,6 +426,10 @@ fn a_save_of_what_changed_writes_every_column_save_session_does() {
             what: Some("Run the tests".into()),
             started: 10,
             from: 11,
+            call: None,
+            called: None,
+            ends_as: Vec::new(),
+            taken: Vec::new(),
         },
     )]
     .into();
@@ -441,6 +445,10 @@ fn shells_their_transcript_says_have_ended_end() {
         what: None,
         started: 1,
         from: 10,
+        call: None,
+        called: None,
+        ends_as: Vec::new(),
+        taken: Vec::new(),
     };
     s.state = crate::model::State::Working;
     s.state_since = Some(1);
@@ -449,16 +457,26 @@ fn shells_their_transcript_says_have_ended_end() {
     s.shells = [("b1".to_string(), shell.clone()), ("b2".to_string(), shell)].into();
     db.save_session(&s).unwrap();
     // Read on with no end in it: how far, kept.
-    db.settle_shells(&mut |_| (Vec::new(), Some(500))).unwrap();
+    db.settle_shells(&mut |_| crate::db::ShellsFound {
+        read: Some(500),
+        ..Default::default()
+    })
+    .unwrap();
     let after = db.session(&s.id).unwrap();
     assert!(after.shells.values().all(|shell| shell.from == 500));
-    db.settle_shells(&mut |_| (vec![("b1".into(), 30)], None))
-        .unwrap();
+    db.settle_shells(&mut |_| crate::db::ShellsFound {
+        ended: vec![("b1".into(), 30)],
+        ..Default::default()
+    })
+    .unwrap();
     let after = db.session(&s.id).unwrap();
     assert_eq!(after.shells.keys().collect::<Vec<_>>(), ["b2"]);
     assert_eq!(after.state, crate::model::State::Working);
-    db.settle_shells(&mut |_| (vec![("b2".into(), 40)], None))
-        .unwrap();
+    db.settle_shells(&mut |_| crate::db::ShellsFound {
+        ended: vec![("b2".into(), 40)],
+        ..Default::default()
+    })
+    .unwrap();
     let after = db.session(&s.id).unwrap();
     assert!(after.shells.is_empty());
     assert_eq!(

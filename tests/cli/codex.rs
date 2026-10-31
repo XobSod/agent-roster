@@ -327,6 +327,143 @@ fn codex_is_followed_where_no_hook_of_its_says() {
     ));
     assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
     t.ok(&["read", "c"]);
+    // Cut short as codex waited on it: its command runs on, its id unsaid,
+    // till its end names what it ran.
+    t.report(&id, "prompt", &plan);
+    let exec = |at: &str, call: &str, cmd: &str| {
+        let arguments = json!({"cmd": cmd, "yield_time_ms": 60_000}).to_string();
+        line(
+            at,
+            "response_item",
+            json!({"type": "function_call", "call_id": call, "name": "exec_command", "arguments": arguments}),
+        )
+    };
+    let output = |at: &str, call: &str, text: &str| {
+        line(
+            at,
+            "response_item",
+            json!({"type": "function_call_output", "call_id": call, "output": text}),
+        )
+    };
+    let over = |at: &str, id: &str, cmd: &str, started: i64, ended: i64| {
+        line(
+            at,
+            "event_msg",
+            json!({"type": "item_completed", "item": {"type": "CommandExecution",
+                "process_id": id, "command": ["/usr/bin/zsh", "-lc", cmd]},
+                "started_at_ms": started, "completed_at_ms": ended}),
+        )
+    };
+    // 2026-01-01T10:00:00Z.
+    const TEN: i64 = 1_767_261_600_000;
+    // Undated, the command found running as it is now.
+    let undated =
+        |kind: &str, payload: Value| json!({"type": kind, "payload": payload}).to_string() + "\n";
+    let cut_short = |call: &str, cmd: &str| {
+        append(undated("event_msg", json!({"type": "task_started"})));
+        let arguments = json!({"cmd": cmd, "yield_time_ms": 60_000}).to_string();
+        append(undated(
+            "response_item",
+            json!({"type": "function_call", "call_id": call, "name": "exec_command", "arguments": arguments}),
+        ));
+        append(undated(
+            "response_item",
+            json!({"type": "function_call_output", "call_id": call, "output": "aborted by user after 12.0s"}),
+        ));
+        append(undated("event_msg", json!({"type": "turn_aborted"})));
+    };
+    // Its approval asked for, cancelled: it never ran, so nothing runs on.
+    cut_short("c10", "touch approved");
+    t.report(&id, "interrupted", &hook("Interrupt", json!({})));
+    assert_eq!(state(&t), (json!("idle"), json!(false), json!(0)));
+    // Waited on as it ran: it runs on.
+    t.report(&id, "prompt", &plan);
+    let cmd = "sleep 37; true";
+    // Its process the session's, as codex runs it: named for the command by
+    // the id codex gave it (none from what runs these tests).
+    let spawn = |cmd: &str, call: Option<&str>| {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", cmd])
+            .env("ROSTER_SESSION", &id)
+            .env("ROSTER_DB", t.db())
+            .env_remove("CODEX_TOOL_CALL_ID");
+        if let Some(call) = call {
+            command.env("CODEX_TOOL_CALL_ID", call);
+        }
+        command.spawn().unwrap()
+    };
+    let ended_as = |item: Option<&str>, ran: &str| {
+        let mut item_json = json!({"type": "CommandExecution", "process_id": "3001",
+            "command": ["/bin/sh", "-c", ran]});
+        if let Some(item) = item {
+            item_json["id"] = json!(item);
+        }
+        undated(
+            "event_msg",
+            json!({"type": "item_completed", "item": item_json}),
+        )
+    };
+    let mut running = spawn(cmd, None);
+    cut_short("c11", cmd);
+    t.report(&id, "interrupted", &hook("Interrupt", json!({})));
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    running.kill().unwrap();
+    running.wait().unwrap();
+    append(ended_as(None, cmd));
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "c"]);
+    // Its end by that id, whatever it says it ran.
+    t.report(&id, "prompt", &plan);
+    let mut running = spawn(cmd, Some("exec-test-1"));
+    cut_short("c12", cmd);
+    t.report(&id, "interrupted", &hook("Interrupt", json!({})));
+    assert_eq!(state(&t), (json!("working"), json!(false), json!(1)));
+    running.kill().unwrap();
+    running.wait().unwrap();
+    append(ended_as(Some("exec-test-1"), "something else"));
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "c"]);
+    // Its id given to the next turn's command once it was over, both
+    // turns' ends folded at once: that one runs on.
+    let turn = |at: &str, call: &str, cmd: &str| {
+        let ms = |s: i64| format!("2026-01-01T10:{:02}:{:02}.000Z", s / 60, s % 60);
+        let s: i64 = at.parse().unwrap();
+        t.report(
+            &id,
+            "prompt",
+            &hook("UserPromptSubmit", json!({"prompt": cmd})),
+        );
+        append(line(&ms(s), "event_msg", json!({"type": "task_started"})));
+        append(exec(&ms(s + 1), call, cmd));
+        let running = "Wall time: 1.0 seconds\nProcess running with session ID 4001\nOutput:\n";
+        append(output(&ms(s + 2), call, running));
+        append(line(
+            &ms(s + 3),
+            "event_msg",
+            json!({"type": "task_complete"}),
+        ));
+        t.report(&id, "idle", &hook("Stop", json!({})));
+    };
+    turn("180", "c11", "cargo build");
+    append(over(
+        "2026-01-01T10:03:10.000Z",
+        "4001",
+        "cargo build",
+        TEN + 181_100,
+        TEN + 190_000,
+    ));
+    turn("200", "c12", "npm run dev");
+    assert_eq!(state(&t), (json!("working"), json!(true), json!(1)));
+    append(over(
+        "2026-01-01T10:04:00.000Z",
+        "4001",
+        "npm run dev",
+        TEN + 201_100,
+        TEN + 240_000,
+    ));
+    assert_eq!(state(&t), (json!("idle"), json!(true), json!(0)));
+    t.ok(&["read", "c"]);
 
     // A /compact you run is work, though no turn: waiting again after.
     t.report(

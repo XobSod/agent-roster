@@ -339,10 +339,10 @@ impl Db {
         };
         let mut found = HashMap::new();
         for s in running(&self.conn)? {
-            let (ids, read) = ended(&s);
-            if !ids.is_empty() || read.is_some() {
+            let ShellsFound { ended, read, taken } = ended(&s);
+            if !ended.is_empty() || read.is_some() || !taken.is_empty() {
                 let read = read.map(|upto| (upto, s.shells.keys().cloned().collect::<Vec<_>>()));
-                found.insert(s.id.clone(), (ids, read));
+                found.insert(s.id.clone(), (ended, read, taken));
             }
         }
         if found.is_empty() {
@@ -352,12 +352,13 @@ impl Db {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for mut s in running(&tx)? {
-            let Some((ids, read)) = found.get(&s.id) else {
+            let Some((ids, read, taken)) = found.get(&s.id) else {
                 continue;
             };
             let ended = s.shells_ended(ids);
             let further = (read.as_ref()).is_some_and(|(upto, read)| s.shells_read_to(*upto, read));
-            if ended || further {
+            let left = s.ends_taken(taken);
+            if ended || further || left {
                 save_session(&tx, &s)?;
             }
         }
@@ -512,9 +513,18 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
 }
 
 /// What's found of a session's shells in its agent's transcript
-/// (`Db::settle_shells`): those ended, each by when, and how far it was read
-/// with none of their ends in it, if that's to be kept.
-pub type ShellsFound = (Vec<(String, i64)>, Option<u64>);
+/// (`Db::settle_shells`).
+#[derive(Debug, Default, PartialEq)]
+pub struct ShellsFound {
+    /// Those ended, each by when.
+    pub ended: Vec<(String, i64)>,
+    /// How far it was read with none of their ends in it, if that's to be
+    /// kept.
+    pub read: Option<u64>,
+    /// Ends told by what they ran (`Shell::ends_as`) a shell took: by what
+    /// they ran, and where each is written, for the others to leave.
+    pub taken: Vec<(String, u64)>,
+}
 
 /// A session's shells as kept: JSON, by id; nothing for none.
 pub(super) fn shells_text(

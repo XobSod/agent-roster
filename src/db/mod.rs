@@ -23,7 +23,7 @@ mod spent;
 #[cfg(test)]
 mod tests;
 
-pub use self::{events::insert_event, spent::SpentSave};
+pub use self::{events::insert_event, sessions::ShellsFound, spent::SpentSave};
 
 // What one module has that the others use.
 use self::{notes::*, projects::*, schema::*, sessions::*, spent::*};

@@ -26,6 +26,9 @@ mod tokens;
 mod tui;
 mod usage;
 mod util;
+// build.rs's, here for its tests.
+#[cfg(test)]
+mod version;
 
 // What's in scope here is also cmd/'s (`use crate::*` there): an import
 // this file doesn't use may be one of theirs.

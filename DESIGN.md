@@ -189,6 +189,7 @@ Roster is a small, keyboard-first terminal manager for AI coding-agent sessions,
 - The CLI asks where the TUI asks; an option answers yes for scripts and agents, and without a terminal it refuses rather than guess. What that yes shouldn't decide by the way, losing a worktree's uncommitted work or a branch, takes an answer of its own (§3.14). Where the TUI offers something else instead (another name for a restore, restoring an archived session rather than adopting its conversation), the CLI says what to run.
 - A session is addressed by its id, `project/name`, its name, or an id prefix; an address that fits several is an error.
 - Inside a session, a note command naming no session acts on that session's note, or its project's, so an agent keeps its notes without knowing its address.
+- **`--version` says which build it is**: a release, its version; one built from a checkout, also how many commits past the last release it is and at which, and whether it was changed. Why: a build is never taken for the release it came after, and a bug report says what it came from.
 - A few commands are roster's own: the hooks' reports, trusting a session's folder or roster's hooks as its agent starts, typing a first prompt while you're attached, automatic titles, the list beside an attached agent. A log of reports is for debugging.
 
 ## 7. Diagnostics

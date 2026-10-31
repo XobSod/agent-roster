@@ -10,7 +10,7 @@ use crate::model;
 #[derive(Parser)]
 #[command(
     name = "roster",
-    version,
+    version = env!("ROSTER_VERSION"),
     about = "Keyboard-first manager for AI coding agent sessions",
     after_help = "Sessions are addressed as project/name, name, or id (a prefix of 4+ characters is enough)."
 )]

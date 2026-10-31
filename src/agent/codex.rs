@@ -410,8 +410,7 @@ fn rollout_of(path: &str, id: &str) -> bool {
     let ids = name
         .and_then(|n| n.strip_suffix(".jsonl"))
         .unwrap_or_default();
-    let thread = ids.split_once('_').map_or(ids, |(thread, _)| thread);
-    thread.ends_with(&format!("-{id}"))
+    conversations::thread(ids).ends_with(&format!("-{id}"))
 }
 
 /// A string as codex reads it in a `-c` value: quoted, with the few escapes

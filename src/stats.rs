@@ -162,7 +162,7 @@ impl<T: Tally> Transcript for Jsonl<T> {
 }
 
 /// The prompts the user typed: how many, and the last few.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Prompts {
     pub count: u64,
     recent: VecDeque<String>,

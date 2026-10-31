@@ -1,11 +1,12 @@
 //! Codex's conversations, those started outside roster that it can take over:
 //! codex keeps each rollout under `<codex dir>/sessions/<year>/<month>/<day>/`
-//! as `rollout-<timestamp>-<id>.jsonl`, and names the threads it has in
-//! `<codex dir>/session_index.jsonl`. Both are codex's internal files, so
+//! as `rollout-<timestamp>-<id>.jsonl` (once an earlier prompt is edited, the
+//! thread goes on in a file of its own, `-<id>_<rollout>.jsonl`), and names
+//! the threads it has in `<codex dir>/session_index.jsonl`. Both are codex's internal files, so
 //! anything unreadable is skipped. Codex doesn't say which conversation a
 //! running codex has open (it locks a file per thread, without a pid in it).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,9 @@ pub fn codex_dir() -> Option<PathBuf> {
 const DEPTH: usize = 4;
 
 /// The rollouts codex has kept whose id `wanted` says yes to (only their files
-/// are read), newest first.
+/// are read), newest first. A thread with an earlier prompt edited has a file
+/// for each edit, named for a rollout id made as it was: it's the last one
+/// made, the one codex went on in, whatever their files' times say.
 pub fn conversations(dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Conversation> {
     let named = names(&dir.join("session_index.jsonl"));
     let mut found: Vec<Conversation> = files(&dir.join("sessions"), 1)
@@ -43,6 +46,9 @@ pub fn conversations(dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Conversat
             c
         })
         .collect();
+    found.sort_by(|a, b| edit_of(&b.path).cmp(&edit_of(&a.path)));
+    let mut seen = HashSet::new();
+    found.retain(|c| seen.insert(c.id.clone()));
     found.sort_by_key(|c| std::cmp::Reverse(c.modified));
     found
 }
@@ -74,15 +80,101 @@ pub(super) fn files(dir: &Path, depth: usize) -> Vec<PathBuf> {
 }
 
 /// The conversation id in a rollout's name, after its timestamp. Codex writes
-/// a UUID there, and its `id`s are UUIDs, so it's the file's last 36
-/// characters; a name that isn't that says nothing.
+/// a UUID there, and its `id`s are UUIDs, so it's the 36 characters before
+/// the rollout's own id, in a file a thread was written over into, else the
+/// name's last; a name that isn't that says nothing.
 pub(super) fn id_of(path: &Path) -> Option<&str> {
-    let stem = path.file_stem()?.to_str()?;
-    if stem.len() < "rollout-".len() + 37 {
+    let ids = thread(path.file_stem()?.to_str()?);
+    if ids.len() < "rollout-".len() + 37 {
         return None;
     }
-    let (head, id) = stem.split_at(stem.len() - 36);
+    let (head, id) = ids.split_at_checked(ids.len() - 36)?;
     (head.starts_with("rollout-") && head.ends_with('-') && id.contains('-')).then_some(id)
+}
+
+/// A rollout's name (without `.jsonl`) as far as its thread's id: without
+/// the `_<rollout>` codex adds for a thread written over into a file of its
+/// own, an earlier prompt of it edited.
+pub(super) fn thread(name: &str) -> &str {
+    name.split_once('_').map_or(name, |(thread, _)| thread)
+}
+
+/// What came before the rollout at `path` in its conversation, oldest
+/// first: each file it goes on from, as far as the next one does. A file
+/// codex wrote a thread over into, an earlier prompt edited, says in its
+/// header where it goes on from (`history_base`: that file's rollout id, and
+/// how far into it), and that one may too. As far as they're there: a file
+/// gone ends it.
+pub(super) fn history(path: &Path) -> Vec<(PathBuf, u64)> {
+    let mut parts: Vec<(PathBuf, u64)> = Vec::new();
+    let mut at = path.to_path_buf();
+    while let Some((id, upto)) = based_on(&at) {
+        let Some(file) = rollout_named(&at, &id) else {
+            break;
+        };
+        // Codex's are a line; anything else isn't followed round.
+        if file == path || parts.iter().any(|(p, _)| *p == file) || parts.len() >= 64 {
+            break;
+        }
+        parts.push((file.clone(), upto));
+        at = file;
+    }
+    parts.reverse();
+    parts
+}
+
+/// The rollout the one at `path` goes on from, as its header says: that
+/// one's rollout id, and how far into it (bytes).
+fn based_on(path: &Path) -> Option<(String, u64)> {
+    let header = start_upto(path, 8 * 1024 * 1024)?.header?;
+    let base = &header["payload"]["history_base"];
+    Some((
+        base["thread_id"].as_str()?.to_string(),
+        base["end_byte_offset"].as_u64()?,
+    ))
+}
+
+/// The rollout whose own id is `id`, beside the one at `beside` (its
+/// thread's): named for it, a thread's first file by the thread's id, one
+/// it was written over into by its own after the `_`. In the same folder,
+/// else anywhere in codex's directory, archived ones too.
+fn rollout_named(beside: &Path, id: &str) -> Option<PathBuf> {
+    let named = |p: &PathBuf| {
+        let Some(name) = p.file_stem().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        name.starts_with("rollout-")
+            && match name.split_once('_') {
+                Some((_, rollout)) => rollout == id,
+                None => name.ends_with(&format!("-{id}")),
+            }
+    };
+    let here = beside
+        .parent()
+        .map(|dir| files(dir, DEPTH))
+        .unwrap_or_default();
+    if let Some(found) = here.into_iter().find(named) {
+        return Some(found);
+    }
+    let codex = beside
+        .ancestors()
+        .find(|a| {
+            a.file_name()
+                .is_some_and(|n| n == "sessions" || n == "archived_sessions")
+        })?
+        .parent()?;
+    ["sessions", "archived_sessions"]
+        .iter()
+        .flat_map(|dir| files(&codex.join(dir), 1))
+        .find(named)
+}
+
+/// The rollout id codex named a thread's file for, written over into as an
+/// earlier prompt was edited; None for its first file. A UUIDv7, so the
+/// later the edit, the greater.
+fn edit_of(path: &Path) -> Option<&str> {
+    let name = path.file_stem()?.to_str()?;
+    name.split_once('_').map(|(_, rollout)| rollout)
 }
 
 /// What codex calls its threads, by conversation id: names it made itself,
@@ -197,6 +289,12 @@ fn read(path: &Path) -> Option<Conversation> {
             }
         }
     }
+    // One with an earlier prompt edited began in the files it goes on from.
+    if let Some(first) =
+        (history(path).into_iter()).find_map(|(file, upto)| start_upto(&file, upto)?.first_prompt)
+    {
+        c.first_prompt = Some(first);
+    }
     // Without a directory there's nowhere to resume it; without a prompt it
     // has nothing in it.
     c.cwd = cwd?;
@@ -220,8 +318,12 @@ struct Start {
 
 /// What rollout `path`'s start says; None if it can't be read.
 fn start(path: &Path) -> Option<Start> {
-    const LIMIT: u64 = 8 * 1024 * 1024;
-    let file = fs::File::open(path).ok()?.take(LIMIT);
+    start_upto(path, 8 * 1024 * 1024)
+}
+
+/// What rollout `path`'s start says, read as far as byte `upto` at most.
+fn start_upto(path: &Path, upto: u64) -> Option<Start> {
+    let file = fs::File::open(path).ok()?.take(upto);
     let mut lines = BufReader::new(file).split(b'\n');
     let mut start = Start {
         header: lines
@@ -313,8 +415,73 @@ mod tests {
             ))),
             Some(id)
         );
+        // A thread written over into a file of its own, an earlier prompt
+        // edited: still the thread's.
+        assert_eq!(
+            id_of(Path::new(&format!(
+                "rollout-2026-10-21T10-05-00-{id}_01a15de7-4600-7000-8000-000000000002.jsonl"
+            ))),
+            Some(id)
+        );
         // Nothing of the kind: nothing to match an id against.
         assert_eq!(id_of(Path::new("rollout-short.jsonl")), None);
+        assert_eq!(
+            id_of(Path::new(
+                "rollout-2026-10-21T10-00-00-é1a15de7-4500-7000-8000-000000000001.jsonl"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_thread_with_a_prompt_edited_is_the_file_it_went_on_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "01a191c0-d4d8-78e3-a58b-bb61909b1af2";
+        let header =
+            format!(r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/work/app"}}}}"#);
+        let prompt = |text: &str| {
+            format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{text}"}}],"internal_chat_message_metadata_passthrough":{{"content_item_kinds":["user.text"]}}}}}}"#
+            )
+        };
+        let old = rollout(
+            dir.path(),
+            id,
+            "31",
+            &[&header, &prompt("one"), &prompt("two")],
+        );
+        // Its first prompt edited: codex goes on in a file of its own, the
+        // old one left as it was; then again, in another.
+        let edit = |rollout: &str, text: &str| {
+            let path =
+                old.with_file_name(format!("rollout-2026-10-31T10-30-00-{id}_{rollout}.jsonl"));
+            fs::write(&path, [header.clone(), prompt(text)].join("\n") + "\n").unwrap();
+            path
+        };
+        let first = edit("01a191c1-4de7-70c3-9b07-e21b465dd246", "one, edited");
+        let edited = edit("01a191c2-0000-7000-8000-000000000001", "one, edited again");
+        // Whatever their files' times say (copied, say).
+        let set = |path: &Path, ago: u64| {
+            let at = std::time::SystemTime::now() - std::time::Duration::from_secs(ago);
+            let file = fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(at).unwrap();
+        };
+        set(&old, 0);
+        set(&first, 0);
+        set(&edited, 3600);
+
+        let found = conversations(dir.path(), |_| true);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].id, id);
+        assert_eq!(found[0].path, edited);
+        assert_eq!(found[0].last_prompt.as_deref(), Some("one, edited again"));
+        // By its id, as `roster adopt <id>` looks for it: one, not several.
+        assert_eq!(conversations(dir.path(), |i| i == id).len(), 1);
+        // What was spent is in both: the old file holds what came before.
+        let mut spent = super::super::tokens::files(dir.path());
+        spent.sort();
+        let of = |path: &PathBuf| (path.clone(), id.to_string());
+        assert_eq!(spent, [of(&old), of(&first), of(&edited)]);
     }
 
     #[test]

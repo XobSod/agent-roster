@@ -4,18 +4,76 @@
 //! and `paginated` history), so whatever can't be read is simply left out.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 
 use serde::Deserialize;
 
 use super::tokens::uuid_ms;
-use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text};
+use crate::stats::{AgentStats, Jsonl, Lines, Prompts, Tally, Text, Transcript};
 use crate::util::iso_ms;
 
-/// Reads a codex rollout as it grows.
-pub type CodexTranscript = Jsonl<Totals>;
+/// Reads a codex rollout as it grows, after what came before it in its
+/// conversation (`conversations::history`, an earlier prompt edited): the
+/// conversation as codex has it, though its files hold more.
+pub struct CodexTranscript {
+    rollout: Jsonl<Totals>,
+    /// What came before it has been read: once, as it doesn't change.
+    history: bool,
+}
+
+impl CodexTranscript {
+    pub fn new(path: &Path) -> CodexTranscript {
+        CodexTranscript {
+            rollout: Jsonl::new(path),
+            history: false,
+        }
+    }
+}
+
+impl Transcript for CodexTranscript {
+    fn path(&self) -> &Path {
+        self.rollout.path()
+    }
+
+    fn update(&mut self) -> std::io::Result<()> {
+        if !std::mem::replace(&mut self.history, true) {
+            let mut before = Totals::default();
+            for (file, upto) in super::conversations::history(self.rollout.path()) {
+                read_upto(&mut before, &file, upto);
+            }
+            if before.met {
+                // Kept, should its own file be read again from its start.
+                before.history = Some(Box::new(before.clone()));
+                *self.rollout.tally_mut() = before;
+            }
+        }
+        self.rollout.read()
+    }
+
+    fn stats(&self, model: Option<&str>) -> AgentStats {
+        self.rollout.stats(model)
+    }
+
+    fn recent_prompts(&self) -> Vec<String> {
+        self.rollout.recent_prompts()
+    }
+}
+
+/// The lines of the rollout at `path` as far as byte `upto`, added to
+/// `totals`; what can't be read, left out.
+fn read_upto(totals: &mut Totals, path: &Path, upto: u64) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    for line in BufReader::new(file.take(upto)).split(b'\n') {
+        let Ok(line) = line else { return };
+        totals.line(&line);
+    }
+}
 
 /// A rollout's running totals.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Totals {
     prompts: Prompts,
     typed: Typed,
@@ -48,9 +106,21 @@ pub struct Totals {
     /// The conversation's output total as the copy ended (without the
     /// per-call records, its own is what came after).
     before: u64,
+    /// What came before its file in its conversation, as read
+    /// (`CodexTranscript`): where a read of its file from its start begins.
+    history: Option<Box<Totals>>,
 }
 
 impl Lines for Totals {
+    fn fresh(&self) -> Self {
+        self.history
+            .as_deref()
+            .map_or_else(Totals::default, |before| Totals {
+                history: self.history.clone(),
+                ..before.clone()
+            })
+    }
+
     fn line(&mut self, line: &[u8]) {
         if !wanted(line) {
             return;
@@ -401,7 +471,7 @@ fn last_entry(
 /// and wrote what you typed again as a `user_message` event after it, which
 /// 0.124 did beside marked ones too. So a marked message is a prompt by its
 /// kinds, and an event only after an unmarked one: nothing counts twice.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Typed {
     after_unmarked: bool,
 }
@@ -496,6 +566,118 @@ mod tests {
                 "rate_limits": {"credits": {"has_credits": false}}}})
             .to_string(),
         ]
+    }
+
+    /// A conversation with earlier prompts edited twice, as codex 0.165
+    /// writes it: three prompts in its first file; the third edited, going
+    /// on in a file of its own from the first's first two turns, with a
+    /// fourth after; that fourth edited, going on in a third file from the
+    /// second's first turn. Each file, in codex's directory at `dir`; the
+    /// second filed under another day.
+    fn edited_twice(dir: &Path) -> [std::path::PathBuf; 3] {
+        let id = "01a1923a-6e2c-71b3-9d29-5012da0153ca";
+        let edits = [
+            "01a1923b-3130-7f62-b9da-01fec7c64220",
+            "01a1923b-829c-7372-bc1b-699dc62df116",
+        ];
+        let header = |base: Option<(&str, u64)>| {
+            let mut payload = json!({"id": id, "cwd": "/work/app", "history_mode": "paginated"});
+            if let Some((rollout, upto)) = base {
+                payload["history_base"] = json!({"thread_id": rollout,
+                    "end_ordinal_exclusive": 9, "end_byte_offset": upto});
+            }
+            json!({"timestamp": "t", "type": "session_meta", "payload": payload}).to_string()
+        };
+        // Written under `day`, named for `rollout` (none: the first): and
+        // how far into it each of its first `n` turns end, after its header.
+        let write = |day: &str, rollout: Option<&str>, header: String, turns: Vec<Vec<String>>| {
+            let folder = dir.join("sessions/2026/10").join(day);
+            std::fs::create_dir_all(&folder).unwrap();
+            let name = match rollout {
+                Some(r) => format!("rollout-2026-10-{day}T10-00-00-{id}_{r}.jsonl"),
+                None => format!("rollout-2026-10-{day}T09-00-00-{id}.jsonl"),
+            };
+            let mut text = header + "\n";
+            let mut ends = Vec::new();
+            for turn in turns {
+                text += &(turn.join("\n") + "\n");
+                ends.push(text.len() as u64);
+            }
+            let path = folder.join(name);
+            std::fs::write(&path, text).unwrap();
+            (path, ends)
+        };
+        let window = 258_000;
+        let (first, ends) = write(
+            "31",
+            None,
+            header(None),
+            vec![
+                turn("one", 5, 15_000, window),
+                turn("two", 5, 15_100, window),
+                turn("three", 5, 15_200, window),
+            ],
+        );
+        let (second, edited) = write(
+            "30",
+            Some(edits[0]),
+            header(Some((id, ends[1]))),
+            vec![
+                turn("three, edited", 7, 15_300, window),
+                turn("four", 3, 15_400, window),
+            ],
+        );
+        let (third, _) = write(
+            "31",
+            Some(edits[1]),
+            header(Some((edits[0], edited[0]))),
+            vec![turn("four, edited", 9, 15_500, window)],
+        );
+        [first, second, third]
+    }
+
+    #[test]
+    fn a_conversation_with_prompts_edited_is_what_its_last_file_goes_on_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let [first, second, third] = edited_twice(dir.path());
+        let read = |path: &Path| {
+            let mut t = CodexTranscript::new(path);
+            t.update().unwrap();
+            t
+        };
+        // What it holds: the turns each went on from, and its own; not what
+        // was cut off by an edit, though it was spent.
+        let t = read(&third);
+        let stats = t.stats(None);
+        assert_eq!(stats.prompts, Some(4));
+        assert_eq!(stats.output_tokens, Some(5 + 5 + 7 + 9));
+        assert_eq!(stats.context_used, Some(15_500));
+        assert_eq!(
+            t.recent_prompts(),
+            ["one", "two", "three, edited", "four, edited"]
+        );
+        // Its own first file read alone: as it was.
+        assert_eq!(read(&first).stats(None).prompts, Some(3));
+        // Read again from its start (replaced): from what came before.
+        let mut t = t;
+        let text = std::fs::read_to_string(&third).unwrap();
+        let moved = third.with_extension("tmp");
+        std::fs::write(&moved, &text).unwrap();
+        std::fs::rename(&moved, &third).unwrap();
+        t.update().unwrap();
+        assert_eq!(t.stats(None).prompts, Some(4));
+        assert_eq!(t.stats(None).output_tokens, Some(26));
+        // Adopted from its last file, begun where the first began.
+        let found = super::super::conversations::conversations(dir.path(), |_| true);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path, third);
+        assert_eq!(found[0].first_prompt.as_deref(), Some("one"));
+        assert_eq!(found[0].last_prompt.as_deref(), Some("four, edited"));
+        // The first gone (deleted by hand): as much as is left.
+        std::fs::remove_file(&first).unwrap();
+        let stats = read(&third).stats(None);
+        assert_eq!((stats.prompts, stats.output_tokens), (Some(2), Some(7 + 9)));
+        assert!(second.exists());
     }
 
     /// What a rollout adds up to, and the prompts it remembers: read whole,

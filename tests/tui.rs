@@ -1065,7 +1065,18 @@ fn a_pending_first_prompt_is_typed_in_whichever_way_you_attach() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    t.wait_for("the session", |t| t.session("a", false).is_some());
+    // Its agent started: `new` makes the session, then its tmux session.
+    t.wait_for("the session's agent", |t| {
+        t.session("a", false).is_some_and(|s| {
+            std::process::Command::new("tmux")
+                .args(["-L", &t.socket, "has-session", "-t"])
+                .arg(format!("=r-{}", s["id"].as_str().unwrap()))
+                .env_remove("TMUX")
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    });
     waiting.kill().unwrap();
     waiting.wait().unwrap();
     let id = t.session("a", false).unwrap()["id"]

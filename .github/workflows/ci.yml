@@ -1,10 +1,12 @@
-# Each push to master: the checks, and the release build, so a tag pushed
-# onto a commit that passed builds too. The steps are in ci/, to run anywhere.
+# Each push to a branch: the checks, and the release build. Work is pushed
+# on a branch of its own first, and master moves only to commits that passed
+# here, so a tag pushed onto master builds too. The steps are in ci/, to run
+# anywhere.
 name: CI
 
 on:
   push:
-    branches: [master]
+    branches: ["**"]
 
 permissions:
   contents: read

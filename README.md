@@ -696,6 +696,7 @@ newline.
 ```sh
 cargo test     # unit tests, plus end-to-end tests that need tmux
 ci/lint.sh && ci/test.sh   # all CI checks on each push: formatting, clippy, both crates' tests
+ci/docker.sh               # CI's steps as GitHub's runner runs them, in an Ubuntu container (needs Docker)
 ```
 
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a

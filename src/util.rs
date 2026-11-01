@@ -207,7 +207,7 @@ pub fn directory_name(directory: &std::path::Path) -> String {
 
 /// Local wall-clock time of `ms` as HH:MM:SS.
 pub fn local_time(ms: i64) -> String {
-    let secs = (ms / 1000) as libc::time_t;
+    let secs = (ms / 1000) as _;
     // SAFETY: localtime_r only writes into the tm struct we pass.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
@@ -218,7 +218,7 @@ pub fn local_time(ms: i64) -> String {
 
 /// The local date of `ms`: year, month and day.
 pub fn local_date(ms: i64) -> Option<(i32, u32, u32)> {
-    let secs = ms.div_euclid(1000) as libc::time_t;
+    let secs = ms.div_euclid(1000) as _;
     // SAFETY: localtime_r only writes into the tm struct we pass.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
@@ -235,7 +235,7 @@ pub fn local_when(ms: i64, now: i64) -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let tm = |ms: i64| {
-        let secs = ms.div_euclid(1000) as libc::time_t;
+        let secs = ms.div_euclid(1000) as _;
         // SAFETY: localtime_r only writes into the tm struct we pass.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         (!unsafe { libc::localtime_r(&secs, &mut tm) }.is_null()).then_some(tm)

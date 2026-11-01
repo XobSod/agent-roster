@@ -453,7 +453,10 @@ impl Roster {
             }
             sleep(Duration::from_millis(100));
         }
-        self.refresh()?;
+        self.ending.insert(id.to_string());
+        let refreshed = self.refresh();
+        self.ending.remove(id);
+        refreshed?;
         // The exit code of a stop the user asked for (143 after SIGTERM) means nothing.
         let mut s = self.db.session(id)?;
         if s.state == State::Stopped && s.exit_status.is_some() {

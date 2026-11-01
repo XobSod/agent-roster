@@ -116,7 +116,10 @@ impl Roster {
                 }
                 sleep(Duration::from_millis(50));
             }
-            self.refresh()?;
+            self.ending.insert(id.to_string());
+            let refreshed = self.refresh();
+            self.ending.remove(id);
+            refreshed?;
             let mut after = self.db.session(id)?;
             if !lingering && after.state == State::Stopped && after.exit_status.is_some() {
                 let before = after.clone();

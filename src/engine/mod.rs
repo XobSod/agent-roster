@@ -67,6 +67,11 @@ const BOOT_GRACE_MS: i64 = 5000;
 /// redrawing for its new size, not activity.
 const RESIZE_GRACE_MS: i64 = 3000;
 
+/// How long a refresh waits, at most and for all its panes together, for a
+/// dead pane's exit status: tmux sees the pane's terminal close a moment
+/// before it has reaped its process (and 3.2 has none for a signal).
+const EXIT_STATUS_WAIT: Duration = Duration::from_secs(1);
+
 /// The meta key holding the chats project's id.
 const CHAT_PROJECT: &str = "chat_project";
 
@@ -82,6 +87,9 @@ pub struct Roster {
     /// The size this process last saw each session's screen at: another
     /// roster may have saved the new size first, before the agent redrew.
     seen_sizes: HashMap<String, String>,
+    /// Sessions this process is stopping or killing: stopped as soon as their
+    /// pane is dead, without waiting for its exit code, theirs to clear.
+    ending: HashSet<String>,
     /// The session only watched, attached (`watch_beside`): a refresh types
     /// no first prompt in and asks no title, and what it does is seen.
     watching: Option<String>,
@@ -353,6 +361,7 @@ impl Roster {
             exe,
             resized: HashMap::new(),
             seen_sizes: HashMap::new(),
+            ending: HashSet::new(),
             watching: None,
             prompt_tries: HashMap::new(),
             undelivered: Vec::new(),
@@ -395,6 +404,7 @@ impl Roster {
         // typed: a refresh that stops before then takes none of them.
         let mut ready = Vec::new();
         let mut titles = Vec::new();
+        let mut wait_until = None;
         for mut s in self.db.sessions(false)? {
             let before = s.clone();
             match panes.get(&s.tmux_name()) {
@@ -403,7 +413,17 @@ impl Roster {
                     // Record the exit code when it stops, not on every pass, so
                     // `stop` can clear it; killed by a signal, 128 + it, as a
                     // shell says.
-                    if s.state != State::Stopped {
+                    // Started again meanwhile, it's the next refresh's.
+                    let pane = if s.state == State::Stopped {
+                        None
+                    } else if self.ending.contains(&s.id) {
+                        Some(pane.clone())
+                    } else {
+                        self.exited(&s.tmux_name(), pane, &mut wait_until)
+                    };
+                    if let Some(pane) = pane {
+                        let status =
+                            (pane.dead_status).or(pane.dead_signal.map(|signal| 128 + signal));
                         // When it died, not when it was seen to have (nothing
                         // is seen while you're attached, or roster's closed),
                         // though not before the state it ended.
@@ -412,9 +432,7 @@ impl Roster {
                             None => now,
                         };
                         s.set_state(State::Stopped, at);
-                        s.exit_status = pane
-                            .dead_status
-                            .or(pane.dead_signal.map(|signal| 128 + signal));
+                        s.exit_status = status;
                     }
                 }
                 Some(pane) => {
@@ -720,6 +738,47 @@ impl Roster {
         // last screen up by one line.
         let history = if pane.dead { 1 } else { 0 };
         self.tmux.capture(&s.tmux_name(), ansi, history)
+    }
+
+    /// A dead pane once tmux has its exit status, or as it is when the
+    /// refresh's wait (`EXIT_STATUS_WAIT`, from `wait_until`'s first use) is
+    /// over: tmux sees its terminal close a moment before it has reaped its
+    /// process. None if it's running again meanwhile, a process of its own.
+    fn exited(
+        &self,
+        tmux_name: &str,
+        pane: &Pane,
+        wait_until: &mut Option<Instant>,
+    ) -> Option<Pane> {
+        // With a time of death, what tmux says is all it will (it gives
+        // both at once).
+        let known = |p: &Pane| {
+            p.dead_status.is_some() || p.dead_signal.is_some() || p.dead_at.is_some_and(|at| at > 0)
+        };
+        let mut pane = pane.clone();
+        // Seen before another pane's wait, it's asked again however complete:
+        // it may have been started again meanwhile. Once at least, the wait
+        // used up or not.
+        let mut must_ask = wait_until.is_some();
+        let mut asked = false;
+        while must_ask || !known(&pane) {
+            let deadline = *wait_until.get_or_insert_with(|| Instant::now() + EXIT_STATUS_WAIT);
+            let over = Instant::now() >= deadline;
+            if over && asked {
+                break;
+            }
+            if !over && !known(&pane) {
+                sleep(Duration::from_millis(50));
+            }
+            asked = true;
+            must_ask = false;
+            match self.tmux.panes().ok().and_then(|mut p| p.remove(tmux_name)) {
+                Some(p) if p.dead && p.pid == pane.pid => pane = p,
+                Some(_) => return None,
+                None => break,
+            }
+        }
+        Some(pane)
     }
 
     fn live_pid(&self, tmux_name: &str) -> Result<Option<i32>> {

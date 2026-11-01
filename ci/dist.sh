@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds roster for release and packs it in target/dist/: a static x86_64
 # Linux binary (musl, so it runs whatever the distribution's glibc), as
-# roster-v<version>-linux-x86_64.tar.gz with the licences and the
+# agent-roster-v<version>-linux-x86_64.tar.gz with the licences and the
 # README, and that archive's SHA-256 beside it, for `sha256sum -c`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,7 +19,7 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-name=roster-v$version-linux-x86_64
+name=agent-roster-v$version-linux-x86_64
 dist=target/dist
 rm -rf "$dist"
 mkdir -p "$dist/$name"

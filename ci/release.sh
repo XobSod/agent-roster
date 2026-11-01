@@ -29,7 +29,7 @@ version=$(cargo pkgid --quiet --package agent-roster | sed 's/.*[#@]//')
 built=$("target/$target/release/roster" --version)
 [ "$built" = "roster $version" ] || fail "the binary says it's $built"
 
-name=roster-$tag-linux-x86_64
+name=agent-roster-$tag-linux-x86_64
 archive=target/dist/$name.tar.gz
 for file in "$archive" "$archive.sha256"; do
   [ -f "$file" ] || fail "dist.sh hasn't made $file"

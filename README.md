@@ -44,8 +44,9 @@ cargo build --release      # or only build it: ./target/release/roster
 cargo build                # a debug build, quicker to build, slower to run: ./target/debug/roster
 ```
 
-`roster --version` says which build it is: a release, its version alone; one built
-from a checkout, also its commit and whether it was changed.
+`roster --version` says which build it is, as the TUI's footer does at its right
+while no message shows: a release, its version alone; one built from a checkout,
+also its commit and whether it was changed.
 
 Installing puts only the `roster` binary in place. What else roster needs it makes
 as it runs, in `~/.local/state/agent-roster/`: its database, its tmux config, and

@@ -222,6 +222,53 @@ fn the_status_line_is_the_header_with_the_name() {
 }
 
 #[test]
+fn the_version_sits_where_messages_do_and_goes_first() {
+    let mut app = app();
+    let version = format!("v{} ", env!("ROSTER_VERSION"));
+    let footer = |app: &App, width| render(app, width, 16).lines().last().unwrap().to_string();
+    let wide = footer(&app, 120);
+    assert!(wide.starts_with(" Enter attach   s session"), "{wide}");
+    assert!(wide.ends_with(&format!("   {version}")), "{wide}");
+    // A message takes its place (while there's one: the line is drawn anew).
+    app.flash("Started roster/api; Enter attaches");
+    let with_message = footer(&app, 120);
+    assert!(!with_message.contains(&version), "{with_message}");
+    // Narrow, it goes before any hint does.
+    let app = self::app();
+    let hints_only = footer(&app, 120)
+        .trim_end_matches(&version)
+        .trim_end()
+        .to_string();
+    let narrow = footer(&app, hints_only.width() as u16 + 2);
+    assert!(narrow.starts_with(&hints_only), "{narrow}");
+    assert!(!narrow.contains(&version), "{narrow}");
+    // Never with a hint gone, whatever the width, the hints (a filter's) or
+    // the version (a release's, shorter than a hint).
+    let mut filtering = self::app();
+    filtering.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    let line = |app: &App, width| -> String {
+        footer_line(app, width, "0.1.0")
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    for app in [&app, &filtering] {
+        let all = line(app, 200)
+            .trim_end()
+            .trim_end_matches("v0.1.0")
+            .trim_end()
+            .to_string();
+        for width in 10..120 {
+            let shown = line(app, width);
+            assert!(
+                !shown.contains("v0.1.0") || shown.starts_with(&all),
+                "{width}: {shown}"
+            );
+        }
+    }
+}
+
+#[test]
 fn messages_sit_right_of_the_hints() {
     let mut app = app();
     app.flash("Started roster/api; Enter attaches");

@@ -302,9 +302,16 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
 }
 
 /// The key hints, and the latest message flush right, so the hints stay in
-/// sight. Where the two would meet, the last hints give way, whole.
+/// sight. Where the two would meet, the last hints give way, whole. Without a
+/// message, roster's version is in its place, faint, and goes first where
+/// there's no room for it beside the hints.
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let width = area.width as usize;
+    let line = footer_line(app, area.width as usize, env!("ROSTER_VERSION"));
+    f.render_widget(Paragraph::new(Line::from(line)), area);
+}
+
+/// `draw_footer`'s line, `width` wide, with roster's version `version`.
+fn footer_line(app: &App, width: usize, version: &str) -> Vec<Span<'static>> {
     let message: Vec<Span> = app
         .message()
         .map(|m| {
@@ -322,10 +329,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut hints = vec![Span::raw(" ")];
     let mut used = 1;
+    let mut all = true;
     for (i, (key, what)) in app.hints().into_iter().enumerate() {
         let gap = if i == 0 { 0 } else { 3 };
         let w = gap + key.width() + 1 + what.width();
         if used + w > room {
+            all = false;
             break;
         }
         used += w;
@@ -336,7 +345,17 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if used == 1 {
         hints.clear();
     }
-    f.render_widget(Paragraph::new(Line::from(fit(width, hints, message))), area);
+    let right = if message.is_empty() {
+        let version = format!("v{version} ");
+        if all && used + 3 + version.width() <= width {
+            vec![Span::styled(version, Style::new().fg(FAINT))]
+        } else {
+            Vec::new()
+        }
+    } else {
+        message
+    };
+    fit(width, hints, right)
 }
 
 #[cfg(test)]

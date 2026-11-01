@@ -79,6 +79,9 @@ pub struct Roster {
     /// Sessions whose window this process resized, and until when their screen
     /// changes are the agent redrawing.
     resized: HashMap<String, i64>,
+    /// The size this process last saw each session's screen at: another
+    /// roster may have saved the new size first, before the agent redrew.
+    seen_sizes: HashMap<String, String>,
     /// The session only watched, attached (`watch_beside`): a refresh types
     /// no first prompt in and asks no title, and what it does is seen.
     watching: Option<String>,
@@ -349,6 +352,7 @@ impl Roster {
             tmux,
             exe,
             resized: HashMap::new(),
+            seen_sizes: HashMap::new(),
             watching: None,
             prompt_tries: HashMap::new(),
             undelivered: Vec::new(),
@@ -692,12 +696,15 @@ impl Roster {
     /// The hash of the session's screen, with the size it was captured at.
     /// Last seen at another size, by whichever roster (one that closed the
     /// list beside it, a terminal resized), its screens for a while are the
-    /// agent redrawing.
+    /// agent redrawing. By this one too: the roster that closed the list may
+    /// have saved the new size before the agent redrew for it.
     fn screen_hash(&mut self, s: &Session, now: i64) -> Option<String> {
         let (screen, (width, height)) = self.tmux.capture_sized(&s.tmux_name()).ok()?;
-        let hash = format!("{width}x{height} {}", util::fnv1a(screen.as_bytes()));
-        let size = |hash: &str| hash.split_once(' ').map(|(size, _)| size.to_string());
-        if (s.screen_hash.as_deref()).is_some_and(|was| size(was) != size(&hash)) {
+        let seen = format!("{width}x{height}");
+        let hash = format!("{seen} {}", util::fnv1a(screen.as_bytes()));
+        let saved = (s.screen_hash.as_deref()).and_then(|was| was.split_once(' '));
+        let here = self.seen_sizes.insert(s.id.clone(), seen.clone());
+        if saved.is_some_and(|(was, _)| was != seen) || here.is_some_and(|was| was != seen) {
             self.resized.insert(s.id.clone(), now + RESIZE_GRACE_MS);
         }
         Some(hash)

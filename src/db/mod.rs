@@ -175,6 +175,42 @@ impl Db {
         set_meta(&self.conn, key, value)
     }
 
+    /// Sessions whose screen changes are, till when (ms), their agent
+    /// redrawing for a size a roster gave it: kept here so a roster started
+    /// meanwhile knows too. Only those not over at `now`.
+    pub fn redraw_graces(&self, now: i64) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM meta WHERE key LIKE 'resized:%'")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut graces = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            if let (Some(id), Ok(until)) = (key.strip_prefix("resized:"), value.parse::<i64>())
+                && until > now
+            {
+                graces.push((id.to_string(), until));
+            }
+        }
+        Ok(graces)
+    }
+
+    /// Session `id`'s redraw grace till `until` at least (a later one kept),
+    /// those over at `now` gone.
+    pub fn set_redraw_grace(&self, id: &str, until: i64, now: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM meta WHERE key LIKE 'resized:%' AND CAST(value AS INTEGER) <= ?1",
+            [now],
+        )?;
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = CAST(
+                 MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
+            [format!("resized:{id}"), until.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self
             .conn

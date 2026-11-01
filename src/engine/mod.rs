@@ -81,8 +81,8 @@ pub struct Roster {
     pub db: Db,
     pub(crate) tmux: Tmux,
     exe: PathBuf,
-    /// Sessions whose window this process resized, and until when their screen
-    /// changes are the agent redrawing.
+    /// Sessions whose window was resized, by this roster or another, and until
+    /// when their screen changes are the agent redrawing (`redrawing`).
     resized: HashMap<String, i64>,
     /// The size this process last saw each session's screen at: another
     /// roster may have saved the new size first, before the agent redrew.
@@ -400,12 +400,21 @@ impl Roster {
         read.retain(|id, _| with_shells.contains(id));
         let panes = self.tmux.panes()?;
         self.resized.retain(|_, until| *until > now);
+        let sessions = self.db.sessions(false)?;
+        // Another roster's too: the one that closed the list beside an agent
+        // may have saved its new size before the agent redrew for it. Read
+        // after the sessions: a roster saves the grace before the new size,
+        // so a new size read comes with its grace.
+        for (id, until) in self.db.redraw_graces(now).unwrap_or_default() {
+            let grace = self.resized.entry(id).or_insert(until);
+            *grace = (*grace).max(until);
+        }
         // Typed once every session is saved, each claimed just before it's
         // typed: a refresh that stops before then takes none of them.
         let mut ready = Vec::new();
         let mut titles = Vec::new();
         let mut wait_until = None;
-        for mut s in self.db.sessions(false)? {
+        for mut s in sessions {
             let before = s.clone();
             match panes.get(&s.tmux_name()) {
                 None => s.set_state(State::Stopped, now),
@@ -620,12 +629,12 @@ impl Roster {
                 continue;
             }
             if fitted.insert(key) && pane.size != size {
+                // Before, so no roster sees the redraw without its grace.
+                self.redrawing(&s.id, now_ms());
                 match mode {
                     FitPreview::Always => self.tmux.resize_fixed(&name, size)?,
                     _ => self.tmux.resize(&name, size)?,
                 }
-                self.resized
-                    .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
             }
         }
         Ok(())
@@ -723,9 +732,19 @@ impl Roster {
         let saved = (s.screen_hash.as_deref()).and_then(|was| was.split_once(' '));
         let here = self.seen_sizes.insert(s.id.clone(), seen.clone());
         if saved.is_some_and(|(was, _)| was != seen) || here.is_some_and(|was| was != seen) {
-            self.resized.insert(s.id.clone(), now + RESIZE_GRACE_MS);
+            self.redrawing(&s.id, now);
         }
         Some(hash)
+    }
+
+    /// Session `id`'s screen changes from `now` for `RESIZE_GRACE_MS` are its
+    /// agent redrawing for a new size: for every roster, a new one included,
+    /// which knows from the database.
+    fn redrawing(&mut self, id: &str, now: i64) {
+        let until = now + RESIZE_GRACE_MS;
+        let grace = self.resized.entry(id.to_string()).or_insert(until);
+        *grace = (*grace).max(until);
+        self.db.set_redraw_grace(id, until, now).ok();
     }
 
     /// The session's current screen, also after its agent exited.

@@ -10,8 +10,7 @@ impl Roster {
     /// redrawing for the size it was just given isn't a turn.
     pub fn watch_beside(&mut self, id: &str) {
         self.watching = Some(id.to_string());
-        self.resized
-            .insert(id.to_string(), now_ms() + RESIZE_GRACE_MS);
+        self.redrawing(id, now_ms());
     }
 
     /// Attaches the terminal to a session, starting it first if it's stopped, and
@@ -104,8 +103,7 @@ impl Roster {
         if let Some((pane, after)) = beside {
             let closed = self.tmux.release_sidebar(&name, &pane, after);
             if closed.unwrap_or(true) {
-                self.resized
-                    .insert(s.id.clone(), now_ms() + RESIZE_GRACE_MS);
+                self.redrawing(&s.id, now_ms());
             }
         }
         if !status?.success() {

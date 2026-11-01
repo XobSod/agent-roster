@@ -1127,3 +1127,21 @@ fn a_database_that_cant_be_written_says_where_and_why_it_may_be() {
     let e = super::unwritable(anyhow::anyhow!("from a newer roster"), &path, true);
     assert_eq!(e.to_string(), "from a newer roster");
 }
+
+#[test]
+fn redraw_graces_are_shared_till_they_are_over() {
+    let db = Db::open_in_memory().unwrap();
+    db.set_redraw_grace("a", 3000, 0).unwrap();
+    db.set_redraw_grace("b", 5000, 0).unwrap();
+    let mut graces = db.redraw_graces(1000).unwrap();
+    graces.sort();
+    assert_eq!(graces, [("a".to_string(), 3000), ("b".to_string(), 5000)]);
+    // Over, it isn't read, and goes with the next one set.
+    assert_eq!(db.redraw_graces(4000).unwrap(), [("b".to_string(), 5000)]);
+    // An earlier end doesn't shorten one set already.
+    db.set_redraw_grace("b", 4500, 4000).unwrap();
+    assert_eq!(db.meta("resized:b").unwrap().as_deref(), Some("5000"));
+    db.set_redraw_grace("c", 9000, 4000).unwrap();
+    assert_eq!(db.meta("resized:a").unwrap(), None);
+    assert_eq!(db.meta("resized:b").unwrap().as_deref(), Some("5000"));
+}

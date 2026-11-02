@@ -5,7 +5,9 @@
 //! project's note and the session's, kept as vim keeps buffers (`:wa`,
 //! `:qa`, `:wqa` for both), `mm` pins a line, Ctrl+G hands the note to
 //! `$EDITOR`, and keys typed quickly (`jk`, `notes.escape`) can leave insert
-//! mode. Esc never closes it: it's pressed out of habit, often twice.
+//! mode. Esc never closes it: it's pressed out of habit, often twice. A
+//! prompt queued for a session is edited in it too (`s q`), without what
+//! only notes have: the pin, versions, the other note.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -73,6 +75,9 @@ pub struct NoteEditor {
     /// How many of `escape`'s keys were typed, held back until it's clear
     /// whether the rest follow, and when the last came.
     held: Option<(usize, Instant)>,
+    /// A prompt queued for a session, not a note: it has no pin, versions,
+    /// or other note to show.
+    pub prompt: bool,
 }
 
 /// Which of the notes the editor holds.
@@ -278,6 +283,33 @@ impl NoteEditor {
             command: None,
             escape,
             held: None,
+            prompt: false,
+        }
+    }
+
+    /// Opens on `text`, a prompt queued for session `id` (`label`), edited
+    /// as a note is.
+    pub fn prompt(id: &str, label: String, text: &str, escape: Option<Escape>) -> NoteEditor {
+        let queued = Noted {
+            whose: Whose::Session(id.to_string()),
+            label,
+            note: Some(Note {
+                text: text.to_string(),
+                pin: None,
+                at: 0,
+            }),
+        };
+        NoteEditor {
+            prompt: true,
+            ..NoteEditor::new(&queued, escape)
+        }
+    }
+
+    /// What it holds, to say so.
+    fn what(&self) -> &'static str {
+        match self.prompt {
+            true => "prompt",
+            false => "note",
         }
     }
 
@@ -547,6 +579,7 @@ impl NoteEditor {
             // for them.
             if let KeyCode::Char(c @ ('[' | ']')) = e.code
                 && !ctrl
+                && !self.prompt
             {
                 return Outcome::Show(match c {
                     '[' => Side::Project,
@@ -555,6 +588,7 @@ impl NoteEditor {
             }
             if let KeyCode::Char(c @ (':' | 'Z' | 'm')) = e.code
                 && plain
+                && !(c == 'm' && self.prompt)
             {
                 if c == ':' {
                     self.command = Some(String::new());
@@ -607,13 +641,23 @@ impl NoteEditor {
             None => (word, false),
         };
         let not_a_command = || {
-            Outcome::Fail(format!(
-                "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
-                 changes, :e! takes the note as saved; :wa, :wqa and :qa! act on both notes; \
-                 :earlier and :later show its versions)"
-            ))
+            Outcome::Fail(match self.prompt {
+                true => format!(
+                    "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
+                     changes)"
+                ),
+                false => format!(
+                    "Not a command here: :{typed} (:w saves, :wq or :x closes too, :q! leaves \
+                     changes, :e! takes the note as saved; :wa, :wqa and :qa! act on both notes; \
+                     :earlier and :later show its versions)"
+                ),
+            })
         };
         match command {
+            _ if self.prompt && count.is_some() => return not_a_command(),
+            "ea" | "earlier" | "lat" | "later" | "e" | "edit" if self.prompt => {
+                return not_a_command();
+            }
             "ea" | "earlier" => return self.step(true, count, force),
             "lat" | "later" => return self.step(false, count, force),
             _ if count.is_some() => return not_a_command(),
@@ -642,7 +686,8 @@ impl NoteEditor {
                                   saves the other's changes"
                         .into(),
                     (false, _) => format!(
-                        "The note has unsaved changes: :wq{a} saves them, :q{a}! leaves them"
+                        "The {} has unsaved changes: :wq{a} saves them, :q{a}! leaves them",
+                        self.what()
                     ),
                 })
             }
@@ -755,6 +800,11 @@ impl NoteEditor {
             &[("Enter", "run"), ("Esc", "cancel")]
         } else {
             match self.mode() {
+                EditorMode::Normal if self.prompt => &[
+                    ("i", "insert"),
+                    (":wq", "save and close"),
+                    ("C-g", "$EDITOR"),
+                ],
                 EditorMode::Normal if self.version.is_some() => &[
                     (":w", "bring it back"),
                     (":e!", "back to the note"),
@@ -931,6 +981,45 @@ mod tests {
         let mut e = editor(Some("same"), None);
         e.show_version(version("same"), e.base.clone().as_ref());
         assert_eq!(keys(&mut e, ":q\n"), [Outcome::Close { all: false }]);
+    }
+
+    #[test]
+    fn a_prompt_is_edited_as_a_note_but_for_what_only_notes_have() {
+        let mut e = NoteEditor::prompt("r-1", "demo/w1".into(), "rerun\nthe tests", None);
+        assert!(!e.dirty());
+        assert_eq!(e.whose, Whose::Session("r-1".into()));
+        // No pin, no other note to show, no versions, nothing to take as
+        // saved.
+        keys(&mut e, "jmm");
+        assert_eq!(e.pin, None);
+        assert!(keys(&mut e, "[]").is_empty());
+        for command in [":earlier\n", ":later 2\n", ":e!\n"] {
+            let said = keys(&mut e, command);
+            assert!(
+                matches!(&said[..], [Outcome::Fail(why)] if why.starts_with("Not a command here")),
+                "{command}: {said:?}"
+            );
+        }
+        assert!(
+            !e.hints()
+                .iter()
+                .any(|(key, _)| key == "mm" || key == ":earlier")
+        );
+        // Written and saved, or left, as a note is.
+        keys(&mut e, "A now\x1b");
+        assert_eq!(e.text(), "rerun\nthe tests now");
+        let said = keys(&mut e, ":q\n");
+        assert!(
+            matches!(&said[..], [Outcome::Fail(why)] if why.starts_with("The prompt has unsaved changes")),
+            "{said:?}"
+        );
+        let save = Outcome::Save {
+            all: false,
+            close: true,
+            force: false,
+        };
+        assert_eq!(keys(&mut e, ":wq\n"), [save]);
+        assert_eq!(keys(&mut e, ":q!\n"), [Outcome::Close { all: false }]);
     }
 
     fn version(text: &str) -> Version {

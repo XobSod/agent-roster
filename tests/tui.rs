@@ -1308,3 +1308,217 @@ fn a_title_for_a_session_deleted_meanwhile_is_let_go() {
     term.keys(&["v"]);
     term.wait_for("the view menu", "tmux server");
 }
+
+#[test]
+fn a_sessions_queue_is_read_edited_and_dropped_in_the_tui() {
+    let Some(t) = TestEnv::new("queuepopup") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "lead"]);
+    t.ok(&["new", "demo", "--name", "w1"]);
+    let lead = t.session("lead", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Sent before its agent says it's ready, by lead and by you; kept as
+    // it's stopped, they wait for someone to start it.
+    let out = (t.command(&["send", "w1", "rerun the flaky tests"]))
+        .env("ROSTER_SESSION", &lead)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    t.ok(&["send", "w1", "then the linter"]);
+    t.ok(&["send", "w1", "and the changelog"]);
+    t.ok(&["stop", "--yes", "w1"]);
+    let term = Terminal::start(&t, &t.shell_command(), (140, 30));
+    // Waiting for someone to start it: counted on its shelf's heading and
+    // at the end of the summary; its row says how many it has.
+    term.wait_for("its shelf's count", "⧗1 ⌄");
+    let screen = term.screen();
+    let top = screen.lines().next().unwrap().split('│').next().unwrap();
+    assert!(top.trim_end().ends_with("⧗1"), "{screen}");
+    term.wait_for("its row's mark", "⧗3 stopped");
+
+    // The filter's word finds it; above its details, what's queued.
+    term.keys(&["/"]);
+    term.text("queued");
+    term.keys(&["Enter"]);
+    term.wait_for("only it", "1 of 2");
+    term.wait_for(
+        "the line above its details",
+        r#"⧗ 3 queued, from demo/lead and others: "rerun the flaky…" · "then the linter" · "#,
+    );
+    term.keys(&["Escape"]);
+    term.wait_for_gone("the filter cleared", "1 of 2");
+
+    // A row each: its number, who sent it, how long ago, the prompt.
+    term.keys(&["s", "q"]);
+    term.wait_for("the queue", "Queued for demo/w1");
+    term.wait_for("lead's", "1  demo/lead");
+    term.wait_for("yours", "2  you");
+    term.keys(&["j", "Enter"]);
+    term.wait_for("it whole", "Prompt 2 of demo/w1's queue");
+    term.keys(&["Escape"]);
+    term.wait_for_gone("back to the list", "Prompt 2 of demo/w1's queue");
+
+    // Edited in the editor, as a note is.
+    term.keys(&["e"]);
+    term.wait_for("the editor", "⧗ prompt 2 of demo/w1's queue");
+    term.keys(&["A"]);
+    term.text(" and the docs");
+    term.keys(&["Escape", ":", "w", "q", "Enter"]);
+    term.wait_for("the save", "Saved prompt 2 of demo/w1's queue");
+    let list = t.ok(&["send", "w1", "--list"]);
+    assert!(list.contains("then the linter and the docs"), "{list}");
+
+    // Changed by another meanwhile, it isn't saved over; typed in
+    // meanwhile, there's nothing to save into. What you wrote is kept.
+    let editor = t.path("editor.sh");
+    std::fs::write(&editor, "#!/bin/sh\nsed -i 's/docs/docs too/' \"$1\"\n").unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&editor)
+        .status()
+        .unwrap();
+    term.keys(&["e"]);
+    term.wait_for("the editor", "⧗ prompt 2 of demo/w1's queue");
+    let out = (t.command(&["send", "w1", "--edit", "2"]))
+        .env("EDITOR", &editor)
+        .env_remove("VISUAL")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    term.keys(&["A"]);
+    term.text(", mine");
+    term.keys(&["Escape", ":", "w", "q", "Enter"]);
+    term.wait_for(
+        "the refusal",
+        "Prompt 2 of demo/w1's queue was changed meanwhile; what you wrote is kept in ",
+    );
+    let list = t.ok(&["send", "w1", "--list"]);
+    assert!(
+        list.contains("and the docs too") && !list.contains("mine"),
+        "{list}"
+    );
+    term.keys(&["e"]);
+    term.wait_for("the editor", "⧗ prompt 2 of demo/w1's queue");
+    t.ok(&["send", "w1", "--drop", "2", "--yes"]);
+    term.keys(&["A"]);
+    term.text(", again");
+    term.keys(&["Escape", ":", "w", "q", "Enter"]);
+    term.wait_for(
+        "the refusal",
+        "Prompt 2 of demo/w1's queue was typed in meanwhile; what you wrote is kept in ",
+    );
+    let mut kept: Vec<String> = std::fs::read_dir(t.path("state/agent-roster/notes"))
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    kept.sort();
+    assert_eq!(
+        kept,
+        [
+            "then the linter and the docs too, again\n",
+            "then the linter and the docs, mine\n",
+        ]
+    );
+
+    // Gone while it was asked about: said so, by its start, as asked.
+    term.wait_for("the one after it", "2  you");
+    term.keys(&["d"]);
+    term.wait_for(
+        "the question",
+        "Drop \"and the changelog\" from demo/w1's queue?",
+    );
+    t.ok(&["send", "w1", "--drop", "2", "--yes"]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    term.keys(&["y"]);
+    term.wait_for(
+        "what came of it",
+        "\"and the changelog\" of demo/w1's queue was typed in meanwhile",
+    );
+
+    // All of it dropped: the queue closes, and nothing waits to start.
+    term.keys(&["D"]);
+    term.wait_for("the question", "Drop the prompt queued for demo/w1?");
+    term.keys(&["y"]);
+    term.wait_for("the drop", "Dropped the prompt queued for demo/w1");
+    term.wait_for_gone("the queue closed", "Queued for demo/w1");
+    term.wait_for_gone("the counts gone", "⧗");
+    assert!(t.ok(&["send", "w1", "--list"]).is_empty());
+    term.keys(&["s", "q"]);
+    term.wait_for("nothing to open", "Nothing queued for demo/w1");
+}
+
+#[test]
+fn a_prompt_another_session_sent_says_whose_among_the_last_prompts() {
+    let Some(t) = TestEnv::new("sentfrom") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "lead"]);
+    t.ok(&["new", "demo", "--name", "w1"]);
+    let id = |name: &str| {
+        t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (lead, w1) = (id("lead"), id("w1"));
+    // What its agent writes of the prompts it took: yours, and lead's.
+    let transcript = t.path("w1.jsonl");
+    let said =
+        |prompt: &str| format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{prompt}\"}}}}\n");
+    std::fs::write(
+        &transcript,
+        said("and mine") + &said("rerun the flaky tests"),
+    )
+    .unwrap();
+    let payload = format!(
+        r#"{{"session_id":"w1","transcript_path":"{}"}}"#,
+        transcript.display()
+    );
+    t.report(&w1, "session", &payload);
+    let out = (t.command(&["send", "w1", "rerun the flaky tests"]))
+        .env("ROSTER_SESSION", &lead)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    t.wait_for("it typed in", |t| {
+        (t.ok(&["show", "w1"]).lines()).any(|l| l.trim() == "rerun the flaky tests")
+    });
+    t.ok(&["stop", "--yes", "w1"]);
+    let term = Terminal::start(&t, &t.shell_command(), (140, 30));
+    term.wait_for("the list", "Enter attach");
+    term.keys(&["/"]);
+    term.text("w1");
+    term.keys(&["Enter"]);
+    term.wait_for("its last prompts", "Last prompts");
+    term.wait_for(
+        "lead's, by its name",
+        "› rerun the flaky tests  from demo/lead",
+    );
+    let screen = term.screen();
+    let mine = screen.lines().find(|l| l.contains("› and mine")).unwrap();
+    assert!(!mine.contains("from"), "{screen}");
+    // Its shelf's heading has its last prompt, and whose.
+    term.keys(&["k"]);
+    term.wait_for("the shelf", "Their agents aren't running");
+    term.wait_for(
+        "lead's there too",
+        "     › rerun the flaky tests  from demo/lead",
+    );
+}

@@ -208,6 +208,12 @@ impl Roster {
         self.db.insert_event(id, SENT, now, Some(&said.to_string()))
     }
 
+    /// Where the prompt `queued` (its id in a queue) is written for
+    /// `$EDITOR`, among the notes being edited.
+    pub fn queued_file(&self, queued: i64) -> PathBuf {
+        (self.paths.state_dir.join("notes")).join(format!("queued-{queued}.md"))
+    }
+
     /// Types what's queued in a roster process of its own (`roster
     /// deliver-queued`), for while nothing else refreshes; one at a time.
     pub fn deliver_queued_in_background(&self) {

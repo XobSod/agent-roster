@@ -296,10 +296,7 @@ pub fn edit_externally<T>(
     text: &str,
     keep: impl FnOnce(String) -> Result<T>,
 ) -> Result<Option<T>> {
-    let (file, mut handle) = create_own(base)?;
-    let end = if text.is_empty() { "" } else { "\n" };
-    write!(handle, "{text}{end}").with_context(|| format!("can't write {}", file.display()))?;
-    drop(handle);
+    let file = write_own(base, text)?;
     if !crate::util::run_editor(&file).inspect_err(|_| {
         let _ = fs::remove_file(&file);
     })? {
@@ -316,6 +313,15 @@ pub fn edit_externally<T>(
         .with_context(|| format!("what you wrote is kept in {}", file.display()))?;
     let _ = fs::remove_file(&file);
     Ok(Some(kept))
+}
+
+/// `text`, ended as editors end a file, in a file of its own next to `base`
+/// (`create_own`): where.
+pub fn write_own(base: &Path, text: &str) -> Result<std::path::PathBuf> {
+    let (file, mut handle) = create_own(base)?;
+    let end = if text.is_empty() { "" } else { "\n" };
+    write!(handle, "{text}{end}").with_context(|| format!("can't write {}", file.display()))?;
+    Ok(file)
 }
 
 /// A new file for this process next to `base` (`notes/demo-one-1a2b3c4d.md`
@@ -417,6 +423,10 @@ mod tests {
                 .unwrap()
                 .ends_with(&format!("demo-one-1a2b3c4d.{pid}.md"))
         );
+        // Written as an editor leaves it, beside the others.
+        let kept = write_own(&base, "rerun the tests").unwrap();
+        assert!(kept != first && kept != second);
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "rerun the tests\n");
     }
 
     #[test]

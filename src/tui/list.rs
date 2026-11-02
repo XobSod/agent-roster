@@ -69,6 +69,8 @@ pub enum Entry {
         /// The shelf's title or the project's name.
         label: String,
         count: usize,
+        /// Of those, how many are stopped with prompts queued.
+        waiting: usize,
         open: bool,
     },
     /// A two-line card.
@@ -115,6 +117,8 @@ pub struct Options<'a> {
     pub hits: Option<&'a HashMap<String, Hit>>,
     /// Oldest or newest first, per shelf.
     pub order: &'a crate::config::Order,
+    /// The prompts queued for each session, by its id.
+    pub queues: &'a HashMap<String, Vec<crate::model::Queued>>,
 }
 
 /// Most attention first, then by when each got there, as `order` says
@@ -148,10 +152,13 @@ pub fn entries(projects: &[Project], sessions: &[Session], opts: &Options) -> Ve
             return;
         }
         let open = !opts.folded.contains(&group);
+        let queued = |s: &Session| opts.queues.get(&s.id).is_some_and(|q| !q.is_empty());
+        let waiting = mine.iter().filter(|s| s.waits_to_start(queued(s))).count();
         entries.push(Entry::Heading {
             group,
             label,
             count: mine.len(),
+            waiting,
             open,
         });
         if open {
@@ -272,6 +279,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
@@ -320,6 +328,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &order,
+            queues: &HashMap::new(),
         };
         assert_eq!(
             ids(Group::Shelf(Shelf::NeedsInput), &opts),
@@ -359,6 +368,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &order,
+            queues: &HashMap::new(),
         };
         let sessions = [
             with("first", 1, State::Working, false, 10),
@@ -389,6 +399,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         let shown = keys(&entries);
@@ -410,6 +421,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let entries = entries(
             &[project(1, "a"), project(2, "b"), project(3, "empty")],
@@ -444,6 +456,7 @@ mod tests {
             filter: Some(2),
             hits: None,
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let entries = entries(&[project(1, "a"), project(2, "b")], &sessions(), &opts);
         assert_eq!(
@@ -471,6 +484,7 @@ mod tests {
             filter: None,
             hits: Some(&hits),
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let projects = [project(1, "a"), project(2, "b"), project(3, "empty")];
         assert_eq!(
@@ -508,6 +522,7 @@ mod tests {
             filter: None,
             hits: None,
             order: &crate::config::Order::default(),
+            queues: &HashMap::new(),
         };
         let sessions = [archived("a", 1, 1), archived("b", 1, 2)];
         assert_eq!(

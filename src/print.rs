@@ -436,7 +436,8 @@ pub fn list_sessions(r: &Roster, query: &str, options: &ListOptions) -> Result<(
         .into_iter()
         .filter(|s| s.deleted_at.is_some() == archived && project.is_none_or(|p| s.project == p))
         .collect();
-    if let Some(hits) = search::hits(query, &sessions) {
+    let queued = r.db.queued_sessions()?;
+    if let Some(hits) = search::hits(query, &sessions, |s| queued.contains(&s.id)) {
         sessions.retain(|s| hits.contains_key(&s.id));
     }
     if by_attention {

@@ -83,6 +83,31 @@ pub enum Op {
         whose: crate::note::Whose,
         step: isize,
     },
+    /// Prompt `n` of session `session`'s queue, by its id `queued`, as
+    /// written in the editor from `base`, then the editor closed if
+    /// `close`.
+    SaveQueued {
+        session: String,
+        queued: i64,
+        n: usize,
+        base: String,
+        text: String,
+        close: bool,
+    },
+    /// Prompt `n` of session `session`'s queue in `$EDITOR`: the open
+    /// editor's text, or the prompt as queued, saved when the editor exits.
+    EditQueued {
+        session: String,
+        queued: i64,
+        n: usize,
+    },
+    /// Prompts of session `session`'s queue, by their ids: one, by its
+    /// start quoted (`queue::quoted`), or (None) all there were.
+    DropQueued {
+        session: String,
+        queued: Vec<i64>,
+        prompt: Option<String>,
+    },
     /// Make sure the chats project exists, then open the new-chat form.
     NewChat,
     /// Look for conversations to adopt, then pick one.

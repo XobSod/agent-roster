@@ -130,6 +130,16 @@ fn prompts_sent_wait_in_a_queue_and_go_in_one_at_a_time_in_order() {
     assert_eq!((rows[0][0], rows[0][1]), ("1", "demo/lead"), "{list}");
     assert_eq!((rows[1][0], rows[1][1]), ("2", "you"), "{list}");
     assert_eq!(rows[2].last(), Some(&"third"), "{list}");
+    // Found by the word the TUI's filter has for them, or left out.
+    let names = |words: &str| -> Vec<String> {
+        let list: serde_json::Value =
+            serde_json::from_str(&t.ok(&["ls", "--json", words])).unwrap();
+        (list.as_array().unwrap().iter())
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names("queued"), ["w"]);
+    assert_eq!(names("!queued"), ["lead"]);
 
     // Edited, or dropped, before it goes in.
     let editor = t.path("editor.sh");

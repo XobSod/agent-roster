@@ -12,6 +12,7 @@ mod note;
 mod op;
 mod perform;
 mod picker;
+mod queue;
 mod theme;
 mod tokens;
 mod transcripts;
@@ -233,9 +234,12 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             app.tokens.sum(period, tokens::sum(roster.paths.db()));
         }
         // Escape keys held back in the note editor go in once it's too late
-        // for the rest (`notes.escape_ms`).
+        // for the rest (`notes.escape_ms`); the same in a prompt's.
         if let Some(open) = app.note.as_mut() {
             open.shown_mut().tick(Instant::now());
+        }
+        if let Some(editing) = app.queue.as_mut().and_then(|q| q.editing.as_mut()) {
+            editing.editor.tick(Instant::now());
         }
         let size = app.preview.size.get();
         terminal.draw(|f| ui::draw(f, app))?;
@@ -252,7 +256,10 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         } else {
             until_reload
         };
-        if let Some(deadline) = app.note.as_ref().and_then(|n| n.shown().deadline()) {
+        let prompt = (app.queue.as_ref()).and_then(|q| q.editing.as_ref());
+        let deadline = (app.note.as_ref().and_then(|n| n.shown().deadline()))
+            .or_else(|| prompt.and_then(|e| e.editor.deadline()));
+        if let Some(deadline) = deadline {
             wait = wait.min(deadline.saturating_duration_since(Instant::now()));
         }
         // A title or a transcript coming is looked for more often than a tick.
@@ -471,6 +478,14 @@ fn update_preview(roster: &Roster, app: &mut App) {
         .and_then(|s| transcript_info(roster, app, &s))
         .unzip();
     let prompts = prompts.unwrap_or_default();
+    // Who sent them, looked up only where they show: where its screen doesn't.
+    let sent = |s: &crate::model::Session| match prompts.is_empty() {
+        true => Vec::new(),
+        false => {
+            let mut sent = roster.db.sent_to(&[&s.id]).unwrap_or_default();
+            senders(&sent.remove(&s.id).unwrap_or_default(), &prompts)
+        }
+    };
     let now = crate::util::now_ms();
     app.preview.stats = stats;
     app.preview.screen = false;
@@ -480,10 +495,21 @@ fn update_preview(roster: &Roster, app: &mut App) {
         Some(Entry::Heading { group, .. }) => {
             let size = app.preview.size.get().unwrap_or((80, 24));
             let prompts = group_prompts(app, group, size.1);
+            // Who sent each, looked up for all of them at once as the preview
+            // is made, not as it's drawn.
+            let ids: Vec<&str> = prompts.keys().map(String::as_str).collect();
+            let mut sent = roster.db.sent_to(&ids).unwrap_or_default();
+            let prompts = (prompts.into_iter())
+                .map(|(id, prompt)| {
+                    let sent = sent.remove(&id).unwrap_or_default();
+                    let mut sent = senders(&sent, std::slice::from_ref(&prompt));
+                    (id, sent.pop().unwrap_or((prompt, None)))
+                })
+                .collect();
             app.group_info(group, &prompts, size, now)
         }
         Some(Entry::Card(s) | Entry::Row(s)) if s.deleted_at.is_some() => {
-            app.session_info(&s, &prompts, &[], now)
+            app.session_info(&s, &sent(&s), &[], now)
         }
         // Stopped: what it was, as when archived; after an error, also how
         // its screen ended (kept in tmux), where the error is.
@@ -496,16 +522,38 @@ fn update_preview(roster: &Roster, app: &mut App) {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
-            app.session_info(&s, &prompts, &tail, now)
+            app.session_info(&s, &sent(&s), &tail, now)
         }
         Some(Entry::Card(s) | Entry::Row(s)) => match roster.screen(&s, true) {
             Ok(screen) => {
                 app.preview.screen = true;
                 screen_text(&screen)
             }
-            Err(_) => app.session_info(&s, &prompts, &[], now),
+            Err(_) => app.session_info(&s, &sent(&s), &[], now),
         },
     };
+}
+
+/// `prompts`, as a session's agent took them (oldest first), each with
+/// what the session that sent it was called, if one did: by its text, its
+/// spaces and line ends as one, among what roster knows it took (`sent`,
+/// oldest first, `Db::sent_to`). Both newest first, each of those is one
+/// prompt's at most, so a prompt of yours like one sent before isn't taken
+/// for it too.
+fn senders(sent: &[(String, Option<String>)], prompts: &[String]) -> Vec<(String, Option<String>)> {
+    let mut left: Vec<Option<(String, &Option<String>)>> = (sent.iter())
+        .map(|(typed, from)| Some((crate::model::words(typed), from)))
+        .collect();
+    let mut from = vec![None; prompts.len()];
+    for (i, p) in prompts.iter().enumerate().rev() {
+        let words = crate::model::words(p);
+        let typed =
+            (left.iter_mut().rev()).find(|t| t.as_ref().is_some_and(|(typed, _)| *typed == words));
+        if let Some((_, sender)) = typed.and_then(Option::take) {
+            from[i] = sender.clone();
+        }
+    }
+    prompts.iter().cloned().zip(from).collect()
 }
 
 /// How long after a subagent started what's read of it is read again, till
@@ -563,6 +611,33 @@ mod tests {
         let main = std::thread::Builder::new().name("main".into());
         let _ = main.spawn(|| panic!("the TUI failed")).unwrap().join();
         assert_eq!(RESTORED.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_prompt_another_session_sent_says_whose_it_was() {
+        let lead = Some("demo/lead".to_string());
+        let sent = [
+            ("rerun the\ntests".to_string(), lead.clone()),
+            ("and lint".to_string(), lead.clone()),
+            // The same again, from you this time.
+            ("and lint".to_string(), None),
+        ];
+        let prompts = ["rerun the  tests", "and lint", "and lint", "mine"].map(String::from);
+        let from = |sent: &[(String, Option<String>)], prompts: &[String]| -> Vec<Option<String>> {
+            (senders(sent, prompts).into_iter())
+                .map(|(_, from)| from)
+                .collect()
+        };
+        // Newest first, each sent one prompt's: the later "and lint" yours,
+        // the earlier lead's.
+        assert_eq!(
+            from(&sent, &prompts),
+            [lead.clone(), lead.clone(), None, None]
+        );
+        // One sent, two the same: only one is it.
+        let once = [("and lint".to_string(), lead.clone())];
+        assert_eq!(from(&once, &prompts[1..3]), [None, lead]);
+        assert_eq!(senders(&once, &prompts[3..])[0].0, "mine");
     }
 
     #[test]

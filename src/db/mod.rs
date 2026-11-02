@@ -25,7 +25,10 @@ mod spent;
 mod tests;
 
 pub use self::{
-    events::insert_event, queue::sent_by_another, sessions::ShellsFound, spent::SpentSave,
+    events::insert_event,
+    queue::{Edited, sent_by_another},
+    sessions::ShellsFound,
+    spent::SpentSave,
 };
 
 // What one module has that the others use.

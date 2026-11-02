@@ -57,7 +57,7 @@ pub enum Cmd {
     },
     /// List sessions and their state (● = unread)
     Ls {
-        /// Only sessions matching all these words, by project, title or name (fuzzy, like `/` in the TUI)
+        /// Only sessions matching all these words, by project, title or name (fuzzy, like `/` in the TUI); `queued` keeps those with prompts queued, `!queued` those without
         words: Vec<String>,
         /// List archived sessions instead
         #[arg(long)]

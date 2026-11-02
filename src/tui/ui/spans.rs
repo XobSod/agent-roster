@@ -235,14 +235,19 @@ pub fn status_line(s: &Session, detach_key: &str) -> (String, String) {
 
 /// The line at the top beside the read-only list (`tui::run_sidebar`), the
 /// list `list` columns wide with its divider, as tmux markup: the list's top
-/// line over the list and the preview's header over the agent, each where
-/// the TUI has it, so the list stays where it was; the back key goes under
-/// the list.
-pub fn status_line_beside(sessions: &[Session], s: &Session, list: u16) -> (String, String) {
+/// line over the list (`waiting`: how many sessions are stopped with prompts
+/// queued) and the preview's header over the agent, each where the TUI has
+/// it, so the list stays where it was; the back key goes under the list.
+pub fn status_line_beside(
+    sessions: &[Session],
+    waiting: usize,
+    s: &Session,
+    list: u16,
+) -> (String, String) {
     // Cut to the list's width, as the list cuts it.
     let width = usize::from(list.saturating_sub(1));
     let left = [
-        fit(width, summary_line(sessions, width), Vec::new()),
+        fit(width, summary_line(sessions, waiting, width), Vec::new()),
         vec![
             Span::styled("│", Style::new().fg(FAINT)),
             Span::raw(" "),

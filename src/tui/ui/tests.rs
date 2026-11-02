@@ -860,7 +860,11 @@ fn long_titles_are_cut_with_an_ellipsis() {
 fn long_project_names_keep_their_count_and_fold_mark() {
     let line = |noted| -> String {
         let name = "customer-portal-frontend-migration-2026";
-        let spans = heading(Group::Project(1), name, 3, true, noted, false, 34);
+        let marks = Marks {
+            noted,
+            ..Default::default()
+        };
+        let spans = heading(Group::Project(1), name, 3, true, marks, 34);
         spans.iter().map(|s| s.content.to_string()).collect()
     };
     let (plain, noted) = (line(false), line(true));
@@ -874,6 +878,21 @@ fn long_project_names_keep_their_count_and_fold_mark() {
     assert!(
         noted.contains("… ▤ (3) ") && noted.ends_with(" ⌄ "),
         "{noted}"
+    );
+    // Folded, too much memory and those waiting to start, all of it, the
+    // name cut for them.
+    let marks = Marks {
+        noted: true,
+        over_memory: true,
+        waiting: 12,
+    };
+    let name = "customer-portal-frontend-migration-2026";
+    let spans = heading(Group::Project(1), name, 30, false, marks, 30);
+    let folded: String = spans.iter().map(|s| s.content.to_string()).collect();
+    assert_eq!(folded.width(), 30, "{folded}");
+    assert!(
+        folded.contains("… ▤ (30) ") && folded.ends_with(" ⚠ ⧗12 › "),
+        "{folded}"
     );
 }
 
@@ -902,9 +921,10 @@ fn sessions_without_a_screen_say_what_they_were() {
     std::fs::write(&transcript, "").unwrap();
     s.transcript_path = Some(transcript.to_string_lossy().into_owned());
     s.workdir = "/r/services".into();
+    // One another session sent: by what it was called.
     let prompts = [
-        "fix the tests".to_string(),
-        "and the\nchangelog".to_string(),
+        ("fix the tests".to_string(), Some("roster/lead".to_string())),
+        ("and the\nchangelog".to_string(), None),
     ];
     let shown = text(app.session_info(&s, &prompts, &[], now));
     for part in [
@@ -914,7 +934,7 @@ fn sessions_without_a_screen_say_what_they_were() {
         "Agent         ✱ claude · opus · high",
         "Title         Fix scrollback (Claude's)",
         "Conversation  c0ffee12 (resumed when started)",
-        "Last prompts\n  › fix the tests\n  › and the changelog",
+        "Last prompts\n  › fix the tests  from roster/lead\n  › and the changelog\n",
     ] {
         assert!(shown.contains(part), "{part:?} in\n{shown}");
     }
@@ -1396,7 +1416,7 @@ fn a_shelf_shows_its_sessions_at_a_glance() {
     app.selected = 0;
     let prompts = std::collections::HashMap::from([(
         "a1".to_string(),
-        "fix the scrollback\nand its tests".to_string(),
+        ("fix the scrollback\nand its tests".to_string(), None),
     )]);
     let size = (82, 13);
     app.preview.text = app.group_info(
@@ -1420,6 +1440,44 @@ fn a_shelf_shows_its_sessions_at_a_glance() {
     }
     // The working one is on its own shelf, not this one.
     assert!(!screen.contains("working 3m"), "{screen}");
+    // Sent by another session: by its name, after the prompt, which is cut
+    // for it.
+    let long = "fix the scrollback and its tests, then the changelog, then the release notes";
+    let prompts = std::collections::HashMap::from([(
+        "a1".to_string(),
+        (long.to_string(), Some("roster/lead".to_string())),
+    )]);
+    app.preview.text = app.group_info(
+        crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput),
+        &prompts,
+        size,
+        now,
+    );
+    let screen = render(&app, 120, 16);
+    let line = (screen.lines())
+        .find(|l| l.contains("› fix the scrollback"))
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(line.trim_end().ends_with("…  from roster/lead"), "{screen}");
+    // Too narrow for both, the prompt alone.
+    let text = app.group_info(
+        crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput),
+        &prompts,
+        (30, 13),
+        now,
+    );
+    let said: String = (text.lines.iter())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect();
+    assert!(
+        said.contains("› fix the scrollback") && !said.contains("from"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -1476,7 +1534,9 @@ fn a_groups_preview_fits_any_size() {
         at: 0,
     });
     app.set_data(app.projects.clone(), sessions);
-    let prompts = std::collections::HashMap::from([("a1".to_string(), "x".repeat(200))]);
+    // Sent by another session, which is said too where there's room.
+    let sent = ("x".repeat(200), Some("roster/lead".to_string()));
+    let prompts = std::collections::HashMap::from([("a1".to_string(), sent)]);
     let shelf = crate::tui::list::Group::Shelf(crate::tui::list::Shelf::NeedsInput);
     let empty = crate::tui::list::Group::Shelf(crate::tui::list::Shelf::Stopped);
     for group in [shelf, empty, crate::tui::list::Group::Project(1)] {
@@ -1916,4 +1976,254 @@ fn a_projects_note_is_marked_after_its_name() {
     app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
     let screen = render(&app, 120, 16);
     assert!(screen.contains("RO roster ▤  /r"), "{screen}");
+}
+
+fn queued(id: i64, prompt: &str, from: Option<&str>) -> crate::model::Queued {
+    crate::model::Queued {
+        id,
+        prompt: prompt.into(),
+        sender: from.map(|_| "l1".into()),
+        sender_label: from.map(Into::into),
+        sent_at: now_ms() - 300_000,
+    }
+}
+
+fn press(app: &mut App, keys: &str) {
+    for c in keys.chars() {
+        let shift = match c.is_ascii_uppercase() {
+            true => KeyModifiers::SHIFT,
+            false => KeyModifiers::NONE,
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char(c), shift));
+    }
+}
+
+#[test]
+fn a_queue_shows_on_its_card_and_above_its_screen() {
+    let mut app = app();
+    let lead = Some("roster/lead");
+    let queue = vec![
+        queued(1, "rerun the flaky\ntests", lead),
+        queued(2, "then the linter", lead),
+    ];
+    app.queues = [("a1".to_string(), queue.clone())].into();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    app.selected = 1;
+    app.preview.screen = true;
+    let screen = render(&app, 120, 16);
+    assert!(screen.contains("⧗2 "), "{screen}");
+    let lines: Vec<&str> = screen.lines().collect();
+    let said = r#"⧗ 2 queued, from roster/lead: "rerun the flaky tests" · "then the linter""#;
+    let at = (lines.iter())
+        .position(|l| l.contains(said))
+        .unwrap_or_else(|| panic!("{screen}"));
+    // On the row under the statistics, the screen right below.
+    assert!(lines[at - 1].contains("created 2d"), "{screen}");
+    assert!(lines[at + 1].contains("agent screen line"), "{screen}");
+    // Over a note's box, which goes a row down.
+    app.sessions[0].note = Some(crate::note::Note {
+        text: "TODO".into(),
+        pin: None,
+        at: 0,
+    });
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    let screen = render(&app, 120, 16);
+    let lines: Vec<&str> = screen.lines().collect();
+    let at = (lines.iter()).position(|l| l.contains(said)).unwrap();
+    assert!(lines[at + 1].contains("╭────"), "{screen}");
+    assert!(lines[at + 2].contains("✎ TODO"), "{screen}");
+    // Narrow, each is cut to share the room; from others too, said so.
+    let text = |line: Line| {
+        line.spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>()
+    };
+    assert_eq!(
+        text(queue_line(&queue, 60).unwrap()),
+        r#"⧗ 2 queued, from roster/lead: "rerun the f…" · "then the l…""#
+    );
+    let mixed = [queue[1].clone(), queued(3, "and you", None)];
+    let said = text(queue_line(&mixed, 80).unwrap());
+    assert!(
+        said.starts_with(
+            r#"⧗ 2 queued, from roster/lead and others: "then the linter" · "and you""#
+        ),
+        "{said}"
+    );
+    // One renamed between sendings is still the one.
+    let renamed = crate::model::Queued {
+        sender_label: Some("roster/boss".into()),
+        ..queue[1].clone()
+    };
+    let said = text(queue_line(&[queue[0].clone(), renamed], 80).unwrap());
+    assert!(said.starts_with("⧗ 2 queued, from roster/lead: "), "{said}");
+    // So narrow that only one shows.
+    let said = text(queue_line(&queue, 40).unwrap());
+    assert_eq!(said, r#"⧗ 2 queued, from roster/lead: "rerun t…""#);
+    assert!(queue_line(&[], 80).is_none());
+}
+
+#[test]
+fn stopped_sessions_with_prompts_queued_are_counted_on_their_heading_and_the_summary() {
+    let mut app = app();
+    let mut sessions = app.sessions.clone();
+    sessions[1].state = State::Stopped;
+    for (id, name) in [("c1", "web"), ("d1", "docs")] {
+        let mut s = session(id);
+        (s.project, s.name, s.state) = ("roster".into(), name.into(), State::Stopped);
+        sessions.push(s);
+    }
+    app.queues = [
+        ("b1".to_string(), vec![queued(1, "go on", None)]),
+        ("c1".to_string(), vec![queued(2, "and on", None)]),
+    ]
+    .into();
+    app.set_data(app.projects.clone(), sessions);
+    let heading = |app: &App, label: &str| -> String {
+        let screen = render(app, 140, 16);
+        let list = screen.lines().map(|l| l.split('│').next().unwrap());
+        let line = list.into_iter().find(|l| l.contains(label));
+        line.unwrap_or_else(|| panic!("{screen}")).to_string()
+    };
+    // At the end of the summary; on the Stopped shelf's heading, before its
+    // fold mark; and each on its row.
+    let screen = render(&app, 140, 16);
+    let lines: Vec<&str> = screen.lines().collect();
+    assert!(lines[0].contains("1 needs input · ⧗2 │"), "{screen}");
+    assert!(
+        heading(&app, "Stopped (3)").ends_with("── ⧗2 ⌄ "),
+        "{screen}"
+    );
+    assert_eq!(screen.matches("⧗1 stopped").count(), 2, "{screen}");
+    // Folded, the same.
+    let at = (app.entries.iter())
+        .position(|e| e.session().is_some_and(|s| s.id == "b1"))
+        .unwrap();
+    app.selected = at;
+    press(&mut app, "h");
+    assert!(heading(&app, "Stopped (3)").ends_with("── ⧗2 › "));
+    // Grouped by project, on the project's heading, open or folded.
+    app.set_grouped(true);
+    assert!(heading(&app, "RO roster").ends_with("── ⧗2 ⌄ "));
+    app.selected = 0;
+    press(&mut app, "h");
+    assert!(heading(&app, "RO roster").ends_with("── ⧗2 › "));
+    // Beside an attached agent, the summary as the list has it.
+    let (left, _) = status_line_beside(&app.sessions, 2, &app.sessions[0], 40);
+    assert!(left.contains("⧗2"), "{left}");
+    // Hidden by the filter, counted at the top, where nothing's hidden, and
+    // not on the heading, which counts what it shows.
+    app.set_grouped(false);
+    press(&mut app, "/web");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let screen = render(&app, 140, 16);
+    assert!(
+        screen.lines().next().unwrap().contains("· ⧗2 │"),
+        "{screen}"
+    );
+    assert!(
+        heading(&app, "Stopped (1)").ends_with("── ⧗1 ⌄ "),
+        "{screen}"
+    );
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    // An archived one's queue went as it was archived: one left in it
+    // anyway isn't counted.
+    let mut sessions = app.sessions.clone();
+    for s in sessions.iter_mut().filter(|s| s.id == "c1") {
+        s.deleted_at = Some(now_ms());
+    }
+    app.set_data(app.projects.clone(), sessions);
+    let screen = render(&app, 140, 16);
+    assert!(
+        screen.lines().next().unwrap().contains("· ⧗1 │"),
+        "{screen}"
+    );
+    assert!(
+        heading(&app, "Stopped (2)").ends_with("── ⧗1 › "),
+        "{screen}"
+    );
+    assert!(!heading(&app, "Archived (1)").contains('⧗'), "{screen}");
+    // None queued: no count anywhere.
+    app.queues.clear();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(!render(&app, 140, 16).contains('⧗'));
+}
+
+#[test]
+fn the_summarys_count_of_those_waiting_to_start_is_never_cut() {
+    let app = app();
+    let text = |waiting, width| -> String {
+        let spans = summary_line(&app.sessions, waiting, width);
+        spans.iter().map(|s| s.content.to_string()).collect()
+    };
+    assert_eq!(text(2, 40), " roster  1 needs input · 1 working · ⧗2 ");
+    // Roster's name goes first, then what's before the count.
+    for width in 12..40 {
+        let said = text(2, width);
+        assert_eq!(said.width(), width, "{said:?}");
+        assert!(said.ends_with(" · ⧗2 "), "{width}: {said:?}");
+    }
+    assert_eq!(text(2, 36), " ro… 1 needs input · 1 working · ⧗2 ");
+    // Just wide enough for it all, nothing cut; a column narrower, one.
+    assert_eq!(text(2, 32), " 1 needs input · 1 working · ⧗2 ");
+    assert_eq!(text(2, 31), " 1 needs input · 1 worki… · ⧗2 ");
+    assert_eq!(text(2, 20), " 1 needs input · ⧗2 ");
+    // With none waiting, roster's name and the counts alone.
+    assert_eq!(text(0, 30), " r… 1 needs input · 1 working ");
+}
+
+#[test]
+fn the_queue_shows_a_row_per_prompt_one_whole_or_in_the_editor() {
+    let mut app = app();
+    let long: String = (1..=40).map(|i| format!("step {i}\n")).collect();
+    let queue = vec![
+        queued(1, "rerun the flaky\ntests", Some("roster/lead")),
+        queued(2, &long, None),
+    ];
+    app.queues = [("a1".to_string(), queue)].into();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    app.selected = 1;
+    press(&mut app, "sq");
+    let screen = render(&app, 120, 30);
+    assert!(screen.contains("Queued for roster/api"), "{screen}");
+    // Its number, whose, how long ago, the prompt on one line.
+    assert!(
+        screen.contains("▸ 1  roster/lead    5m  rerun the flaky tests"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("  2  you            5m  step 1 step 2"),
+        "{screen}"
+    );
+    assert!(screen.contains("Enter read"), "{screen}");
+    // Read whole, as many lines as there's room for, and where they are.
+    press(&mut app, "j");
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let screen = render(&app, 120, 30);
+    assert!(
+        screen.contains("Prompt 2 of roster/api's queue"),
+        "{screen}"
+    );
+    assert!(screen.contains(" from you, 5m ago"), "{screen}");
+    assert!(screen.contains("│ step 1 "), "{screen}");
+    assert!(screen.contains("1–27 of 42"), "{screen}");
+    press(&mut app, "jjjjjjjjjjjjjjjjjjjj");
+    let screen = render(&app, 120, 30);
+    assert!(
+        screen.contains("16–42 of 42") && screen.contains("│ step 40 "),
+        "{screen}"
+    );
+    // In the editor, titled with which it is.
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    press(&mut app, "ke");
+    let screen = render(&app, 120, 30);
+    assert!(
+        screen.contains("⧗ prompt 1 of roster/api's queue"),
+        "{screen}"
+    );
+    assert!(screen.contains(" NORMAL "), "{screen}");
+    assert!(screen.contains("rerun the flaky"), "{screen}");
+    assert!(screen.contains(":wq save and close"), "{screen}");
+    assert!(!screen.contains("mm pin"), "{screen}");
 }

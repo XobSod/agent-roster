@@ -140,18 +140,20 @@ pub(super) fn editor_height(editor: &NoteEditor, width: u16, room: u16) -> u16 {
     (rows as u16 + 1).clamp(3, most) + 2
 }
 
+/// A prompt's editor's height in `room` rows: its lines and one to add, at
+/// least three, as many as there's room for, with its border.
+pub(super) fn prompt_editor_height(editor: &NoteEditor, width: u16, room: u16) -> u16 {
+    let width = width.saturating_sub(4) as usize;
+    let rows: usize = editor.lines().iter().map(|l| screen_rows(l, width)).sum();
+    (rows as u16 + 1).clamp(3, room.saturating_sub(2).max(3)) + 2
+}
+
 /// The editor, titled with the note shown and the other there is to show
 /// (its key, its mark), each marked if it has unsaved changes, and if it has
 /// an external change since it was opened; the shown one with its conflicts
 /// instead, if it has any.
 pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
     let editor = open.shown();
-    let (mode, color) = match editor.mode() {
-        EditorMode::Normal => ("NORMAL", MUTED),
-        EditorMode::Insert => ("INSERT", INPUT),
-        EditorMode::Visual => ("VISUAL", ACCENT),
-        EditorMode::Search => ("SEARCH", ACCENT),
-    };
     let unsaved = || Span::styled("[+] ", Style::new().fg(INPUT));
     let mut title = vec![Span::styled(
         format!(" {} {} ", note_mark(open.side()), editor.label),
@@ -196,6 +198,38 @@ pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
             title.push(Span::styled("external change ", Style::new().fg(ERROR)));
         }
     }
+    draw_editor(f, editor, title, note_mark(open.side()), area);
+}
+
+/// A prompt being edited, `n` of its session's queue, in the editor,
+/// titled so, and marked if it has unsaved changes.
+pub(super) fn draw_prompt_editor(f: &mut Frame, editor: &NoteEditor, n: usize, area: Rect) {
+    let mut title = vec![Span::styled(
+        format!(" ⧗ prompt {n} of {}'s queue ", editor.label),
+        Style::new().add_modifier(Modifier::BOLD),
+    )];
+    if editor.dirty() {
+        title.push(Span::styled("[+] ", Style::new().fg(INPUT)));
+    }
+    draw_editor(f, editor, title, "", area);
+}
+
+/// `editor` in a box on `area`, `title`d, its mode at the top right, what's
+/// typed after `:` or `/` at the bottom, else where the cursor is; its
+/// pinned line by `mark`.
+fn draw_editor(
+    f: &mut Frame,
+    editor: &NoteEditor,
+    title: Vec<Span<'static>>,
+    mark: &str,
+    area: Rect,
+) {
+    let (mode, color) = match editor.mode() {
+        EditorMode::Normal => ("NORMAL", MUTED),
+        EditorMode::Insert => ("INSERT", INPUT),
+        EditorMode::Visual => ("VISUAL", ACCENT),
+        EditorMode::Search => ("SEARCH", ACCENT),
+    };
     let (row, search) = {
         let state = editor.state.borrow();
         let search = (state.mode == EditorMode::Search).then(|| state.search_pattern());
@@ -267,7 +301,7 @@ pub(super) fn draw_note_editor(f: &mut Frame, open: &OpenNotes, area: Rect) {
             f.buffer_mut().set_string(
                 gutter.x,
                 content.y + y as u16,
-                note_mark(open.side()),
+                mark,
                 Style::new().fg(ACCENT),
             );
         }

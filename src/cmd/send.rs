@@ -90,21 +90,18 @@ pub fn send(
     }
     if let Some(n) = edit {
         let q = nth(n)?.clone();
-        let file = r
-            .paths
-            .state_dir
-            .join("notes")
-            .join(format!("queued-{}.md", q.id));
+        let file = r.queued_file(q.id);
         let saved = note::edit_externally(&file, &q.prompt, |text| {
             let text = text.trim();
             if text.is_empty() {
                 bail!("nothing left of it: --drop {n} drops it");
             }
             engine::check_queued_fits(&s, text)?;
-            if !r.db.edit_queued(&s.id, q.id, text)? {
-                bail!("prompt {n} of {label}'s queue was typed in meanwhile");
+            match r.db.edit_queued(&s.id, q.id, &q.prompt, text)? {
+                db::Edited::Saved => Ok(()),
+                db::Edited::Gone => bail!("prompt {n} of {label}'s queue was typed in meanwhile"),
+                db::Edited::Changed => bail!("prompt {n} of {label}'s queue was changed meanwhile"),
             }
-            Ok(())
         })?;
         match saved {
             Some(()) => println!("Saved prompt {n} of {label}'s queue"),

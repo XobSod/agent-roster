@@ -1606,3 +1606,160 @@ fn deleting_asks_what_goes_of_a_worktree_one_thing_at_a_time() {
     );
     assert_eq!(op, go(how(false, false)));
 }
+
+fn queued(id: i64, prompt: &str) -> crate::model::Queued {
+    crate::model::Queued {
+        id,
+        prompt: prompt.into(),
+        sender: None,
+        sender_label: None,
+        sent_at: 0,
+    }
+}
+
+#[test]
+fn s_q_opens_the_queue_and_its_keys_go_to_it() {
+    let mut app = app();
+    select(&mut app, "s1");
+    // Nothing queued: said, nothing opened.
+    assert_eq!(keys(&mut app, "sq"), None);
+    assert!(app.queue.is_none());
+    let said = app.message().map(|m| (m.text.clone(), m.error));
+    assert_eq!(said, Some(("Nothing queued for alpha/s-s1".into(), false)));
+    let three = vec![queued(1, "one"), queued(2, "two"), queued(3, "three")];
+    app.queues = HashMap::from([("s1".to_string(), three.clone())]);
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    keys(&mut app, "sq");
+    assert!(app.queue.is_some());
+    assert!(
+        app.hints()
+            .iter()
+            .any(|(key, what)| key == "Enter" && *what == "read")
+    );
+    // Keys go to it: s opens no menu.
+    keys(&mut app, "js");
+    assert_eq!(app.menu, None);
+    let at = |app: &App| {
+        let view = app.queue.as_ref().unwrap();
+        view.selected(app.queue_of("s1")).map(|(n, q)| (n, q.id))
+    };
+    assert_eq!(at(&app), Some((2, 2)));
+
+    // d and D ask, and y drops what they asked of by its id; n doesn't.
+    let asked = |app: &App| match &app.dialog {
+        Some(Dialog::Confirm { question, .. }) => question.clone(),
+        _ => panic!("no confirmation"),
+    };
+    // One by its start: its number changes as those ahead of it go in.
+    keys(&mut app, "d");
+    assert_eq!(asked(&app), "Drop \"two\" from alpha/s-s1's queue?");
+    let drop = |queued: Vec<i64>, prompt: Option<&str>| Op::DropQueued {
+        session: "s1".into(),
+        queued,
+        prompt: prompt.map(Into::into),
+    };
+    assert_eq!(keys(&mut app, "y"), Some(drop(vec![2], Some("\"two\""))));
+    keys(&mut app, "D");
+    assert_eq!(asked(&app), "Drop the 3 prompts queued for alpha/s-s1?");
+    assert_eq!(keys(&mut app, "y"), Some(drop(vec![1, 2, 3], None)));
+    assert_eq!(keys(&mut app, "Dn"), None);
+    assert!(app.dialog.is_none() && app.queue.is_some());
+
+    // e: in the editor, as a note is; :wq asks for it saved by its id.
+    keys(&mut app, "e");
+    assert!(app.hints().iter().any(|(key, _)| key == ":wq"));
+    keys(&mut app, "A!q");
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.queue.as_ref().unwrap().editing.is_some());
+    keys(&mut app, ":wq");
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(Op::SaveQueued {
+            session: "s1".into(),
+            queued: 2,
+            n: 2,
+            // Over the text it began from, and only that.
+            base: "two".into(),
+            text: "two!q".into(),
+            close: true,
+        })
+    );
+    // Ctrl+G: to $EDITOR; :q! back to the list.
+    let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+    let external = Some(Op::EditQueued {
+        session: "s1".into(),
+        queued: 2,
+        n: 2,
+    });
+    assert_eq!(app.on_key(ctrl_g), external);
+    keys(&mut app, ":q!");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.queue.as_ref().unwrap().editing.is_none());
+    // With notes in $EDITOR, prompts too.
+    app.notes.editor = Some(crate::config::NoteEditor::External);
+    assert_eq!(keys(&mut app, "e"), external);
+    app.notes.editor = None;
+
+    // Emptied while one's edited: open till it's left, then closed.
+    keys(&mut app, "e");
+    app.queues.clear();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(app.queue.as_ref().is_some_and(|q| q.editing.is_some()));
+    keys(&mut app, ":q!");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.queue.is_none());
+    app.queues.insert("s1".into(), three.clone());
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    keys(&mut app, "sqj");
+
+    // The first typed in meanwhile: still on its prompt, now first.
+    app.queues.insert("s1".into(), three[1..].to_vec());
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    assert_eq!(at(&app), Some((1, 2)));
+    // All gone: closed, and said, unless something else is.
+    app.queues.clear();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(app.queue.is_none());
+    app.message = None;
+    app.queues.insert("s1".into(), three.clone());
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    keys(&mut app, "sq");
+    app.queues.clear();
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(app.queue.is_none());
+    let said = app.message().map(|m| m.text.clone());
+    assert_eq!(said.as_deref(), Some("Nothing queued for alpha/s-s1 now"));
+
+    // Esc closes it, and q, which doesn't quit.
+    app.queues.insert("s1".into(), three);
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    keys(&mut app, "sq");
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.queue.is_none());
+    keys(&mut app, "sq");
+    assert_eq!(keys(&mut app, "q"), None);
+    assert!(app.queue.is_none());
+}
+
+#[test]
+fn queued_in_the_filter_finds_the_sessions_with_prompts_queued() {
+    let mut app = app();
+    app.queues = HashMap::from([("s2".to_string(), vec![queued(1, "one")])]);
+    app.set_data(app.projects.clone(), app.sessions.clone());
+    let sessions = |app: &App| -> Vec<String> {
+        (app.entries.iter())
+            .filter_map(|e| Some(e.session()?.id.clone()))
+            .collect()
+    };
+    keys(&mut app, "/queued");
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(sessions(&app), ["s2"]);
+    // With other words, those match as ever.
+    keys(&mut app, "/");
+    for _ in 0.."queued".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    keys(&mut app, "s4 queued");
+    assert!(sessions(&app).is_empty());
+}

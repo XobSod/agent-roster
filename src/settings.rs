@@ -901,6 +901,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         adopt,
         chat,
         note,
+        queue,
     } = session;
     let s =
         |name: &str, list: &KeyList, doc: &str| keys_setting(&["keys", "session", name], list, doc);
@@ -931,6 +932,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             ),
             s("adopt", adopt, "adopt a conversation started elsewhere"),
             s("note", note, "the session's note, to read and write"),
+            s(
+                "queue",
+                queue,
+                "the prompts queued for it, to read, edit or drop",
+            ),
         ],
     });
     let ProjectKeys {

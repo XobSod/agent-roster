@@ -70,7 +70,8 @@ pub(super) fn sidebar_loop(
         // The status line's left, the list's top line, kept as it changes,
         // and the title with it.
         if status_line && let Some(s) = app.sessions.iter().find(|s| s.id == id) {
-            let line = status_line_beside(&app.sessions, s, terminal.size()?.width);
+            let waiting = app.waiting_to_start();
+            let line = status_line_beside(&app.sessions, waiting, s, terminal.size()?.width);
             if shown.as_ref() != Some(&line) {
                 roster.tmux.label(&s.tmux_name(), &line.0, &line.1).ok();
                 shown = Some(line);

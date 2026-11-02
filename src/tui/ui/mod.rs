@@ -34,6 +34,7 @@ use super::app::{App, Dialog, Mode};
 use super::form::{Form, Kind};
 use super::list::{Entry, Group};
 use super::picker::Picker;
+use super::queue::QueueView;
 use super::theme::{
     self, ACCENT, ATTACHED_BG, ERROR, FAINT, INPUT, MUTED, PACE_EVEN, PACE_FAST, PACE_SLOW,
     SELECTED_BG, UNREAD, WORKING,
@@ -76,6 +77,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if app.help {
         draw_help(f, app, main);
+    }
+    if let Some(view) = &app.queue {
+        draw_queue(f, app, view, main);
     }
     if let Some(dialog) = &app.dialog {
         draw_dialog(f, dialog, main);
@@ -208,16 +212,28 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
         _ => (None, None),
     };
     let band = note_bands(project, session, body.width as usize, app.notes.lines());
-    // The editor, or the notes' box, from the blank row above the screen, as
-    // the one replaces the other.
+    // What's queued for it, on the blank row above the screen.
+    let queued = match app.selected_entry() {
+        Some(Entry::Card(s) | Entry::Row(s)) => queue_line(app.queue_of(&s.id), gap.width as usize),
+        _ => None,
+    };
+    let first = match queued {
+        Some(line) => {
+            f.render_widget(Paragraph::new(line), gap);
+            body.y
+        }
+        None => gap.y,
+    };
+    // The editor, or the notes' box, from the first row left above the
+    // screen, as the one replaces the other.
     let above = |rows: u16| {
         let top = Rect {
-            y: gap.y,
-            height: rows.min(body.bottom() - gap.y),
+            y: first,
+            height: rows.min(body.bottom() - first),
             ..body
         };
         let [_, rest] = Layout::vertical([
-            Constraint::Length(rows.saturating_sub(1)),
+            Constraint::Length((first + rows).saturating_sub(body.y)),
             Constraint::Min(0),
         ])
         .areas(body);
@@ -245,6 +261,59 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect, now: i64) {
     for (line, row) in lines[skip..].iter().zip(screen.rows()) {
         f.render_widget(line, row);
     }
+}
+
+/// What's queued for a session (`queue`), in a line `width` wide: how many,
+/// from whom (the first's sender, and whether others sent any), and the
+/// prompts, each on one line, cut to share the room; None for nothing.
+pub(super) fn queue_line(queue: &[crate::model::Queued], width: usize) -> Option<Line<'static>> {
+    let first = queue.first()?;
+    let who = first.sender_label.clone().unwrap_or_else(|| "you".into());
+    // By id: a session renamed between sendings is still the one.
+    let others = match queue.iter().all(|q| q.sender == first.sender) {
+        true => "",
+        false => " and others",
+    };
+    let said = format!(" {} queued, from {who}{others}: ", queue.len());
+    let mut spans = vec![
+        Span::styled("⧗", Style::new().fg(ACCENT)),
+        Span::styled(said, Style::new().fg(MUTED)),
+    ];
+    let room = width.saturating_sub(spans.iter().map(Span::width).sum());
+    let prompts: Vec<String> = queue
+        .iter()
+        .map(|q| crate::util::one_line(&q.prompt))
+        .collect();
+    for (i, (prompt, share)) in prompts.iter().zip(shares(&prompts, room)).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::new().fg(FAINT)));
+        }
+        spans.push(Span::raw(format!("\"{}\"", truncate(prompt, share - 2))));
+    }
+    Some(Line::from(fit(width, spans, Vec::new())))
+}
+
+/// The columns each of the first of `prompts` gets in `room`, quoted, with
+/// " · " between them: as many as get a few words' worth, the room shared
+/// out evenly, but none more than it needs.
+fn shares(prompts: &[String], room: usize) -> Vec<usize> {
+    const LEAST: usize = 12;
+    let shown = (1..=prompts.len())
+        .rev()
+        .find(|&n| n * LEAST + (n - 1) * 3 <= room)
+        .unwrap_or(1);
+    let needs: Vec<usize> = (prompts[..shown].iter()).map(|p| p.width() + 2).collect();
+    let mut left = room.saturating_sub((shown - 1) * 3);
+    let mut shares = vec![0; shown];
+    // Those that need least first: what they leave goes to the others.
+    let mut order: Vec<usize> = (0..shown).collect();
+    order.sort_by_key(|&i| needs[i]);
+    for (k, &i) in order.iter().enumerate() {
+        let even = left / (shown - k);
+        shares[i] = needs[i].min(even).max(2);
+        left = left.saturating_sub(shares[i]);
+    }
+    shares
 }
 
 fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {

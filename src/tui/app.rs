@@ -24,6 +24,7 @@ use super::list::{self, Entry, EntryKey, Group, Shelf};
 use super::note::{self, NoteEditor, OpenNotes, Side};
 use super::op::{self, Op};
 use super::picker::{Picked, Picker};
+use super::queue::{self, QueueView};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
 use crate::note::Whose;
@@ -194,6 +195,9 @@ pub struct App {
     /// A session's note and its project's, open to read and write; keys go
     /// to the one shown.
     pub note: Option<OpenNotes>,
+    /// A session's queue, open to read, edit or drop its prompts; keys go
+    /// to it.
+    pub queue: Option<QueueView>,
     /// Titles being made (`s t`), by session: each its agent's answer to
     /// come, on a thread of its own.
     pub titling: Vec<Titling>,
@@ -284,6 +288,7 @@ impl App {
             capturing: None,
             order: Default::default(),
             note: None,
+            queue: None,
             titling: Vec::new(),
             notes: Default::default(),
             limits: Default::default(),
@@ -404,6 +409,45 @@ impl App {
         }
         self.note_changes();
         self.rebuild();
+        self.follow_queue();
+    }
+
+    /// The prompts queued for session `id`, first to go in first.
+    pub fn queue_of(&self, id: &str) -> &[crate::model::Queued] {
+        self.queues.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    /// How many prompts are queued for `s`.
+    pub fn queued(&self, s: &Session) -> usize {
+        self.queue_of(&s.id).len()
+    }
+
+    /// How many sessions are stopped with prompts queued
+    /// (`Session::waits_to_start`), whether the list shows them or not.
+    pub fn waiting_to_start(&self) -> usize {
+        crate::model::waiting_to_start(&self.sessions, |id| !self.queue_of(id).is_empty())
+    }
+
+    /// The open queue as it is now; once nothing's left in it, closed,
+    /// unless a prompt of it is being edited (saving says it's gone).
+    fn follow_queue(&mut self) {
+        let Some(view) = self.queue.as_mut() else {
+            return;
+        };
+        let queue = self
+            .queues
+            .get(&view.session)
+            .map_or(&[][..], Vec::as_slice);
+        if !queue.is_empty() || view.editing.is_some() {
+            view.follow(queue);
+            return;
+        }
+        let label = view.label.clone();
+        self.queue = None;
+        // Not over what was said of what emptied it (all dropped).
+        if self.message().is_none() {
+            self.flash(format!("Nothing queued for {label} now"));
+        }
     }
 
     /// Takes each open note saved by another since it was opened or saved
@@ -435,6 +479,7 @@ impl App {
             self.sessions
                 .iter()
                 .filter(|s| self.filter.is_none_or(|p| s.project_id == p)),
+            |s| self.queued(s) > 0,
         );
         // In the server view the list isn't shown, but kept for coming back.
         self.entries = list::entries(&self.projects, &self.sessions, &self.list_options());
@@ -506,6 +551,7 @@ impl App {
             filter: self.filter,
             hits: self.hits.as_ref(),
             order: &self.order,
+            queues: &self.queues,
         }
     }
 
@@ -747,6 +793,9 @@ impl App {
         if self.note.is_some() {
             return self.on_note_key(e);
         }
+        if self.queue.is_some() {
+            return self.on_queue_key(e);
+        }
         if self.typing.is_some() {
             self.on_search_key(e);
             return None;
@@ -898,6 +947,101 @@ impl App {
                 None
             }
         }
+    }
+
+    /// The open queue's keys, or its editor's; what they ask for.
+    fn on_queue_key(&mut self, e: KeyEvent) -> Option<Op> {
+        let view = self.queue.as_mut()?;
+        if let Some(editing) = view.editing.as_mut() {
+            let (session, queued, n) = (view.session.clone(), editing.id, editing.n);
+            match editing.editor.on_key(e) {
+                note::Outcome::None => {}
+                note::Outcome::Save { close, .. } => {
+                    let text = editing.editor.text();
+                    let base = editing.base.clone();
+                    return Some(Op::SaveQueued {
+                        session,
+                        queued,
+                        n,
+                        base,
+                        text,
+                        close,
+                    });
+                }
+                note::Outcome::Close { .. } => {
+                    view.editing = None;
+                    // Emptied meanwhile, there's no list to go back to.
+                    self.follow_queue();
+                }
+                note::Outcome::External => {
+                    return Some(Op::EditQueued { session, queued, n });
+                }
+                note::Outcome::Fail(why) => self.fail(why),
+                note::Outcome::Notice(what) => self.flash(what),
+                // Only a note has another to show, and versions.
+                note::Outcome::Show(_) | note::Outcome::Reload | note::Outcome::Step(_) => {}
+            }
+            return None;
+        }
+        let queue = self.queues.get(&view.session).cloned().unwrap_or_default();
+        let asked = view.on_key(e, &queue);
+        let (session, label) = (view.session.clone(), view.label.clone());
+        let Some((n, q)) = view.selected(&queue) else {
+            self.queue = None;
+            return None;
+        };
+        match asked {
+            queue::Asked::None => {}
+            queue::Asked::Close => self.queue = None,
+            queue::Asked::Edit => match self.notes.editor() {
+                crate::config::NoteEditor::External => {
+                    let queued = q.id;
+                    return Some(Op::EditQueued { session, queued, n });
+                }
+                crate::config::NoteEditor::Builtin => {
+                    let editor =
+                        NoteEditor::prompt(&session, label, &q.prompt, self.notes.escape());
+                    view.editing = Some(queue::Editing {
+                        id: q.id,
+                        n,
+                        editor,
+                        base: q.prompt.clone(),
+                    });
+                }
+            },
+            // By its start: its number changes as those ahead of it go in.
+            queue::Asked::Drop => {
+                let prompt = queue::quoted(&q.prompt);
+                let question = format!("Drop {prompt} from {label}'s queue?");
+                let queued = vec![q.id];
+                let prompt = Some(prompt);
+                self.confirm(
+                    question,
+                    Op::DropQueued {
+                        session,
+                        queued,
+                        prompt,
+                    },
+                );
+            }
+            queue::Asked::DropAll => {
+                let question = match queue.len() {
+                    1 => format!("Drop the prompt queued for {label}?"),
+                    k => format!("Drop the {k} prompts queued for {label}?"),
+                };
+                let queued = queue.iter().map(|q| q.id).collect();
+                let prompt = None;
+                self.confirm(
+                    question,
+                    Op::DropQueued {
+                        session,
+                        queued,
+                        prompt,
+                    },
+                );
+            }
+        }
+        None
     }
 
     /// `[` or `]` in the editor: the project's note or the session's, opened

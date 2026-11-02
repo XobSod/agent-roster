@@ -2,7 +2,56 @@
 //! time, by whichever roster process gets to each first.
 
 use super::*;
-use crate::model::Queued;
+use crate::model::{Queued, SENT, words};
+
+/// How long before roster's record of a prompt it typed in its agent's hook
+/// can say it took it: the record comes once typing's over.
+const HEARD_BEFORE_RECORD_MS: i64 = 5000;
+
+/// What a session's agent took, as `Db::sent_to` reads it.
+#[derive(Default)]
+struct Taken {
+    prompts: Vec<SentPrompt>,
+    /// Those of `prompts` recorded as typed in, not yet heard of from its
+    /// agent: the same prompt heard is one of these.
+    unheard: Vec<usize>,
+    /// The last of `prompts` heard with no record of it, and when: its
+    /// record may be on its way.
+    heard: Option<(usize, i64)>,
+}
+
+impl Taken {
+    /// `prompt` recorded at `at` as typed into it, sent by `from`.
+    fn sent(&mut self, prompt: String, from: Option<String>, at: i64) {
+        match self.heard.take() {
+            Some((i, heard))
+                if at - heard <= HEARD_BEFORE_RECORD_MS
+                    && words(&self.prompts[i].0) == words(&prompt) =>
+            {
+                self.prompts[i].1 = from;
+            }
+            _ => {
+                self.unheard.push(self.prompts.len());
+                self.prompts.push((prompt, from));
+            }
+        }
+    }
+
+    /// `prompt` heard from its agent at `at`, as it took it.
+    fn heard(&mut self, prompt: String, at: i64) {
+        let said = words(&prompt);
+        let sent = (self.unheard.iter()).position(|&i| words(&self.prompts[i].0) == said);
+        match sent {
+            Some(sent) => {
+                self.unheard.remove(sent);
+            }
+            None => {
+                self.heard = Some((self.prompts.len(), at));
+                self.prompts.push((prompt, None));
+            }
+        }
+    }
+}
 
 impl Db {
     /// Puts `prompt` at the end of session `id`'s queue, sent by `sender`
@@ -141,13 +190,69 @@ impl Db {
     }
 
     /// Replaces the text of the prompt `queued` (its id) in session `id`'s
-    /// queue, if it's still there, typed in by none: whether it was.
-    pub fn edit_queued(&self, id: &str, queued: i64, prompt: &str) -> Result<bool> {
-        let n = self.conn.execute(
-            "UPDATE queued SET prompt = ?3 WHERE session_id = ?1 AND id = ?2",
-            params![id, queued, prompt],
+    /// queue with `prompt`, if it's still there, typed in by none, and as
+    /// `base`, the text the edit began from, changed by none.
+    pub fn edit_queued(&self, id: &str, queued: i64, base: &str, prompt: &str) -> Result<Edited> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let saved = tx.execute(
+            "UPDATE queued SET prompt = ?4 WHERE session_id = ?1 AND id = ?2 AND prompt = ?3",
+            params![id, queued, base, prompt],
         )?;
-        Ok(n == 1)
+        let there: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM queued WHERE session_id = ?1 AND id = ?2)",
+            params![id, queued],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok(match (saved, there) {
+            (1, _) => Edited::Saved,
+            (_, true) => Edited::Changed,
+            (_, false) => Edited::Gone,
+        })
+    }
+
+    /// The prompts each of sessions `ids`' agents took, as far as roster
+    /// knows, by session, oldest first, each with what its sender was called
+    /// (None: you): those typed in from its queue, and those its agent said
+    /// it took (a prompt of yours like one sent is told from it by this:
+    /// each record is one prompt heard). None for a session with none. One
+    /// look for all of them: the events aren't indexed by session.
+    pub fn sent_to(&self, ids: &[&str]) -> Result<HashMap<String, Vec<SentPrompt>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT session_id, kind, at, json_extract(payload, '$.prompt'),
+                    json_extract(payload, '$.from'), json_extract(payload, '$.label')
+             FROM events WHERE kind IN (?, 'prompt') AND session_id IN ({}) AND json_valid(payload)
+             ORDER BY id",
+            vec!["?"; ids.len()].join(", ")
+        ))?;
+        let params = std::iter::once(SENT).chain(ids.iter().copied());
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            let from: Option<String> = r.get(4)?;
+            let label: Option<String> = r.get(5)?;
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                from.map(|f| label.unwrap_or(f)),
+            ))
+        })?;
+        let mut taken: HashMap<String, Taken> = HashMap::new();
+        for row in rows {
+            if let (id, kind, at, Some(prompt), from) = row? {
+                let taken = taken.entry(id).or_default();
+                match kind == SENT {
+                    true => taken.sent(prompt, from, at),
+                    false => taken.heard(prompt, at),
+                }
+            }
+        }
+        Ok((taken.into_iter())
+            .map(|(id, taken)| (id, taken.prompts))
+            .collect())
     }
 
     /// The sessions with anything queued.
@@ -158,6 +263,20 @@ impl Db {
         let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// A prompt typed in from a queue, and what the session that sent it was
+/// called (None: you).
+pub type SentPrompt = (String, Option<String>);
+
+/// What came of editing a queued prompt (`Db::edit_queued`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edited {
+    Saved,
+    /// Typed in meanwhile, or dropped: there's nothing to save it into.
+    Gone,
+    /// Edited by another meanwhile, which this would undo.
+    Changed,
 }
 
 /// `Session::sent` for the turn `q` begins: its prompt, if another session

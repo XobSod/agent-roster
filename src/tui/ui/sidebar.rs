@@ -38,7 +38,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64, summa
     }
 
     if summary {
-        let line = summary_line(&app.sessions, width);
+        let line = summary_line(&app.sessions, app.waiting_to_start(), width);
         f.render_widget(Paragraph::new(Line::from(line)), top);
     }
 
@@ -130,6 +130,7 @@ pub(super) fn list_lines(
             Entry::Heading {
                 label,
                 count,
+                waiting,
                 open,
                 group,
             } => {
@@ -138,12 +139,17 @@ pub(super) fn list_lines(
                     Group::Shelf(_) => false,
                 };
                 // Folded, a session in it using too much memory shows on it.
-                let over = !*open
+                let over_memory = !*open
                     && (app.sessions.iter()).any(|s| {
                         crate::tui::list::group_of(s, app.grouped) == *group
                             && app.over_memory(s).is_some()
                     });
-                vec![heading(*group, label, *count, *open, noted, over, content)]
+                let marks = Marks {
+                    noted,
+                    over_memory,
+                    waiting: *waiting,
+                };
+                vec![heading(*group, label, *count, *open, marks, content)]
             }
             Entry::Card(s) => {
                 // Grouped by project, the heading right above says it;
@@ -158,7 +164,7 @@ pub(super) fn list_lines(
                     CardSubagents::Folded => at_work_mark(s, now, Some(shown)),
                     CardSubagents::Unfolded => Vec::new(),
                 };
-                let mark = [memory_mark(app, s), mark].concat();
+                let mark = [memory_mark(app, s), queue_mark(app, s), mark].concat();
                 let standing = app.worktrees.standing.get(&s.id);
                 let mut rows = card(
                     s,
@@ -204,22 +210,39 @@ pub(super) fn framed(content: Vec<Span<'static>>, selected: bool, width: usize) 
     line
 }
 
-/// A group's heading: a project's (`noted`: with its note's mark) or a
-/// shelf's, with how many it holds, and whether it's folded.
+/// What a group's heading marks it holding.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Marks {
+    /// A project's: it has a note.
+    pub noted: bool,
+    /// Folded, a session using too much memory.
+    pub over_memory: bool,
+    /// How many sessions in it are stopped with prompts queued.
+    pub waiting: usize,
+}
+
+/// A group's heading: a project's or a shelf's, with how many it holds,
+/// whether it's folded, and its `marks`.
 pub(super) fn heading(
     group: Group,
     label: &str,
     count: usize,
     open: bool,
-    noted: bool,
-    over_memory: bool,
+    marks: Marks,
     width: usize,
 ) -> Vec<Span<'static>> {
-    let chevron = Span::styled(if open { " ⌄ " } else { " › " }, Style::new().fg(MUTED));
-    let chevron = match over_memory {
-        true => vec![Span::styled(" ⚠", Style::new().fg(ERROR)), chevron],
-        false => vec![chevron],
-    };
+    let mut chevron = Vec::new();
+    if marks.over_memory {
+        chevron.push(Span::styled(" ⚠", Style::new().fg(ERROR)));
+    }
+    if marks.waiting > 0 {
+        let waiting = format!(" ⧗{}", marks.waiting);
+        chevron.push(Span::styled(waiting, Style::new().fg(INPUT)));
+    }
+    chevron.push(Span::styled(
+        if open { " ⌄ " } else { " › " },
+        Style::new().fg(MUTED),
+    ));
     let chevron_width: usize = chevron.iter().map(Span::width).sum();
     let count = Span::styled(format!(" ({count}) "), Style::new().fg(MUTED));
     // A long name is cut, so its note's mark, the count and the chevron
@@ -227,7 +250,7 @@ pub(super) fn heading(
     let room = width.saturating_sub(count.width() + chevron_width);
     let mut left = match group {
         Group::Project(_) => {
-            let mark = match noted {
+            let mark = match marks.noted {
                 true => vec![Span::styled(
                     format!(" {PROJECT_NOTE}"),
                     Style::new().fg(MUTED),
@@ -443,6 +466,7 @@ fn shell_rows(s: &Session, width: usize, now: i64) -> Vec<Vec<Span<'static>>> {
 pub(super) fn row(app: &App, s: &Session, width: usize, now: i64) -> Vec<Span<'static>> {
     let right = [
         memory_mark(app, s),
+        queue_mark(app, s),
         note_mark(s),
         status(s, now),
         vec![Span::raw(" ")],
@@ -492,6 +516,14 @@ pub(super) fn memory_mark(app: &App, s: &Session) -> Vec<Span<'static>> {
     }
 }
 
+/// How many prompts are queued for `s`, if any.
+pub(super) fn queue_mark(app: &App, s: &Session) -> Vec<Span<'static>> {
+    match app.queued(s) {
+        0 => Vec::new(),
+        n => vec![Span::styled(format!("⧗{n} "), Style::new().fg(MUTED))],
+    }
+}
+
 fn note_mark(s: &Session) -> Vec<Span<'static>> {
     match s.note {
         Some(_) => vec![Span::styled("✎ ", Style::new().fg(MUTED))],
@@ -504,8 +536,14 @@ fn project_noted(app: &App, s: &Session) -> bool {
 }
 
 /// The list's top line, `width` wide: roster's name, and how many sessions
-/// need input and work.
-pub(super) fn summary_line(sessions: &[Session], width: usize) -> Vec<Span<'static>> {
+/// need input and work, and how many are stopped with prompts queued
+/// (`waiting`), which is never what's cut: the heading counting them too may
+/// be scrolled out of sight.
+pub(super) fn summary_line(
+    sessions: &[Session],
+    waiting: usize,
+    width: usize,
+) -> Vec<Span<'static>> {
     let live: Vec<&Session> = sessions.iter().filter(|s| s.deleted_at.is_none()).collect();
     let needs = live
         .iter()
@@ -529,6 +567,28 @@ pub(super) fn summary_line(sessions: &[Session], width: usize) -> Vec<Span<'stat
             Style::new().fg(WORKING),
         ));
     }
-    summary.push(Span::raw(" "));
-    fit(width, vec![Span::raw(" "), "roster".bold()], summary)
+    // The count, after `sep` if anything's before it.
+    let last = |sep: &'static str| {
+        let mut last = Vec::new();
+        if waiting > 0 {
+            if !summary.is_empty() {
+                last.push(Span::styled(sep, Style::new().fg(FAINT)));
+            }
+            last.push(Span::styled(format!("⧗{waiting}"), Style::new().fg(INPUT)));
+        }
+        last.push(Span::raw(" "));
+        last
+    };
+    let said: usize = summary.iter().chain(&last(" · ")).map(Span::width).sum();
+    // Roster's name goes first, then what's before the count, which `fit`
+    // keeps a space from it.
+    if said < width {
+        let right = [summary.clone(), last(" · ")].concat();
+        return fit(width, vec![Span::raw(" "), "roster".bold()], right);
+    }
+    fit(
+        width,
+        [vec![Span::raw(" ")], summary.clone()].concat(),
+        last("· "),
+    )
 }

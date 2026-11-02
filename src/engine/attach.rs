@@ -83,8 +83,12 @@ impl Roster {
                             if self.config.status_line()
                                 && let Ok(sessions) = self.sessions(true)
                             {
+                                let queued = self.db.queued_sessions().unwrap_or_default();
+                                let waiting = crate::model::waiting_to_start(&sessions, |id| {
+                                    queued.contains(id)
+                                });
                                 let (left, right) =
-                                    crate::tui::status_line_beside(&sessions, &s, list);
+                                    crate::tui::status_line_beside(&sessions, waiting, &s, list);
                                 self.tmux.label(&name, &left, &right).ok();
                             }
                             beside = Some((pane, after));

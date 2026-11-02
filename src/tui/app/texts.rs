@@ -12,6 +12,9 @@ impl App {
         if let Some(editor) = &self.note {
             return editor.hints();
         }
+        if let Some(view) = &self.queue {
+            return view.hints();
+        }
         if self.typing.is_some() {
             return [("Enter", "keep"), ("Esc", "cancel"), ("↑↓ C-p C-n", "move")]
                 .map(|(key, what)| (key.to_string(), what))
@@ -233,11 +236,12 @@ impl App {
     /// Preview for a group's heading, a shelf or (grouped by project) a
     /// project: what it is, then its sessions at a glance, each with what
     /// it's waiting for and since when, its last prompt (`prompts`, by
-    /// session) and its note's line; as many as fit `size`.
+    /// session, with what the session that sent it was called, if one did)
+    /// and its note's line; as many as fit `size`.
     pub fn group_info(
         &self,
         group: Group,
-        prompts: &HashMap<String, String>,
+        prompts: &HashMap<String, (String, Option<String>)>,
         size: (u16, u16),
         now: i64,
     ) -> Text<'static> {
@@ -252,7 +256,7 @@ impl App {
         let mut blocks: Vec<Vec<Line<'static>>> = members
             .iter()
             .map(|s| {
-                let prompt = prompts.get(&s.id).map(String::as_str);
+                let prompt = (prompts.get(&s.id)).map(|(p, from)| (p.as_str(), from.as_deref()));
                 member_block(s, group, prompt, self.notes.lines(), width, now)
             })
             .collect();
@@ -387,11 +391,12 @@ impl App {
     /// Preview for a stopped or archived session: where it got to, what it
     /// is, how its screen ended if its agent exited with an error
     /// (`last_screen`, see `screen_tail`), its note, and what it was about
-    /// (its last `prompts`).
+    /// (its last `prompts`, each with what the session that sent it was
+    /// called, if one did).
     pub fn session_info(
         &self,
         s: &Session,
-        prompts: &[String],
+        prompts: &[(String, Option<String>)],
         last_screen: &[String],
         now: i64,
     ) -> Text<'static> {
@@ -533,11 +538,18 @@ impl App {
                 "Last prompts",
                 Style::new().add_modifier(Modifier::BOLD),
             ));
-            for p in prompts {
-                lines.push(Line::from(vec![
+            use unicode_width::UnicodeWidthStr;
+            // Who sent it right after it, so it's never cut off.
+            let width = self.preview.size.get().map_or(80, |(w, _)| w as usize);
+            for (p, from) in prompts {
+                let from = from.as_ref().map(|from| format!("  from {from}"));
+                let room = width.saturating_sub(4 + from.as_ref().map_or(0, |f| f.width()));
+                let mut line = vec![
                     Span::styled("  › ", muted),
-                    Span::raw(crate::util::one_line(p)),
-                ]));
+                    Span::raw(crate::tui::ui::truncate(&crate::util::one_line(p), room)),
+                ];
+                line.extend(from.map(|from| Span::styled(from, muted)));
+                lines.push(Line::from(line));
             }
         }
         Text::from(lines)
@@ -622,12 +634,13 @@ fn shelf_meaning(shelf: Shelf) -> &'static str {
 }
 
 /// A session's lines in a heading's preview: what it is (`member_line`),
-/// its last prompt and its note's line (the first not blank of the `shown`
-/// lines it shows), each cut to `width`.
+/// its last prompt (with who sent it, if another session did) and its
+/// note's line (the first not blank of the `shown` lines it shows), each cut
+/// to `width`.
 fn member_block(
     s: &Session,
     group: Group,
-    prompt: Option<&str>,
+    prompt: Option<(&str, Option<&str>)>,
     shown: usize,
     width: usize,
     now: i64,
@@ -635,14 +648,21 @@ fn member_block(
     use crate::tui::ui::truncate;
     use ratatui::style::Style;
     use ratatui::text::Span;
-    let indented = |mark: Span<'static>, text: &str, style: Style| {
-        let text = truncate(&crate::util::one_line(text), width.saturating_sub(7));
-        Line::from(vec![Span::raw("     "), mark, Span::styled(text, style)])
+    // `after` follows the text, which is cut to leave room for it, but not
+    // to next to nothing: then it goes instead.
+    let indented = |mark: Span<'static>, text: &str, style: Style, after: Option<Span<'static>>| {
+        let after = after.filter(|a| width >= 7 + a.width() + 8);
+        let room = width.saturating_sub(7 + after.as_ref().map_or(0, Span::width));
+        let text = truncate(&crate::util::one_line(text), room);
+        let line = [Span::raw("     "), mark, Span::styled(text, style)];
+        Line::from(line.into_iter().chain(after).collect::<Vec<_>>())
     };
     let muted = Style::new().fg(theme::MUTED);
     let mut lines = vec![member_line(s, group, width, now)];
-    if let Some(prompt) = prompt {
-        lines.push(indented(Span::styled("› ", muted), prompt, muted));
+    if let Some((prompt, from)) = prompt {
+        let faint = Style::new().fg(theme::FAINT);
+        let from = from.map(|from| Span::styled(format!("  from {from}"), faint));
+        lines.push(indented(Span::styled("› ", muted), prompt, muted, from));
     }
     let note = s.note.as_ref().and_then(|n| {
         n.shown(shown)
@@ -653,7 +673,7 @@ fn member_block(
     });
     if let Some(line) = note {
         let mark = Span::styled("✎ ", Style::new().fg(theme::ACCENT));
-        lines.push(indented(mark, &line, Style::new()));
+        lines.push(indented(mark, &line, Style::new(), None));
     }
     lines
 }

@@ -66,13 +66,14 @@ Navigate with `h j k l` (or arrows; the list wraps around); `Enter` attaches (or
 heading); in an agent, a line at the top says where you are, like the preview's header
 (project, the session's name if you gave it one, and its title), and Ctrl+Q comes back
 and marks it read. `/` filters the list as you type, fuzzily (`atrw` finds "Auth
-rework"; `'word` matches exactly): `Enter` keeps the filter, `Esc` clears it. `?` shows
-every key, and `q` quits (in a view it goes back, like `Esc`). Everything else is in
-three menus, which pop up their keys:
+rework"; `'word` matches exactly; the word `queued` keeps those with [prompts
+queued](#agents-working-together), `!queued` those without): `Enter` keeps the filter,
+`Esc` clears it. `?` shows every key, and `q` quits (in a view it goes back, like
+`Esc`). Everything else is in three menus, which pop up their keys:
 
 | Menu | Keys |
 |---|---|
-| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `X` kill (it and all it started, at once) · `r` restart · `u` read/unread · `t` new title · `o` note · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
+| `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `X` kill (it and all it started, at once) · `r` restart · `u` read/unread · `t` new title · `o` note · `q` queued prompts (read, edit, drop) · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
 | `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage |
 
@@ -91,7 +92,8 @@ conversation (one Claude or pi no longer has, as Claude deletes old ones, can't 
 starting it asks before a new one). For a stopped one whose agent exited with an error,
 it also shows how the agent's screen ended (`roster show` prints all of it). A shelf's
 or a project's heading previews its sessions at a glance: what each is waiting for and
-since when, its last prompt, and its note's line.
+since when, its last prompt (and who sent it, if another session did), and its note's
+line.
 
 Under the preview's header is what roster knows of the session: when it was made, its
 prompts, the time it worked, and from its agent's conversation, the context used,
@@ -258,6 +260,29 @@ do. In the editor too, the pinned line is
 marked `▤` in the project's note. `▤` after a project's name marks it having a note,
 on cards and headings and in the projects view. It goes, with its versions, when the
 project is removed.
+
+### Agents working together
+
+An agent gives another a task by sending it a prompt, `roster send api "…"` ([the
+CLI](#the-cli)), and the other answers the same way; you can send from a shell too. What's
+sent waits in the session's queue and is typed into its agent once it's idle and no
+terminal is attached, one at a time. A card or row with prompts queued says how many,
+`⧗2`, and the preview, above the agent's screen, what they are and who sent the first:
+`⧗ 2 queued, from demo/lead: "rerun the tests" · "then the linter"` (`from demo/lead and
+others` when another sent some too). A stopped session keeps its queue, waiting for
+someone to start it. How many such sessions there are shows at the end of the summary at
+the top, `2 need input · ⧗1`, and on the heading of the shelf or group holding them, open
+or folded, before its fold mark: `Stopped (3) ──── ⧗1 ⌄`.
+
+`s q` opens the queue, a row per prompt with who sent it and when: `j`/`k` move, `Enter`
+shows the prompt whole (`j`/`k` scroll it, `Esc` goes back), `e` edits it in the note
+editor (`:wq` saves it; in `$EDITOR` with `editor = "external"` under `[notes]`), `d`
+drops it and `D` all of them, each once you say `y`, and `Esc` or `q` closes. A prompt
+typed in meanwhile goes from the list, and an edit or a drop that comes too late says
+so; so does an edit of a prompt changed meanwhile (`roster send --edit`), which it
+doesn't undo. What such an edit had is kept in a file, and the message says where.
+A prompt another session sent says which, `from demo/lead`, among a stopped or
+archived session's last prompts and as a session's last prompt in a heading's preview.
 
 ### Processes
 
@@ -500,6 +525,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     toggle_read = "u"
     retitle = "t"             # a title generated from the recent prompts
     note = "o"                # the session's note, to read and write
+    queue = "q"               # the prompts queued for it, to read, edit or drop
     adopt = "A"               # a conversation started elsewhere
 
     [keys.project]

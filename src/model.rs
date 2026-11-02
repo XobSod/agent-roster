@@ -30,8 +30,16 @@ pub struct Subagent {
 
 /// `text`'s words, its spaces and line ends as one: a prompt as typed in
 /// and as its agent says it took it.
-fn words(text: &str) -> String {
+pub(crate) fn words(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// How many of `sessions` are stopped with prompts queued
+/// (`Session::waits_to_start`), `queued` saying, by id, which have any.
+pub fn waiting_to_start(sessions: &[Session], queued: impl Fn(&str) -> bool) -> usize {
+    (sessions.iter())
+        .filter(|s| s.waits_to_start(queued(&s.id)))
+        .count()
 }
 
 /// A prompt sent to a session, waiting in its queue to be typed into its
@@ -48,7 +56,8 @@ pub struct Queued {
 }
 
 /// The kind of event recorded as a queued prompt is typed into a session's
-/// agent: `{"from": <its sender's id, or null>}`.
+/// agent: `{"from": <its sender's id, or null>, "label": <what the sender
+/// was called then>, "prompt": <its text>}`.
 pub const SENT: &str = "sent";
 
 /// The git worktree a session works in, in place of its project's checkout.
@@ -371,6 +380,13 @@ impl Session {
             .strip_prefix(self.agent.as_str())
             .and_then(|rest| rest.strip_prefix('-'))
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    /// Whether it's stopped with prompts queued (`queued`: whether it has
+    /// any), which wait for someone to start it. An archived one's went as
+    /// it was archived.
+    pub fn waits_to_start(&self, queued: bool) -> bool {
+        self.deleted_at.is_none() && self.state == State::Stopped && queued
     }
 
     /// `project/name`, how sessions are shown and addressed.
@@ -1076,6 +1092,25 @@ pub mod tests {
         s.state = State::Working;
         s.state_since = None;
         s
+    }
+
+    #[test]
+    fn only_a_stopped_live_session_with_prompts_queued_waits_to_start() {
+        let mut sessions: Vec<Session> =
+            ["stopped", "idle", "archived", "empty"].map(session).into();
+        for s in &mut sessions {
+            s.state = match s.id.as_str() {
+                "idle" => State::Idle,
+                _ => State::Stopped,
+            };
+        }
+        // An archived one's queue goes as it's archived; one left anyway
+        // isn't waiting.
+        sessions[2].deleted_at = Some(5);
+        let queued = |id: &str| id != "empty";
+        assert_eq!(waiting_to_start(&sessions, queued), 1);
+        assert!(sessions[0].waits_to_start(true) && !sessions[0].waits_to_start(false));
+        assert_eq!(waiting_to_start(&[], queued), 0);
     }
 
     fn event(kind: &str, at: i64) -> Event {

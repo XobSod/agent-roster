@@ -58,6 +58,8 @@ pub enum Action {
     Retitle,
     /// The session's note.
     Note,
+    /// The prompts queued for the session.
+    Queue,
     ProjectNote,
     Adopt,
     NewProject,
@@ -104,6 +106,7 @@ impl Action {
             Action::ToggleRead => "read/unread",
             Action::Retitle => "new title",
             Action::Note | Action::ProjectNote => "note",
+            Action::Queue => "queued prompts",
             Action::Adopt => "adopt a conversation",
             Action::RemoveProject => "remove",
             Action::FilterProject => "show only this",
@@ -330,6 +333,7 @@ impl Keymap {
         )?;
         session.bind(t, "retitle", &k.retitle, Action::Retitle, &mut labels)?;
         session.bind(t, "note", &k.note, Action::Note, &mut labels)?;
+        session.bind(t, "queue", &k.queue, Action::Queue, &mut labels)?;
         session.bind(t, "archive", &k.archive, Action::Archive, &mut labels)?;
         session.bind(t, "delete", &k.delete, Action::Delete, &mut labels)?;
         session.bind(t, "adopt", &k.adopt, Action::Adopt, &mut labels)?;
@@ -507,7 +511,7 @@ mod tests {
         assert_eq!(
             items,
             [
-                "n", "c", "e", "s", "x", "X", "r", "u", "t", "o", "a", "D", "A"
+                "n", "c", "e", "s", "x", "X", "r", "u", "t", "o", "q", "a", "D", "A"
             ]
         );
         // Its popup as wide as its longest item: the new chat's, to fit

@@ -58,7 +58,8 @@ impl App {
             | Action::Delete
             | Action::ToggleRead
             | Action::Retitle
-            | Action::Note => return self.session_action(action),
+            | Action::Note
+            | Action::Queue => return self.session_action(action),
             _ => return self.act_on_projects(action),
         }
         None
@@ -348,6 +349,19 @@ impl App {
         }
         if action == Action::Kill {
             self.kill_question(&s.id, None);
+            return None;
+        }
+        // Archived, its queue went as it was: nothing queued is all there
+        // is to say.
+        if action == Action::Queue {
+            let queue = self.queue_of(&s.id);
+            if queue.is_empty() {
+                self.flash(format!("Nothing queued for {}", s.label()));
+            } else {
+                let mut view = QueueView::new(s.id.clone(), s.label());
+                view.follow(queue);
+                self.queue = Some(view);
+            }
             return None;
         }
         let archive = self.chord(Menu::Session, Action::Archive);

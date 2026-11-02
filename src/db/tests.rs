@@ -39,6 +39,30 @@ fn db_with_session() -> (Db, Session) {
 }
 
 #[test]
+fn a_database_from_before_the_queue_keeps_its_sessions_and_gets_an_empty_one() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    let tx = conn.transaction().unwrap();
+    tx.execute_batch(V1_SCHEMA).unwrap();
+    for (_, migration) in MIGRATIONS.iter().filter(|(to, _)| *to <= 19) {
+        match migration {
+            Sql(sql) => tx.execute_batch(sql).unwrap(),
+            Code(migrate) => migrate(&tx).unwrap(),
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 19;").unwrap();
+    tx.commit().unwrap();
+    let db = Db::init(conn).unwrap();
+    let project = db.add_project(&project("demo"), 0).unwrap();
+    let mut s = session("migrated");
+    s.project_id = project.id;
+    db.insert_session(&s).unwrap();
+    assert_eq!(db.session(&s.id).unwrap().sent, None);
+    assert!(db.queue(&s.id).unwrap().is_empty());
+    db.enqueue(&s.id, "task", None, 1, 20).unwrap();
+    assert_eq!(db.queue(&s.id).unwrap()[0].prompt, "task");
+}
+
+#[test]
 fn a_files_calls_are_saved_in_place_of_what_was_and_a_copy_counts_once() {
     use crate::tokens::tests::call;
     let db = Db::open_in_memory().unwrap();
@@ -639,7 +663,8 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
     assert_eq!(prompts(&db), ["two"]);
     // Taken, it's no longer there to edit; given back, it's first again, as
     // it was, and its agent idle again.
-    assert!(!db.edit_queued(&s.id, first.id, "one more").unwrap());
+    let edited = db.edit_queued(&s.id, first.id, "one", "one more").unwrap();
+    assert_eq!(edited, Edited::Gone);
     assert!(db.give_back_queued(&turn).unwrap());
     assert_eq!(db.queue(&s.id).unwrap()[0], first);
     assert_eq!(db.session(&s.id).unwrap().state, State::Idle);
@@ -659,7 +684,12 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
     assert_eq!(db.queue(&s.id).unwrap()[0], first);
     let back = db.session(&s.id).unwrap();
     assert_eq!((back.state, back.sent), (State::NeedsInput, None));
-    assert!(db.edit_queued(&s.id, first.id, "one more").unwrap());
+    let edited = db.edit_queued(&s.id, first.id, "one", "one more").unwrap();
+    assert_eq!(edited, Edited::Saved);
+    assert_eq!(prompts(&db), ["one more", "two"]);
+    // An edit begun from what it was before that one isn't saved over it.
+    let edited = db.edit_queued(&s.id, first.id, "one", "one, mine").unwrap();
+    assert_eq!(edited, Edited::Changed);
     assert_eq!(prompts(&db), ["one more", "two"]);
     assert_eq!(db.queues().unwrap()[&s.id].len(), 2);
 
@@ -679,7 +709,8 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
     let (third, _) = db.enqueue(&s.id, "seven", None, 55, 2).unwrap();
     let q = db.queue(&s.id).unwrap().into_iter().find(|q| q.id == third);
     let q = q.unwrap();
-    assert!(db.edit_queued(&s.id, third, "seven, edited").unwrap());
+    let edited = db.edit_queued(&s.id, third, "seven", "seven, edited");
+    assert_eq!(edited.unwrap(), Edited::Saved);
     assert!(!db.take_queued_as(&s.id, &q).unwrap());
     let edited = crate::model::Queued {
         prompt: "seven, edited".into(),
@@ -700,6 +731,100 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
     assert!(db.queue(&s.id).unwrap().is_empty());
     db.delete_session(&s.id).unwrap();
     assert!(db.queued_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn who_sent_each_prompt_a_session_took_is_read_back() {
+    let (db, s) = db_with_session();
+    let sent = |from: Option<&str>, label: Option<&str>, prompt: &str| {
+        serde_json::json!({"from": from, "label": label, "prompt": prompt}).to_string()
+    };
+    let lead = sent(Some("l1"), Some("demo/lead"), "run the tests");
+    db.insert_event(&s.id, crate::model::SENT, 1, Some(&lead))
+        .unwrap();
+    db.insert_event(&s.id, "prompt", 2, Some(r#"{"prompt":"mine"}"#))
+        .unwrap();
+    let yours = sent(None, None, "and lint");
+    db.insert_event(&s.id, crate::model::SENT, 3, Some(&yours))
+        .unwrap();
+    // Another session's, each by its own; a payload not to be read is none's.
+    let other = sent(Some("l1"), Some("demo/lead"), "elsewhere");
+    db.insert_event("other", crate::model::SENT, 4, Some(&other))
+        .unwrap();
+    db.insert_event(&s.id, crate::model::SENT, 5, Some("{"))
+        .unwrap();
+    let lead = Some("demo/lead".to_string());
+    let all = db.sent_to(&[&s.id, "other", "none"]).unwrap();
+    assert_eq!(
+        all[&s.id],
+        [
+            ("run the tests".to_string(), lead.clone()),
+            ("mine".to_string(), None),
+            ("and lint".to_string(), None),
+        ]
+    );
+    assert_eq!(all["other"], [("elsewhere".to_string(), lead)]);
+    assert_eq!(all.len(), 2);
+    assert_eq!(db.sent_to(&["other"]).unwrap().len(), 1);
+    assert!(db.sent_to(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn a_prompt_like_one_sent_is_told_from_it_by_what_the_agent_took() {
+    let (db, s) = db_with_session();
+    let lead = Some("demo/lead".to_string());
+    let sent = serde_json::json!({"from": "l1", "label": "demo/lead", "prompt": "go on"});
+    let sent = sent.to_string();
+    let heard = r#"{"prompt":"go  on"}"#;
+    let say = |kind: &str, at: i64| {
+        let payload = if kind == "prompt" { heard } else { &sent };
+        let kind = if kind == "sent" {
+            crate::model::SENT
+        } else {
+            kind
+        };
+        db.insert_event(&s.id, kind, at, Some(payload)).unwrap();
+    };
+    let took = || -> Vec<Option<String>> {
+        let all = db.sent_to(&[&s.id]).unwrap();
+        all[&s.id].iter().map(|(_, from)| from.clone()).collect()
+    };
+    // Sent and heard, then yours: heard alone.
+    say("sent", 10);
+    say("prompt", 11);
+    say("prompt", 100);
+    assert_eq!(took(), [lead.clone(), None]);
+    // Heard a moment before its record comes.
+    say("prompt", 200);
+    say("sent", 201);
+    assert_eq!(took(), [lead.clone(), None, lead.clone()]);
+    // Yours, then one sent long after: the record isn't of yours.
+    say("prompt", 1000);
+    say("sent", 1000 + 60_000);
+    say("prompt", 1000 + 60_001);
+    assert_eq!(took(), [lead.clone(), None, lead.clone(), None, lead]);
+}
+
+#[test]
+fn a_prompt_sent_and_heard_goes_with_its_word_not_on_to_a_later_one_of_yours() {
+    let (mut db, s) = db_with_session();
+    let sent = serde_json::json!({"from": "l1", "label": "demo/lead", "prompt": "go on"});
+    db.insert_event(&s.id, crate::model::SENT, 1, Some(&sent.to_string()))
+        .unwrap();
+    db.insert_event(&s.id, "prompt", 2, Some(r#"{"prompt":"go on"}"#))
+        .unwrap();
+    // Yours, enough for that pair's record to go as it ages, the last alike.
+    for i in 0..KEPT_PROMPTS {
+        let mine = serde_json::json!({"prompt": format!("mine {i}")});
+        db.insert_event(&s.id, "prompt", 3 + i, Some(&mine.to_string()))
+            .unwrap();
+    }
+    db.insert_event(&s.id, "prompt", 100, Some(r#"{"prompt":"go on"}"#))
+        .unwrap();
+    db.fold_events(EVENT_RETENTION_MS + 200).unwrap();
+    let all = db.sent_to(&[&s.id]).unwrap();
+    assert_eq!(all[&s.id].last(), Some(&("go on".to_string(), None)));
+    assert!(all[&s.id].iter().all(|(_, from)| from.is_none()));
 }
 
 #[test]

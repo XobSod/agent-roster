@@ -154,6 +154,88 @@ pub(super) fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// A session's queue (`s q`): a row per prompt (its number, who sent it,
+/// how long ago, its text on one line), the selected one marked; or that
+/// one whole, or in the editor.
+pub(super) fn draw_queue(f: &mut Frame, app: &App, view: &QueueView, area: Rect) {
+    let now = now_ms();
+    let queue = app.queue_of(&view.session);
+    let width = area.width.saturating_sub(4).min(100);
+    let inner_width = width.saturating_sub(2) as usize;
+    if let Some(editing) = &view.editing {
+        let height = prompt_editor_height(&editing.editor, width, area.height);
+        draw_prompt_editor(f, &editing.editor, editing.n, centered(area, width, height));
+        return;
+    }
+    let from = |q: &crate::model::Queued| q.sender_label.clone().unwrap_or_else(|| "you".into());
+    if let (Some(_), Some((n, q))) = (view.reading, view.selected(queue)) {
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    " from {}, {}",
+                    from(q),
+                    crate::util::ago_said(now - q.sent_at)
+                ),
+                Style::new().fg(MUTED),
+            ),
+            Line::default(),
+        ];
+        for line in q.prompt.lines() {
+            let wrapped = wrap(line, inner_width.saturating_sub(2));
+            if wrapped.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(wrapped.into_iter().map(|l| Line::from(format!(" {l}"))));
+        }
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let rows = height.saturating_sub(2) as usize;
+        view.reading_max.set(lines.len().saturating_sub(rows));
+        let scroll = view.reading.unwrap_or(0).min(view.reading_max.get());
+        let place = match lines.len() > rows {
+            true => format!("{}–{} of {}", scroll + 1, scroll + rows, lines.len()),
+            false => String::new(),
+        };
+        let title = format!("Prompt {n} of {}'s queue", view.label);
+        let inner = popup(f, centered(area, width, height), &title, &place);
+        let shown: Vec<Line> = lines.into_iter().skip(scroll).take(rows).collect();
+        f.render_widget(Paragraph::new(shown), inner);
+        return;
+    }
+    let rows = (area.height.saturating_sub(2) as usize).max(1);
+    let height = (queue.len().min(rows) as u16 + 2).min(area.height);
+    let title = format!("Queued for {}", view.label);
+    let inner = popup(f, centered(area, width, height), &title, "");
+    let number_width = queue.len().to_string().len();
+    let from_width = queue
+        .iter()
+        .map(|q| from(q).width())
+        .max()
+        .unwrap_or(0)
+        .min(20);
+    let first = view.row.saturating_sub(rows - 1);
+    let lines: Vec<Line> = (queue.iter().enumerate().skip(first).take(rows))
+        .map(|(i, q)| {
+            let selected = i == view.row;
+            let left = vec![
+                Span::styled(if selected { "▸ " } else { "  " }, Style::new().fg(ACCENT)),
+                Span::raw(format!("{:>number_width$}  ", i + 1)),
+                Span::styled(pad(&from(q), from_width) + "  ", Style::new().fg(MUTED)),
+                Span::styled(
+                    format!("{:>4}  ", crate::util::ago(now - q.sent_at)),
+                    Style::new().fg(FAINT),
+                ),
+                Span::raw(crate::util::one_line(&q.prompt)),
+            ];
+            let line = Line::from(fit(inner.width as usize, left, Vec::new()));
+            match selected {
+                true => line.style(Style::new().bg(SELECTED_BG)),
+                false => line,
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     match dialog {

@@ -27,6 +27,7 @@
 //!                                 # "count": how many only
 //! stopped_cards = "unfolded"      # stopped and archived sessions: "folded" (default):
 //!                                 # a line each; "unfolded": whole cards
+//! queue_limit = 50                # prompts a session's queue holds at most (default 20)
 //! memory_warning = "8G"           # a session whose processes use more is marked
 //!                                 # (its card, header, a folded group's heading, the
 //!                                 # summary); "off"; default: a quarter of the
@@ -131,6 +132,8 @@ pub struct Config {
     /// How stopped and archived sessions show in the list (default: a line
     /// each).
     pub stopped_cards: Option<StoppedCards>,
+    /// How many prompts sent to a session its queue holds at most.
+    pub queue_limit: Option<usize>,
     /// Above how much memory a session's processes are said to use too much
     /// (default: a quarter of the machine's).
     pub memory_warning: Option<MemoryWarning>,
@@ -266,6 +269,9 @@ pub const ESCAPE_MS: u64 = 300;
 /// screen out of the preview.
 pub const NOTE_LINES: usize = 2;
 pub const MAX_NOTE_LINES: usize = 10;
+
+/// How many prompts sent to a session its queue holds, unless set.
+pub const QUEUE_LIMIT: usize = 20;
 
 impl Notes {
     pub fn editor(&self) -> NoteEditor {
@@ -767,6 +773,10 @@ impl Config {
 
     pub fn stopped_cards(&self) -> StoppedCards {
         self.stopped_cards.unwrap_or_default()
+    }
+
+    pub fn queue_limit(&self) -> usize {
+        self.queue_limit.unwrap_or(QUEUE_LIMIT)
     }
 
     /// Above how much memory a session's processes are said to use too

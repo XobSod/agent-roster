@@ -68,10 +68,10 @@ impl Roster {
     /// got into its agent stays (this roster tries it a few times, then
     /// leaves it to another roster or the agent's next start); one that did
     /// (only its Enter missing) doesn't, so it isn't typed twice.
-    pub(super) fn untyped(&mut self, id: &str, prompt: &str, untyped: crate::tmux::Untyped) {
+    pub(super) fn untyped(&mut self, id: &str, turn: &Turn<String>, untyped: crate::tmux::Untyped) {
+        let kept = !untyped.pasted && self.db.give_back_pending(turn).unwrap_or(false);
         let tries = self.prompt_tries.entry(id.to_string()).or_default();
         *tries += 1;
-        let kept = !untyped.pasted && self.db.restore_pending_prompt(id, prompt).is_ok();
         let again = kept && *tries < PROMPT_TRIES;
         let label = self.db.session(id).map_or(id.to_string(), |s| s.label());
         let what = match (untyped.pasted, kept, again) {
@@ -88,6 +88,23 @@ impl Roster {
             ),
             again,
         });
+    }
+
+    /// Session `s` given the turn a prompt typed in now starts, if it's
+    /// still ready for one as saved (`Db::take_turn`): at work from `now`, as
+    /// on a report of its own (a screen-tracked agent's screen given
+    /// `idle_after` from now to change), so nothing else is typed into it.
+    pub(super) fn begin_turn(&self, s: &mut Session, now: i64) -> bool {
+        if s.deleted_at.is_some() || !self.ready_for_prompt(s, now) {
+            return false;
+        }
+        s.set_state(State::Working, now);
+        if agent::adapter(&s.agent).reports() {
+            s.last_event_at = Some(now);
+        } else {
+            s.screen_changed_at = Some(now);
+        }
+        true
     }
 
     /// First prompts `refresh` couldn't type in since this was last asked.

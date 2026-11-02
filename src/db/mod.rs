@@ -2,7 +2,7 @@
 //! the agents spent, in WAL mode so hooks can insert events while the CLI or
 //! TUI reads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,7 @@ use crate::note::{Note, Version, Whose};
 mod events;
 mod notes;
 mod projects;
+mod queue;
 mod schema;
 mod sessions;
 mod spent;
@@ -37,6 +38,15 @@ const BUSY: Duration = Duration::from_secs(5);
 
 pub struct Db {
     conn: Connection,
+}
+
+/// A prompt taken to be typed into a session's agent, given a turn of its
+/// own (`Db::take_pending_prompt`, `Db::take_queued`): the session as it was
+/// before, and as it's saved now.
+pub struct Turn<T> {
+    pub prompt: T,
+    pub before: Session,
+    pub after: Session,
 }
 
 impl Db {

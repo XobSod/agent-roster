@@ -68,17 +68,25 @@ pub(super) struct Making {
 
 impl Making {
     pub(super) fn take(state: &Path) -> Result<Making> {
-        use std::os::fd::AsRawFd;
-        fs::create_dir_all(state).with_context(|| format!("can't make {}", state.display()))?;
-        let path = state.join("worktrees.lock");
-        let file = (fs::File::options().create(true).append(true).open(&path))
-            .with_context(|| format!("can't open {}", path.display()))?;
-        // SAFETY: flock on a descriptor this File owns.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("can't lock {}", path.display());
-        }
-        Ok(Making { _held: file })
+        let _held = state_lock(state, "worktrees.lock")?;
+        Ok(Making { _held })
     }
+}
+
+/// A lock on the file `name` in roster's state directory, waited for: held
+/// while the file it gives is open, let go as it's dropped or the process
+/// ends, however it ends.
+pub(super) fn state_lock(state: &Path, name: &str) -> Result<fs::File> {
+    use std::os::fd::AsRawFd;
+    fs::create_dir_all(state).with_context(|| format!("can't make {}", state.display()))?;
+    let path = state.join(name);
+    let file = (fs::File::options().create(true).append(true).open(&path))
+        .with_context(|| format!("can't open {}", path.display()))?;
+    // SAFETY: flock on a descriptor this File owns.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        bail!("can't lock {}", path.display());
+    }
+    Ok(file)
 }
 
 impl Roster {

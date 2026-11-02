@@ -341,6 +341,9 @@ roster note api --restore 2             # bring one back; the note it replaces i
 roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
 roster note api --project               # api's project's
 roster note --append "- [x] tests pass" # inside an agent: its own session's note; --project alone, its project's
+roster send api "rerun the tests"       # typed in once it's ready, else queued behind the others; --start a stopped one
+roster send api --list                  # what's queued for it, and who sent each; --edit 2, --drop 2, --drop (all)
+roster info                             # inside an agent: its own session, the address others send to
 roster new myproj --worktree --prompt "fix the flaky test"   # in a git worktree of its own; --worktree fix --base main
 roster new myproj --in api              # in api's worktree, beside it (or a directory in one)
 roster rm api --yes --keep-branch       # its worktree goes if clean (--discard-changes: anyway); --delete-branch
@@ -419,6 +422,8 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `stopped_cards`: stopped and archived sessions in the list: `"folded"` (default), a
     line each; `"unfolded"`, whole cards as the others are (the preview shows the
     selected one in full either way).
+  - `queue_limit` (default 20): how many prompts sent to a session (`roster send`) wait
+    in its queue at most; past it, sending is refused.
   - `memory_warning`: a session whose processes (its agent, all it started, and what it
     left running) use more memory than this is marked in red: `⚠` and how much on its card,
     in its header and on a folded group's heading, and a line under the summary saying how

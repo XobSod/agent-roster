@@ -389,7 +389,9 @@ impl App {
             }
             Action::Stop => Some(Op::Stop(s.id)),
             Action::Archive => {
-                self.confirm(crate::agent::archive_question(&s), Op::Archive(s.id));
+                let queued = self.queues.get(&s.id).map_or(0, Vec::len);
+                let question = crate::agent::archive_question(&s, queued);
+                self.confirm(question, Op::Archive(s.id));
                 None
             }
             Action::Delete => self.delete(s),

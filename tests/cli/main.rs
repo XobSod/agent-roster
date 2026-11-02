@@ -10,6 +10,7 @@ mod codex;
 mod config;
 mod generic;
 mod pi;
+mod send;
 mod sessions;
 mod tokens;
 mod usage;

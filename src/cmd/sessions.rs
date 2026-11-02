@@ -147,9 +147,15 @@ pub fn adopt(r: &mut Roster, conversation: String, args: AdoptArgs) -> Result<()
 }
 
 /// `roster info`.
-pub fn info(r: &mut Roster, session: String) -> Result<()> {
+pub fn info(r: &mut Roster, session: Option<String>) -> Result<()> {
     r.refresh()?;
-    let s = r.resolve_any(&session)?;
+    let s = match session {
+        Some(session) => r.resolve_any(&session)?,
+        // Inside an agent, its own: where others send to.
+        None => r
+            .own_session()?
+            .context("which session? (inside an agent, left out: its own)")?,
+    };
     print_info(r, &s);
     Ok(())
 }

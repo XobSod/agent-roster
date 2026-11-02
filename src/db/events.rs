@@ -5,6 +5,13 @@ use super::*;
 /// Applied events older than this are deleted.
 pub(super) const EVENT_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// How many of a session's latest records of prompts, typed in from its
+/// queue or said taken by its agent, are kept however old: what tells who
+/// sent the prompts shown with it (`Db::sent_to`). Counted together, so what
+/// stays is an unbroken stretch: a prompt sent and its agent's word of it
+/// go together, or one would seem still to come. More than are shown.
+pub(super) const KEPT_PROMPTS: i64 = 40;
+
 impl Db {
     /// Applies events reported since the last fold, in one transaction, so any
     /// number of roster processes can fold concurrently. Returns how many were applied.
@@ -39,7 +46,7 @@ impl Db {
             if let Some(s) = touched.get_mut(&e.session_id) {
                 let report = match e.kind.as_str() {
                     // roster's own, in its own terms.
-                    crate::model::WORKTREE => Default::default(),
+                    crate::model::WORKTREE | crate::model::SENT => Default::default(),
                     crate::model::AUTO_TITLE => e
                         .payload
                         .as_deref()
@@ -72,9 +79,22 @@ impl Db {
             save_session(&tx, s)?;
         }
         set_meta(&tx, "applied_event", &last.to_string())?;
+        // Who sent the latest prompts a session took stays known.
         let pruned = tx.execute(
-            "DELETE FROM events WHERE id <= ?1 AND at < ?2",
-            params![last, now - EVENT_RETENTION_MS],
+            "DELETE FROM events WHERE id <= ?1 AND at < ?2 AND id NOT IN (
+                 SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY session_id ORDER BY id DESC
+                     ) AS newest
+                     FROM events WHERE kind IN (?3, 'prompt')
+                 ) WHERE newest <= ?4
+             )",
+            params![
+                last,
+                now - EVENT_RETENTION_MS,
+                crate::model::SENT,
+                KEPT_PROMPTS
+            ],
         )?;
         tx.commit()?;
         if pruned > 0 {

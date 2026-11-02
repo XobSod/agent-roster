@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The lock a start holds from claiming its session till it's saved as
+/// started.
+const STARTING_LOCK: &str = "starting.lock";
+
 impl Roster {
     pub fn sessions(&self, include_archived: bool) -> Result<Vec<Session>> {
         self.db.sessions(include_archived)
@@ -185,7 +189,21 @@ impl Roster {
     /// Starts a stopped session: sources the env files and launches its agent,
     /// resuming the conversation if it has one.
     pub fn start(&mut self, id: &str) -> Result<()> {
-        self.start_giving(id, false)
+        self.start_giving(id, false, true)
+    }
+
+    /// `start`, to attach to it: an agent given its first prompt on its
+    /// command line isn't given one of its queue, what you type going first.
+    pub fn start_to_attach(&mut self, id: &str) -> Result<()> {
+        let started = self.start_giving(id, false, false);
+        // Started by another roster meanwhile: attached to as it is.
+        if started.is_err() {
+            self.refresh()?;
+            if self.db.session(id)?.state != State::Stopped {
+                return Ok(());
+            }
+        }
+        started
     }
 
     /// Starts a stopped session giving its agent the first prompt it was
@@ -193,15 +211,17 @@ impl Roster {
     /// have taken: asked for, never on its own, as given twice it would be
     /// acted on twice.
     pub fn give_prompt_again(&mut self, id: &str) -> Result<()> {
-        self.start_giving(id, true)
+        self.start_giving(id, true, true)
     }
 
     /// `start`, giving its kept first prompt `again`: taken from where it's
     /// kept only in what a start that worked saves, so one that fails leaves
-    /// it there, and no later start gives it unasked.
-    pub(super) fn start_giving(&mut self, id: &str, again: bool) -> Result<()> {
-        // A first prompt this roster gave up on is tried again once started.
+    /// it there, and no later start gives it unasked; and the first of its
+    /// queue, if `queued`, to an agent given it on its command line.
+    pub(super) fn start_giving(&mut self, id: &str, again: bool, queued: bool) -> Result<()> {
+        // A prompt this roster gave up on is tried again once started.
         self.prompt_tries.remove(id);
+        self.send_tries.remove(id);
         self.refresh()?;
         let mut s = self.live_session(id)?;
         let before = s.clone();
@@ -253,6 +273,18 @@ impl Roster {
         if (s.transcript_path.as_deref()).is_some_and(|p| Path::new(p).exists()) {
             s.conversation_begun = true;
         }
+        // An agent given its first prompt on its command line (Codex, which
+        // says it's ready only once it has had a turn), and none to give,
+        // takes the first of its queue there; out of the queue as its agent
+        // starts.
+        let queued_first =
+            match queued && agent::adapter(&s.agent).takes_prompt() && s.pending_prompt.is_none() {
+                true => self.db.queue(id)?.into_iter().next(),
+                false => None,
+            };
+        if let Some(q) = &queued_first {
+            s.pending_prompt = Some(q.prompt.clone());
+        }
         let cx = agent::Context {
             roster: &self.exe,
             state_dir: &self.paths.state_dir,
@@ -301,6 +333,12 @@ impl Roster {
             ));
         }
         let name = s.tmux_name();
+        // One roster at a time from here till the start is saved, so one
+        // reading the session meanwhile doesn't claim it as well, stopped as
+        // it still reads, and start over the agent just started. Waited for
+        // (it's short), then claiming fails: it's started. Started in vain,
+        // or the roster killed, the next start finds nothing in its way.
+        let starting_lock = state_lock(&self.paths.state_dir, STARTING_LOCK)?;
         // No panes, no server: tmux exits with its last session (unless the
         // user's tmux.conf turns exit-empty off; checking then finds nothing).
         let (has_pane, no_server) = {
@@ -314,6 +352,34 @@ impl Roster {
         }
         // Before its agent runs, so what it reports of this run comes after.
         let now = now_ms();
+        // Its start known before its agent runs: a roster seeing it run
+        // meanwhile doesn't take it to be as ready for a prompt as before it
+        // stopped. Kept though the start fails: the next one sets it again.
+        let mut starting = before.clone();
+        starting.started_at = Some(now);
+        if !agent::adapter(&s.agent).reports() {
+            starting.baseline_at = Some(now + BOOT_GRACE_MS);
+        }
+        // Claimed so: of rosters starting it at once, one does.
+        if !self.db.claim_start(&before, &starting)? {
+            if let Some(file) = &prompt {
+                let _ = fs::remove_file(file);
+            }
+            bail!("{} is being started already", s.label());
+        }
+        // Claimed as it goes in, so it's typed by no other roster, and it's
+        // what's given it: changed or gone meanwhile, the start is off.
+        if let Some(q) = &queued_first
+            && !self.db.take_queued_as(id, q)?
+        {
+            if let Some(file) = &prompt {
+                let _ = fs::remove_file(file);
+            }
+            bail!(
+                "what was queued for {} first changed as it started: start it again",
+                s.label()
+            );
+        }
         let started = if has_pane {
             self.tmux.respawn(&name, &s.workdir, &env, &argv)
         } else {
@@ -336,6 +402,11 @@ impl Roster {
         if let Err(e) = started {
             if let Some(file) = &prompt {
                 let _ = fs::remove_file(file);
+            }
+            if let Some(q) = &queued_first
+                && let Err(lost) = self.db.put_back_queued(id, q)
+            {
+                return Err(e.context(format!("and the prompt queued first is lost: {lost:#}")));
             }
             return Err(e);
         }
@@ -377,7 +448,16 @@ impl Roster {
             s.last_event_at = None;
             s.baseline_at = Some(now + BOOT_GRACE_MS);
         }
-        self.db.save_changes(&before, &s)
+        self.db.save_changes(&before, &s)?;
+        drop(starting_lock);
+        if let Some(q) = &queued_first {
+            self.record_sent(id, q, now)?;
+        }
+        // What's left queued goes in as its agent is ready, whoever runs.
+        if !self.db.queue(id)?.is_empty() {
+            self.deliver_queued_in_background();
+        }
+        Ok(())
     }
 
     /// `argv` run by roster's shell for `s`, after it sources the env files:
@@ -498,7 +578,10 @@ impl Roster {
         self.tmux.kill_session(&s.tmux_name())?;
         s.deleted_at = Some(now_ms());
         s.set_state(State::Stopped, now_ms());
-        self.db.save_changes(&before, &s)
+        self.db.save_changes(&before, &s)?;
+        // Put away, it takes up nothing sent to it.
+        self.db.drop_queued(id, None)?;
+        Ok(())
     }
 
     /// Deletes a session for good, archived or not: its agent stops, as it

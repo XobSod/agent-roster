@@ -247,6 +247,7 @@ fn typing_hint(kind: &Kind) -> &'static str {
         Kind::Seconds => "seconds",
         Kind::Millis => "milliseconds",
         Kind::Lines => "a number of lines",
+        Kind::Prompts => "a number of prompts",
         Kind::Keys => "key names, e.g. k Up or C-x; empty for none",
         Kind::TmuxKey => "a tmux key, e.g. C-q",
         Kind::Bool | Kind::Choice(_) => "",

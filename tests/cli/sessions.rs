@@ -1528,6 +1528,54 @@ fn a_session_can_kill_itself_from_inside() {
 }
 
 #[test]
+fn of_rosters_starting_a_stopped_session_at_once_one_starts_its_agent() {
+    let Some(t) = TestEnv::new("startonce") else {
+        return;
+    };
+    let runs = t.path("runs");
+    fs::write(
+        t.config_dir().join("config.toml"),
+        format!(
+            "[agents.counted]\ncommand = \"sh\"\nargs = [\"-c\", \"echo $$ >> '{}'; exec sleep 600\"]\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    t.ok(&["new", "demo", "--name", "n", "--agent", "counted"]);
+    let started = || fs::read_to_string(&runs).map_or(0, |r| r.lines().count());
+    t.wait_for("its first run", |_| started() == 1);
+    t.ok(&["stop", "--yes", "n"]);
+    // Held here, so all three get as far as it: nothing runs till it's let
+    // go, whenever each read the session, and then one does.
+    let lock = fs::File::create(t.path("state/agent-roster/starting.lock")).unwrap();
+    // SAFETY: flock on a descriptor this File owns.
+    assert_eq!(
+        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) },
+        0
+    );
+    let mut starts: Vec<_> = (0..3)
+        .map(|_| {
+            let mut cmd = t.command(&["start", "--yes", "n"]);
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            cmd.spawn().unwrap()
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(started(), 1);
+    drop(lock);
+    for start in &mut starts {
+        start.wait().unwrap();
+    }
+    t.wait_for("its second run", |_| started() >= 2);
+    // A start over the first would run it again, as late as it comes.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(started(), 2);
+    assert_ne!(t.session("n", false).unwrap()["state"], "stopped");
+}
+
+#[test]
 fn an_agent_killed_by_a_signal_exited_with_128_and_it() {
     let Some(t) = TestEnv::new("signal") else {
         return;

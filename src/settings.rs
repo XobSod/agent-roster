@@ -383,6 +383,8 @@ pub enum Kind {
     Millis,
     /// A whole number of lines.
     Lines,
+    /// A whole number of prompts.
+    Prompts,
     /// TUI keys: one, several, or none.
     Keys,
     /// A tmux key (the back key while attached).
@@ -496,6 +498,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         group_by,
         card_subagents,
         stopped_cards,
+        queue_limit,
         memory_warning,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
@@ -582,6 +585,19 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 },
                 "stopped and archived sessions in the list: a line each, or whole cards as the others are",
             ),
+            {
+                let limit = queue_limit.unwrap_or(crate::config::QUEUE_LIMIT);
+                make(
+                    &["queue_limit"],
+                    Kind::Prompts,
+                    match limit {
+                        1 => "1 prompt".into(),
+                        n => format!("{n} prompts"),
+                    },
+                    limit.to_string(),
+                    "how many prompts sent to a session wait in its queue at most: past it, sending is refused",
+                )
+            },
             {
                 let quarter = crate::procs::total_memory()
                     .map_or("off (the machine's memory unknown)".to_string(), |total| {
@@ -1060,6 +1076,15 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
                 .parse()
                 .with_context(|| format!("{input:?} isn't a number of milliseconds"))?;
             toml_edit::value(ms)
+        }
+        Kind::Prompts => {
+            let prompts: i64 = input
+                .trim_end_matches("prompts")
+                .trim_end_matches("prompt")
+                .trim()
+                .parse()
+                .with_context(|| format!("{input:?} isn't a number of prompts"))?;
+            toml_edit::value(prompts)
         }
         Kind::Lines => {
             let lines: i64 = input

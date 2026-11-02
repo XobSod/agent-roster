@@ -87,7 +87,12 @@ fn run(cli: Cli) -> Result<()> {
     // they'd say goes nowhere.
     let helper = matches!(
         cli.command,
-        Some(Cmd::Deliver { .. } | Cmd::Retitle { auto: true, .. } | Cmd::Sidebar { .. })
+        Some(
+            Cmd::Deliver { .. }
+                | Cmd::DeliverQueued
+                | Cmd::Retitle { auto: true, .. }
+                | Cmd::Sidebar { .. }
+        )
     );
     let opened = if helper {
         Roster::open_quietly()
@@ -219,6 +224,16 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } | Cmd::Trust { .. } => {}
         Cmd::Deliver { session } => cmd::sessions::deliver(r, session)?,
+        Cmd::DeliverQueued => r.deliver_queued()?,
+        Cmd::Send {
+            session,
+            prompt,
+            start,
+            list,
+            drop,
+            yes,
+            edit,
+        } => cmd::send::send(r, session, prompt, start, list, drop, yes, edit)?,
     }
     Ok(())
 }

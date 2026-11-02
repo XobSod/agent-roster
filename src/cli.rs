@@ -135,8 +135,34 @@ pub enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
-    /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines)
-    Info { session: String },
+    /// A session's details and statistics (created, prompts, time worked, context, tokens, cost, lines); inside an agent, with no session, its own
+    Info { session: Option<String> },
+    /// Send a session a prompt: typed into its agent once it's idle and no terminal is attached, after what's queued before it; inside an agent, sent from its session
+    Send {
+        session: String,
+        /// The prompt ("-" reads it from stdin)
+        #[arg(
+            allow_hyphen_values = true,
+            conflicts_with_all = ["list", "drop", "edit"],
+            required_unless_present_any = ["list", "drop", "edit"]
+        )]
+        prompt: Option<String>,
+        /// Start it first if it's stopped: the prompt goes in once it's ready
+        #[arg(long)]
+        start: bool,
+        /// List what's queued for it
+        #[arg(long, conflicts_with_all = ["drop", "edit", "start"])]
+        list: bool,
+        /// Drop prompt N of its queue (from 1), or with no N all of it
+        #[arg(long, value_name = "N", num_args = 0..=1, conflicts_with_all = ["edit", "start"])]
+        drop: Option<Option<usize>>,
+        /// Don't ask before dropping
+        #[arg(short, long, requires = "drop")]
+        yes: bool,
+        /// Edit prompt N of its queue in $VISUAL or $EDITOR
+        #[arg(long, value_name = "N", conflicts_with = "start")]
+        edit: Option<usize>,
+    },
     /// Print a session's or a project's note, or change it (in the TUI: s o, p o)
     Note(NoteArgs),
     /// Give a Claude, pi or codex session a fresh title, made by its agent from its recent prompts (title_model in config.toml picks the model)
@@ -216,6 +242,10 @@ pub enum Cmd {
     /// refreshes
     #[command(hide = true)]
     Deliver { session: String },
+    /// Types what's queued as each agent is ready, while nothing else
+    /// refreshes: roster runs it itself
+    #[command(hide = true, name = "deliver-queued")]
+    DeliverQueued,
 }
 
 #[derive(Subcommand)]

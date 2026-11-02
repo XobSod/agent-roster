@@ -28,7 +28,7 @@ impl Roster {
         self.refresh()?;
         let s = self.live_session(id)?;
         if s.state == State::Stopped {
-            self.start(id)?;
+            self.start_to_attach(id)?;
         }
         // A first prompt still to go in: nothing refreshes while you're
         // attached, so a roster of its own types it in once the agent is ready.
@@ -117,6 +117,11 @@ impl Roster {
     pub fn detached(&mut self, id: &str, since: i64) -> Result<bool> {
         self.refresh()?;
         self.set_unread(id, false)?;
+        // What was sent to it meanwhile goes in once it's ready, whoever
+        // runs then.
+        if !self.db.queue(id)?.is_empty() {
+            self.deliver_queued_in_background();
+        }
         self.db.prompted_since(id, since)
     }
 }

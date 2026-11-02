@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// The columns a session's state changes with (`Session::set_state`), the
+/// mark the end of a turn leaves, and what a refresh saw it by
+/// (`save_observed`).
+const STATED_COLUMNS: &[&str] = &[
+    "state",
+    "state_since",
+    "turns",
+    "worked_ms",
+    "asked_by",
+    "subagents",
+    "shells",
+    "awaiting",
+    "unread",
+    "exit_status",
+    "last_event_at",
+    "screen_hash",
+    "screen_changed_at",
+];
+
 pub(super) const SESSION_COLUMNS: &str =
     "s.id, s.project_id, p.name AS project, s.name, s.agent, s.workdir, s.conversation_id,
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
@@ -98,9 +117,22 @@ impl Db {
     /// Saves what `after` changed of `before`, the session as it was loaded,
     /// and only that: whatever another roster saved of it meanwhile (an edit,
     /// a refresh, an archive) stays, unless it changed the same thing.
+    pub fn save_changes(&self, before: &Session, after: &Session) -> Result<()> {
+        self.save_changed(before, after, false)
+    }
+
+    /// `save_changes` for what a refresh saw of a session: its state saved
+    /// only if it's still the state the refresh read (`before`), heard of
+    /// and seen as it was then, and the next refresh sees it otherwise. So a
+    /// turn another roster gave its agent meanwhile (`take_turn`), or a
+    /// report it took, isn't undone by what was seen before it.
+    pub fn save_observed(&self, before: &Session, after: &Session) -> Result<()> {
+        self.save_changed(before, after, true)
+    }
+
     // A field taken out of `after` below but not compared is an error.
     #[deny(unused_variables)]
-    pub fn save_changes(&self, before: &Session, after: &Session) -> Result<()> {
+    fn save_changed(&self, before: &Session, after: &Session, observed: bool) -> Result<()> {
         // Every field, so a new one isn't left out: what isn't saved here is
         // fixed, joined in, or saved apart (the note).
         let Session {
@@ -196,24 +228,48 @@ impl Db {
             given_prompt,
             awaiting
         );
-        if set.is_empty() {
-            return Ok(());
+        // What changes with its state (`Session::set_state`), and what it was
+        // seen by: kept apart if only the state read is to go, and written
+        // first, while what's to be compared is as another roster left it.
+        let guarded = observed && before.state != *state;
+        let (stated, set): (Vec<_>, Vec<_>) =
+            (set.into_iter()).partition(|(column, _)| guarded && STATED_COLUMNS.contains(column));
+        let before_state = before.state.as_str();
+        let was = [
+            &before_state as &dyn rusqlite::ToSql,
+            &before.state_since,
+            &before.last_event_at,
+            &before.screen_changed_at,
+        ];
+        let condition = " AND state = ?2 AND state_since IS ?3 AND last_event_at IS ?4
+             AND screen_changed_at IS ?5";
+        for (set, condition) in [(stated, condition), (set, "")] {
+            if set.is_empty() {
+                continue;
+            }
+            let first = if condition.is_empty() { 2 } else { 6 };
+            let columns: Vec<String> = (first..)
+                .zip(&set)
+                .map(|(i, (column, _))| format!("{column} = ?{i}"))
+                .collect();
+            let sql = format!(
+                "UPDATE sessions SET {} WHERE id = ?1{condition}",
+                columns.join(", ")
+            );
+            let mut values: Vec<&dyn rusqlite::ToSql> = vec![id];
+            if !condition.is_empty() {
+                values.extend(was);
+            }
+            values.extend(set.iter().map(|(_, value)| *value));
+            self.conn.execute(&sql, values.as_slice()).map_err(|e| {
+                constraint(e, || {
+                    format!(
+                        "project {:?} already has a session named {:?}",
+                        after.project, after.name
+                    )
+                })
+            })?;
         }
-        let columns: Vec<String> = (2..)
-            .zip(&set)
-            .map(|(i, (column, _))| format!("{column} = ?{i}"))
-            .collect();
-        let sql = format!("UPDATE sessions SET {} WHERE id = ?1", columns.join(", "));
-        let mut values: Vec<&dyn rusqlite::ToSql> = vec![id];
-        values.extend(set.iter().map(|(_, value)| *value));
-        self.conn.execute(&sql, values.as_slice()).map_err(|e| {
-            constraint(e, || {
-                format!(
-                    "project {:?} already has a session named {:?}",
-                    after.project, after.name
-                )
-            })
-        })?;
         Ok(())
     }
 
@@ -238,37 +294,103 @@ impl Db {
         Ok(load_session(&self.conn, id)?.map(|_| false))
     }
 
-    /// Takes a session's pending first prompt, so that only one process types it.
-    pub fn take_pending_prompt(&mut self, id: &str) -> Result<Option<String>> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prompt: Option<String> = tx
-            .query_row(
-                "SELECT pending_prompt FROM sessions WHERE id = ?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        if prompt.is_some() {
-            tx.execute(
-                "UPDATE sessions SET pending_prompt = NULL WHERE id = ?1",
-                [id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(prompt)
+    /// Session `before` claimed to start, as `starting` says (when, and its
+    /// screen's baseline), saved before its agent runs: if it's still
+    /// stopped, as it was, and not started since. False if another roster is
+    /// starting it meanwhile.
+    pub fn claim_start(&self, before: &Session, starting: &Session) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET started_at = ?2, baseline_at = ?3
+             WHERE id = ?1 AND state = 'stopped' AND started_at IS ?4 AND deleted_at IS NULL",
+            params![
+                before.id,
+                starting.started_at,
+                starting.baseline_at,
+                before.started_at
+            ],
+        )?;
+        Ok(n == 1)
     }
 
-    /// Puts back a first prompt taken but not typed in, unless another one
-    /// was given meanwhile.
-    pub fn restore_pending_prompt(&self, id: &str, prompt: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET pending_prompt = ?2 WHERE id = ?1 AND pending_prompt IS NULL",
-            params![id, prompt],
-        )?;
-        Ok(())
+    /// Takes session `id`'s first prompt to type in, if `begin` gives its
+    /// agent the turn (`take_turn`).
+    pub fn take_pending_prompt(
+        &self,
+        id: &str,
+        begin: impl FnOnce(&mut Session) -> bool,
+    ) -> Result<Option<Turn<String>>> {
+        self.take_turn(id, |_, s| Ok(s.pending_prompt.take()), begin)
+    }
+
+    /// `take` takes what's to be typed into session `id`'s agent, if `begin`
+    /// gives it the turn: the session read again and saved as they change
+    /// it, in one transaction holding the database, so of rosters about to
+    /// type into it at once, one does, into a turn of its own. None if
+    /// there's nothing to take, or `begin` gives no turn.
+    pub(super) fn take_turn<T>(
+        &self,
+        id: &str,
+        take: impl FnOnce(&Connection, &mut Session) -> Result<Option<T>>,
+        begin: impl FnOnce(&mut Session) -> bool,
+    ) -> Result<Option<Turn<T>>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let Some(mut s) = load_session(&tx, id)? else {
+            return Ok(None);
+        };
+        let before = s.clone();
+        let Some(prompt) = take(&tx, &mut s)? else {
+            return Ok(None);
+        };
+        if !begin(&mut s) {
+            return Ok(None);
+        }
+        save_session(&tx, &s)?;
+        tx.commit()?;
+        Ok(Some(Turn {
+            prompt,
+            before,
+            after: s,
+        }))
+    }
+
+    /// The turn `turn` began given back, its first prompt not typed in
+    /// (`give_back`): put back unless another was given meanwhile.
+    pub fn give_back_pending(&self, turn: &Turn<String>) -> Result<bool> {
+        self.give_back(turn, |tx| {
+            tx.execute(
+                "UPDATE sessions SET pending_prompt = ?2 WHERE id = ?1 AND pending_prompt IS NULL",
+                params![turn.after.id, turn.prompt],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The turn `turn` began given back, its prompt not typed in, in one
+    /// transaction holding the database: `put_back` puts the prompt back
+    /// where it was taken from, if the session is still live, and its state
+    /// is as it was before the turn, if no other roster changed it since.
+    /// Whether the prompt was put back.
+    pub(super) fn give_back<T>(
+        &self,
+        turn: &Turn<T>,
+        put_back: impl FnOnce(&Connection) -> Result<()>,
+    ) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let Some(now) = load_session(&tx, &turn.after.id)?.filter(|s| s.deleted_at.is_none())
+        else {
+            return Ok(false);
+        };
+        put_back(&tx)?;
+        let stated = |s: &Session| (s.state, s.state_since, s.last_event_at, s.screen_changed_at);
+        if stated(&now) == stated(&turn.after) {
+            let before = Session {
+                pending_prompt: turn.after.pending_prompt.clone(),
+                ..turn.before.clone()
+            };
+            self.save_changes(&turn.after, &before)?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Forgets the subagents sessions haven't heard of for a while

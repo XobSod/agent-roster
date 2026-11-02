@@ -18,7 +18,7 @@ pub fn attach(r: &mut Roster, session: String, yes: bool, again: PromptAgain) ->
             if give {
                 r.give_prompt_again(&s.id)?;
             } else {
-                r.start(&s.id)?;
+                r.start_to_attach(&s.id)?;
             }
             say_notices(r);
         }
@@ -153,7 +153,8 @@ pub fn archive(r: &mut Roster, session: String, yes: bool) -> Result<()> {
     // Whether its agent still runs, for the question.
     r.refresh()?;
     let s = r.resolve(&session, false)?;
-    if !confirm(&agent::archive_question(&s), yes)? {
+    let queued = r.db.queue(&s.id)?.len();
+    if !confirm(&agent::archive_question(&s, queued), yes)? {
         return Ok(());
     }
     r.archive(&s.id)?;

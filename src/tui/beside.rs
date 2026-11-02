@@ -52,7 +52,10 @@ pub(super) fn sidebar_loop(
         if let Err(e) = roster.refresh() {
             app.fail(format!("{e:#}"));
         }
-        if let (Ok(projects), Ok(sessions)) = (roster.projects(), roster.sessions(true)) {
+        if let (Ok(projects), Ok(sessions), Ok(queues)) =
+            (roster.projects(), roster.sessions(true), roster.db.queues())
+        {
+            app.queues = queues;
             // The session you're in, wherever it moves: out of a folded
             // group (which is selected meanwhile) too.
             app.select(list::EntryKey::Session(id.to_string()));

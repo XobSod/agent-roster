@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, FitPreview};
-use crate::db::Db;
+use crate::db::{Db, Turn};
 use crate::model::{Project, QUIET_MS, Session, State};
 use crate::note::{self, Note, Noted, Whose};
 use crate::paths::{self, PROJECT_ENV, Paths};
@@ -24,6 +24,7 @@ mod notes;
 mod processes;
 mod projects;
 mod prompts;
+mod queue;
 mod sessions;
 mod starting;
 mod worktrees;
@@ -33,6 +34,7 @@ pub use self::worktrees::Branch;
 pub use self::{
     notes::NoteSaved,
     prompts::Undelivered,
+    queue::{Sent, check_queued_fits},
     sessions::{Defaults, NewSession},
     starting::{StartCheck, Starting, start_check},
     worktrees::{
@@ -43,7 +45,7 @@ pub use self::{
 };
 
 // What one job has that the others use.
-use self::{processes::*, prompts::*, sessions::*};
+use self::{processes::*, prompts::*, sessions::*, worktrees::state_lock};
 
 /// What's said of a config roster's tmux didn't take: what tmux said first
 /// (a long message is cut at its end), and that roster goes on.
@@ -104,6 +106,9 @@ pub struct Roster {
     /// First prompts that couldn't be typed in, by session, and how often
     /// this process tried each.
     prompt_tries: HashMap<String, u32>,
+    /// Likewise prompts sent to sessions, by session, with the start of its
+    /// agent they were tried in.
+    send_tries: HashMap<String, (Option<i64>, u32)>,
     /// Why first prompts weren't typed in, to say (`take_undelivered`): not
     /// errors of the refresh, which goes on for the other sessions.
     undelivered: Vec<Undelivered>,
@@ -364,6 +369,7 @@ impl Roster {
             ending: HashSet::new(),
             watching: None,
             prompt_tries: HashMap::new(),
+            send_tries: HashMap::new(),
             undelivered: Vec::new(),
             notices,
             panes: None,
@@ -412,6 +418,8 @@ impl Roster {
         // Typed once every session is saved, each claimed just before it's
         // typed: a refresh that stops before then takes none of them.
         let mut ready = Vec::new();
+        let mut sends = Vec::new();
+        let queued = self.db.queued_sessions()?;
         let mut titles = Vec::new();
         let mut wait_until = None;
         for mut s in sessions {
@@ -507,6 +515,18 @@ impl Roster {
                     {
                         ready.push((s.id.clone(), s.tmux_name()));
                     }
+                    // What's sent to it, once it's ready as for a first prompt,
+                    // that gone, and no one attached: what's typed then is
+                    // theirs.
+                    if self.watching.is_none()
+                        && s.pending_prompt.is_none()
+                        && queued.contains(&s.id)
+                        && pane.clients == 0
+                        && !pane.beside
+                        && self.ready_for_prompt(&s, now)
+                    {
+                        sends.push(s.clone());
+                    }
                 }
             }
             if self.watching.as_ref() == Some(&s.id) {
@@ -520,8 +540,9 @@ impl Roster {
                 titles.push(s.id.clone());
             }
             if s != before {
-                // Only what changed: what another roster saved meanwhile stays.
-                self.db.save_changes(&before, &s)?;
+                // Only what changed: what another roster saved meanwhile stays,
+                // and a state it saved since this one read it.
+                self.db.save_observed(&before, &s)?;
             }
         }
         self.panes = Some(panes);
@@ -536,13 +557,18 @@ impl Roster {
             {
                 continue;
             }
-            // Claimed in the database first, so only one roster types it.
-            let Some(prompt) = self.db.take_pending_prompt(&id)? else {
+            // Claimed in the database first, with the turn it begins, so only
+            // one roster types it, and nothing else goes into that turn.
+            let begin = |s: &mut Session| self.begin_turn(s, now_ms());
+            let Some(turn) = self.db.take_pending_prompt(&id, begin)? else {
                 continue;
             };
-            if let Err(untyped) = self.tmux.type_line(&name, &prompt) {
-                self.untyped(&id, &prompt, untyped);
+            if let Err(untyped) = self.tmux.type_line(&name, &turn.prompt) {
+                self.untyped(&id, &turn, untyped);
             }
+        }
+        for s in sends {
+            self.type_queued(&s)?;
         }
         Ok(())
     }
@@ -559,10 +585,15 @@ impl Roster {
         self.in_background(&["retitle", "--auto", id]);
     }
 
-    /// Runs roster with `args` in the background, its output nowhere.
+    /// Runs roster with `args` in the background, its output nowhere. Run
+    /// from inside an agent, it's roster's, not that session's: not counted
+    /// among what its agent started (`procs`), nor ended with it.
     fn in_background(&self, args: &[&str]) {
+        use std::os::unix::process::CommandExt;
         let child = std::process::Command::new(&self.exe)
             .args(args)
+            .env_remove("ROSTER_SESSION")
+            .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -835,13 +835,18 @@ pub fn prompt_again_question(s: &Session) -> String {
 }
 
 /// What archiving `s` asks: that its agent stops, if it runs.
-pub fn archive_question(s: &Session) -> String {
+pub fn archive_question(s: &Session, queued: usize) -> String {
     let stops = if s.state == State::Stopped {
         ""
     } else {
         " Its agent stops."
     };
-    format!("Archive {}?{stops}", s.label())
+    let queued = match queued {
+        0 => String::new(),
+        1 => " The prompt queued for it goes.".to_string(),
+        n => format!(" The {n} prompts queued for it go."),
+    };
+    format!("Archive {}?{stops}{queued}", s.label())
 }
 
 /// What deleting `s` for good asks: what stops, if it runs (a working one's

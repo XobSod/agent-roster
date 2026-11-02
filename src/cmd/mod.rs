@@ -6,4 +6,5 @@ pub mod doctor;
 pub mod lifecycle;
 pub mod notes;
 pub mod projects;
+pub mod send;
 pub mod sessions;

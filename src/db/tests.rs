@@ -562,24 +562,212 @@ fn a_title_made_is_kept_only_if_nothing_changed_meanwhile() {
 
 #[test]
 fn a_first_prompt_not_typed_in_is_put_back() {
-    let (mut db, mut s) = db_with_session();
+    let (db, mut s) = db_with_session();
     s.pending_prompt = Some("fix it".into());
     db.save_session(&s).unwrap();
-    let taken = db.take_pending_prompt(&s.id).unwrap().unwrap();
-    db.restore_pending_prompt(&s.id, &taken).unwrap();
+    let taken = db.take_pending_prompt(&s.id, |_| true).unwrap().unwrap();
+    assert!(db.give_back_pending(&taken).unwrap());
     assert_eq!(
         db.session(&s.id).unwrap().pending_prompt.as_deref(),
         Some("fix it")
     );
     // Not over one given meanwhile.
-    db.take_pending_prompt(&s.id).unwrap();
+    let taken = db.take_pending_prompt(&s.id, |_| true).unwrap().unwrap();
     s.pending_prompt = Some("newer".into());
     db.save_session(&s).unwrap();
-    db.restore_pending_prompt(&s.id, "fix it").unwrap();
+    db.give_back_pending(&taken).unwrap();
     assert_eq!(
         db.session(&s.id).unwrap().pending_prompt.as_deref(),
         Some("newer")
     );
+}
+
+#[test]
+fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
+    let (mut db, mut s) = db_with_session();
+    s.set_state(State::Idle, 5);
+    db.save_session(&s).unwrap();
+    let lead = Some(("l1", "demo/lead"));
+    assert_eq!(db.enqueue(&s.id, "one", lead, 10, 2).unwrap().1, 0);
+    assert_eq!(db.enqueue(&s.id, "two", None, 20, 2).unwrap().1, 1);
+    // Full: refused, and not queued.
+    let e = db.enqueue(&s.id, "three", None, 30, 2).unwrap_err();
+    assert!(
+        format!("{e:#}").starts_with("2 prompts are queued for it already"),
+        "{e:#}"
+    );
+    let prompts = |db: &Db| -> Vec<String> {
+        (db.queue(&s.id).unwrap().into_iter())
+            .map(|q| q.prompt)
+            .collect()
+    };
+    assert_eq!(prompts(&db), ["one", "two"]);
+    assert_eq!(db.queued_sessions().unwrap(), HashSet::from([s.id.clone()]));
+
+    // Taken with a turn its agent is given, or not at all.
+    assert!(db.take_queued(&s.id, |_| false).unwrap().is_none());
+    assert_eq!(prompts(&db), ["one", "two"]);
+    let turn = db
+        .take_queued(&s.id, |s| {
+            s.set_state(State::Working, 15);
+            true
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(db.session(&s.id).unwrap().state, State::Working);
+    assert_eq!(turn.before.state, s.state);
+    // Another roster about to type into it finds its turn taken.
+    let idle = |s: &mut Session| s.state == State::Idle;
+    assert!(db.take_queued(&s.id, idle).unwrap().is_none());
+    let first = turn.prompt.clone();
+    assert_eq!(
+        (first.prompt.as_str(), first.sender.as_deref()),
+        ("one", Some("l1"))
+    );
+    assert_eq!(
+        (first.sender_label.as_deref(), first.sent_at),
+        (Some("demo/lead"), 10)
+    );
+    assert_eq!(prompts(&db), ["two"]);
+    // Taken, it's no longer there to edit; given back, it's first again, as
+    // it was, and its agent idle again.
+    assert!(!db.edit_queued(&s.id, first.id, "one more").unwrap());
+    assert!(db.give_back_queued(&turn).unwrap());
+    assert_eq!(db.queue(&s.id).unwrap()[0], first);
+    assert_eq!(db.session(&s.id).unwrap().state, State::Idle);
+    // Its state changed by another roster meanwhile (its agent reporting),
+    // that stays.
+    let turn = db
+        .take_queued(&s.id, |s| {
+            s.set_state(State::Working, 16);
+            true
+        })
+        .unwrap()
+        .unwrap();
+    let mut asked = turn.after.clone();
+    asked.set_state(State::NeedsInput, 17);
+    db.save_changes(&turn.after, &asked).unwrap();
+    assert!(db.give_back_queued(&turn).unwrap());
+    assert_eq!(db.queue(&s.id).unwrap()[0], first);
+    assert_eq!(db.session(&s.id).unwrap().state, State::NeedsInput);
+    assert!(db.edit_queued(&s.id, first.id, "one more").unwrap());
+    assert_eq!(prompts(&db), ["one more", "two"]);
+    assert_eq!(db.queues().unwrap()[&s.id].len(), 2);
+
+    // Dropped one, or all.
+    assert_eq!(db.drop_queued(&s.id, Some(first.id)).unwrap(), 1);
+    assert_eq!(prompts(&db), ["two"]);
+    assert_eq!(db.drop_queued(&s.id, None).unwrap(), 1);
+    assert!(db.queues().unwrap().is_empty());
+
+    // Not one id given again, the last one gone.
+    let (last, _) = db.enqueue(&s.id, "four", None, 40, 2).unwrap();
+    db.drop_queued(&s.id, None).unwrap();
+    assert!(db.enqueue(&s.id, "five", None, 50, 2).unwrap().0 > last);
+
+    // Given its agent as it starts only as it's queued: not once it's
+    // edited.
+    let (third, _) = db.enqueue(&s.id, "seven", None, 55, 2).unwrap();
+    let q = db.queue(&s.id).unwrap().into_iter().find(|q| q.id == third);
+    let q = q.unwrap();
+    assert!(db.edit_queued(&s.id, third, "seven, edited").unwrap());
+    assert!(!db.take_queued_as(&s.id, &q).unwrap());
+    let edited = crate::model::Queued {
+        prompt: "seven, edited".into(),
+        ..q
+    };
+    assert!(db.take_queued_as(&s.id, &edited).unwrap());
+
+    // None for an archived session, nor one put back into it; and gone
+    // with its session.
+    let turn = db.take_queued(&s.id, |_| true).unwrap().unwrap();
+    let mut archived = db.session(&s.id).unwrap();
+    archived.deleted_at = Some(60);
+    db.save_session(&archived).unwrap();
+    let e = db.enqueue(&s.id, "six", None, 60, 2).unwrap_err();
+    assert_eq!(format!("{e:#}"), "it's archived");
+    assert!(!db.give_back_queued(&turn).unwrap());
+    db.put_back_queued(&s.id, &turn.prompt).unwrap();
+    assert!(db.queue(&s.id).unwrap().is_empty());
+    db.delete_session(&s.id).unwrap();
+    assert!(db.queued_sessions().unwrap().is_empty());
+}
+
+#[test]
+fn of_rosters_starting_a_session_at_once_one_does() {
+    let (db, mut s) = db_with_session();
+    s.set_state(State::Stopped, 5);
+    db.save_session(&s).unwrap();
+    // Never started yet, then started again: each claimed once.
+    let mut starting = s.clone();
+    starting.started_at = Some(10);
+    assert!(db.claim_start(&s, &starting).unwrap());
+    assert!(!db.claim_start(&s, &starting).unwrap());
+    let claimed = db.session(&s.id).unwrap();
+    assert_eq!(claimed.started_at, Some(10));
+    let mut again = claimed.clone();
+    again.started_at = Some(20);
+    assert!(db.claim_start(&claimed, &again).unwrap());
+    // Not an archived one, nor one running.
+    let mut archived = db.session(&s.id).unwrap();
+    archived.deleted_at = Some(30);
+    db.save_session(&archived).unwrap();
+    assert!(!db.claim_start(&archived, &again).unwrap());
+    archived.deleted_at = None;
+    archived.set_state(State::Idle, 40);
+    db.save_session(&archived).unwrap();
+    assert!(!db.claim_start(&archived, &again).unwrap());
+}
+
+#[test]
+fn a_state_a_refresh_saw_is_saved_only_if_no_other_roster_changed_it_since() {
+    let (db, mut s) = db_with_session();
+    s.set_state(State::Working, 10);
+    db.save_session(&s).unwrap();
+    let seen = db.session(&s.id).unwrap();
+    // Meanwhile another roster saw its turn end and gave it the next.
+    let mut ended = seen.clone();
+    ended.set_state(State::Idle, 20);
+    db.save_changes(&seen, &ended).unwrap();
+    let mut given = ended.clone();
+    given.set_state(State::Working, 30);
+    db.save_changes(&ended, &given).unwrap();
+    // What this one saw of the turn before, and what it saw it by, aren't
+    // kept: the title it read is.
+    let mut saw = seen.clone();
+    saw.set_state(State::Idle, 15);
+    saw.unread = true;
+    saw.screen_hash = Some("still".into());
+    saw.title = Some("read".into());
+    db.save_observed(&seen, &saw).unwrap();
+    let now = db.session(&s.id).unwrap();
+    assert_eq!(
+        (now.state, now.state_since, now.unread),
+        (State::Working, Some(30), false)
+    );
+    assert_eq!(
+        (now.screen_hash.as_deref(), now.title.as_deref()),
+        (seen.screen_hash.as_deref(), Some("read"))
+    );
+    // Nor if its agent reported meanwhile, its state as it was: a subagent
+    // starting, say, heard of since the quiet it was seen to be stale by.
+    let mut reported = now.clone();
+    reported.last_event_at = Some(35);
+    db.save_changes(&now, &reported).unwrap();
+    let mut stale = now.clone();
+    stale.set_state(State::Idle, 36);
+    stale.exit_status = Some(143);
+    db.save_observed(&now, &stale).unwrap();
+    let after = db.session(&s.id).unwrap();
+    assert_eq!(
+        (after.state, after.last_event_at, after.exit_status),
+        (State::Working, Some(35), None)
+    );
+    // Seen as it is, saved.
+    let mut over = after.clone();
+    over.set_state(State::Idle, 40);
+    db.save_observed(&after, &over).unwrap();
+    assert_eq!(db.session(&s.id).unwrap().state, State::Idle);
 }
 
 #[test]
@@ -1058,12 +1246,38 @@ fn the_file_gives_back_what_pruning_frees() {
 fn prunes_old_applied_events_only() {
     let (mut db, s) = db_with_session();
     db.insert_event(&s.id, "working", 0, None).unwrap();
+    // Who sent what it took is kept, however old.
+    db.insert_event(&s.id, crate::model::SENT, 1, None).unwrap();
+    db.insert_event(&s.id, "prompt", 2, None).unwrap();
     db.insert_event(&s.id, "idle", EVENT_RETENTION_MS + 50, None)
         .unwrap();
     db.fold_events(EVENT_RETENTION_MS + 100).unwrap();
     let left = db.events_after(0, None, 10).unwrap();
-    assert_eq!(left.len(), 1);
-    assert_eq!(left[0].kind, "idle");
+    let kinds: Vec<&str> = left.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(kinds, [crate::model::SENT, "prompt", "idle"]);
+}
+
+#[test]
+fn of_old_prompts_each_session_keeps_its_latest() {
+    let (mut db, s) = db_with_session();
+    let kept = KEPT_PROMPTS as usize;
+    for at in 0..kept + 3 {
+        let kind = if at % 2 == 0 {
+            crate::model::SENT
+        } else {
+            "prompt"
+        };
+        db.insert_event(&s.id, kind, 1, None).unwrap();
+    }
+    db.insert_event("other", crate::model::SENT, 3, None)
+        .unwrap();
+    db.fold_events(EVENT_RETENTION_MS + 100).unwrap();
+    let left = db.events_after(0, None, 1000).unwrap();
+    let count = |id: &str| left.iter().filter(|e| e.session_id == id).count();
+    assert_eq!(count(&s.id), kept);
+    assert_eq!(count("other"), 1);
+    // The oldest went: what's left is the latest.
+    assert!(left.iter().all(|e| e.id > 3));
 }
 
 #[test]

@@ -514,7 +514,8 @@ impl Tmux {
     /// plain text.
     /// Failing, it says whether the text got into the pane (`Untyped::pasted`).
     pub fn type_line(&self, name: &str, text: &str) -> Result<(), Untyped> {
-        let buffer = format!("roster-{name}");
+        // This process's own, as its file is.
+        let buffer = format!("roster-{name}.{}", std::process::id());
         let unpasted = |error| Untyped {
             pasted: false,
             error,

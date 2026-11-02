@@ -28,6 +28,23 @@ pub struct Subagent {
     pub heard: i64,
 }
 
+/// A prompt sent to a session, waiting in its queue to be typed into its
+/// agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queued {
+    pub id: i64,
+    pub prompt: String,
+    /// The session that sent it, by id, and what it was called then; None:
+    /// you, from a shell.
+    pub sender: Option<String>,
+    pub sender_label: Option<String>,
+    pub sent_at: i64,
+}
+
+/// The kind of event recorded as a queued prompt is typed into a session's
+/// agent: `{"from": <its sender's id, or null>}`.
+pub const SENT: &str = "sent";
+
 /// The git worktree a session works in, in place of its project's checkout.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Worktree {
@@ -485,6 +502,11 @@ impl Session {
         if self.deleted_at.is_some() {
             return;
         }
+        // Roster's own record of a sent prompt typed in; what it started is
+        // the agent's to report.
+        if e.kind == SENT {
+            return;
+        }
         if e.kind == WORKTREE {
             let said: WorktreeReport = (e.payload.as_deref())
                 .and_then(|p| serde_json::from_str(p).ok())
@@ -549,6 +571,7 @@ impl Session {
         }
         // Its agent reporting at all is its first turn begun: the prompt it
         // was given, taken.
+        let given = self.given_prompt.is_some();
         if matches!(
             e.kind.as_str(),
             "session" | "prompt" | "working" | "idle" | "needs-input"
@@ -706,7 +729,12 @@ impl Session {
                 self.subagents.clear();
                 self.shells.clear();
                 self.awaiting = false;
+                // Given its first prompt on its command line, it's at work on
+                // it from now, a turn: that turn's own report comes next.
                 self.set_state(State::Idle, e.at);
+                if given {
+                    self.set_state(State::Working, e.at);
+                }
                 self.session_at = Some(e.at);
             }
             _ => return,
@@ -1054,6 +1082,19 @@ pub mod tests {
             s.given_prompt = Some("fix it".into());
             apply(&mut s, kind, 10);
             assert_eq!(s.given_prompt.as_deref(), Some("fix it"), "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_agent_given_its_first_prompt_on_its_command_line_is_at_work_once_it_reports() {
+        for (given, state, turns) in [(Some("fix it"), State::Working, 1), (None, State::Idle, 0)] {
+            let mut s = session("a");
+            s.given_prompt = given.map(String::from);
+            apply(&mut s, "session", 10);
+            assert_eq!((s.state, s.turns), (state, turns), "{given:?}");
+            // Its turn's report after: the same turn.
+            apply(&mut s, "prompt", 11);
+            assert_eq!((s.state, s.turns), (State::Working, 1), "{given:?}");
         }
     }
 

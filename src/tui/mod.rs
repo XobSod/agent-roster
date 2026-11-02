@@ -404,9 +404,12 @@ fn reload(roster: &mut Roster, app: &mut App) {
         Ok(()) if !undelivered.is_empty() => app.fail(undelivered.join("; ")),
         Ok(()) => {}
     }
-    match (roster.projects(), roster.sessions(true)) {
-        (Ok(projects), Ok(sessions)) => app.set_data(projects, sessions),
-        (Err(e), _) | (_, Err(e)) => app.fail(format!("{e:#}")),
+    match (roster.projects(), roster.sessions(true), roster.db.queues()) {
+        (Ok(projects), Ok(sessions), Ok(queues)) => {
+            app.queues = queues;
+            app.set_data(projects, sessions);
+        }
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => app.fail(format!("{e:#}")),
     }
     // What the sessions' processes use, every few seconds while it's to be
     // said of any using too much (the server view reads them itself);

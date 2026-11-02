@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 19;
+pub(super) const SCHEMA_VERSION: i64 = 21;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -80,6 +80,15 @@ CREATE TABLE note_versions (
 );
 CREATE INDEX note_versions_session ON note_versions(session_id);
 CREATE INDEX note_versions_project ON note_versions(project_id);
+CREATE TABLE queued (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    prompt     TEXT NOT NULL,
+    sender     TEXT,
+    sender_label TEXT,
+    sent_at    INTEGER NOT NULL
+);
+CREATE INDEX queued_session ON queued(session_id);
 ";
 
 /// What was spent: the agents' files, by number, each as it was when saved
@@ -251,6 +260,18 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
          ALTER TABLE note_versions ADD COLUMN added INTEGER;"),
     ),
     (19, Sql("ALTER TABLE sessions ADD COLUMN worktree TEXT;")),
+    (
+        20,
+        Sql("CREATE TABLE queued (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+             prompt     TEXT NOT NULL,
+             sender     TEXT,
+             sender_label TEXT,
+             sent_at    INTEGER NOT NULL
+         );
+         CREATE INDEX queued_session ON queued(session_id);"),
+    ),
 ];
 
 /// Schema 12: what was spent refers to its file and model by number, and to

@@ -28,6 +28,12 @@ pub struct Subagent {
     pub heard: i64,
 }
 
+/// `text`'s words, its spaces and line ends as one: a prompt as typed in
+/// and as its agent says it took it.
+fn words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// A prompt sent to a session, waiting in its queue to be typed into its
 /// agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,6 +261,11 @@ pub struct Session {
     /// one it may never have taken (it exited first), kept to give again,
     /// asked for (`Roster::give_prompt_again`), never on its own.
     pub given_prompt: Option<String>,
+    /// The prompt another session sent it that began the turn under way
+    /// (`Queued::sender`), till the turn's over: it ends read, its answer
+    /// gone back by sending. Your own prompt typed into that turn makes it
+    /// yours.
+    pub sent: Option<String>,
     /// The subagents its agent started that haven't said they stopped, by
     /// its agent's id for each: for agents that say when one starts
     /// (Claude's SubagentStart and SubagentStop).
@@ -339,6 +350,7 @@ impl Session {
             fork_from: None,
             asked_by: None,
             given_prompt: None,
+            sent: None,
             subagents: BTreeMap::new(),
             shells: BTreeMap::new(),
             awaiting: false,
@@ -654,6 +666,17 @@ impl Session {
                 if e.kind == "prompt" && self.awaiting {
                     self.turns += 1;
                 }
+                // A prompt other than the one sent it, yours, makes the turn
+                // yours (one it gave itself, told something it left running
+                // ended, goes on with whoever's it was); as does one at idle,
+                // a sent one's turn begun as it's typed in.
+                if e.kind == "prompt" && !report.woken {
+                    let other = (report.prompt.as_deref())
+                        .is_some_and(|p| self.sent.as_deref().map(words) != Some(words(p)));
+                    if other || self.state == State::Idle {
+                        self.sent = None;
+                    }
+                }
                 self.set_state(State::Working, e.at);
                 self.awaiting = false;
                 if report.woken {
@@ -666,7 +689,7 @@ impl Session {
                 self.forget_quiet_subagents(e.at);
                 if self.subagents.is_empty() && self.shells.is_empty() {
                     self.set_state(State::Idle, e.at);
-                    self.unread = true;
+                    self.turn_over_unread();
                 } else {
                     // A subagent's question still waits on you.
                     if !(self.state == State::NeedsInput && self.asked_by.is_some()) {
@@ -698,6 +721,7 @@ impl Session {
                 if report.subagent.is_some() {
                     return;
                 }
+                self.sent = None;
                 if self.subagents.is_empty() && self.shells.is_empty() {
                     self.set_state(State::Idle, e.at);
                 } else {
@@ -718,6 +742,7 @@ impl Session {
             "compacted" => {
                 if report.subagent.is_none() && self.state == State::Working && !self.awaiting {
                     self.set_state(State::Idle, e.at);
+                    self.sent = None;
                 }
             }
             // A compaction, which Claude and codex make mid-turn when the
@@ -734,6 +759,8 @@ impl Session {
                 self.set_state(State::Idle, e.at);
                 if given {
                     self.set_state(State::Working, e.at);
+                } else {
+                    self.sent = None;
                 }
                 self.session_at = Some(e.at);
             }
@@ -862,6 +889,17 @@ impl Session {
     /// be told. Unread, then, but working.
     fn left_on_shells(&mut self) {
         if self.awaiting && self.subagents.is_empty() && !self.shells.is_empty() {
+            self.unread |= self.sent.is_none();
+        }
+    }
+
+    /// Its turn over: unread, unless another session's prompt began it
+    /// (`sent`), whose answer went back by sending. Kept while it waits on
+    /// what the turn left running: that's still the same errand's.
+    pub fn turn_over_unread(&mut self) {
+        if self.awaiting {
+            self.unread |= self.sent.is_none();
+        } else if self.sent.take().is_none() {
             self.unread = true;
         }
     }
@@ -912,7 +950,8 @@ impl Session {
         self.awaiting = false;
         if self.state == State::Working {
             self.set_state(State::Idle, at);
-            self.unread = true;
+            // Kept for the turn it takes what they left up in, if it does.
+            self.unread |= self.sent.is_none();
         }
         true
     }
@@ -972,8 +1011,10 @@ impl Session {
                 .last_event_at
                 .is_some_and(|t| self.baseline_at.is_none_or(|b| t > b))
             {
-                self.unread = true;
+                self.turn_over_unread();
             }
+            // The turn after a prompt another session sent, whatever it did.
+            self.sent = None;
         }
     }
 
@@ -1050,6 +1091,96 @@ pub mod tests {
     /// Applies an event that reported nothing more than its kind.
     fn apply(s: &mut Session, kind: &str, at: i64) {
         s.apply(&event(kind, at), &Report::default());
+    }
+
+    #[test]
+    fn a_turn_another_sessions_prompt_began_ends_read() {
+        let said = |prompt: Option<&str>| Report {
+            prompt: prompt.map(String::from),
+            ..Report::default()
+        };
+        // Its prompt the one sent, or one that doesn't say (pi's): read.
+        for prompt in [Some("  fix it\n"), None] {
+            let mut s = session("a");
+            s.sent = Some("fix it".into());
+            s.apply(&event("prompt", 10), &said(prompt));
+            apply(&mut s, "idle", 20);
+            assert_eq!((s.unread, s.sent.as_deref()), (false, None), "{prompt:?}");
+        }
+        // Yours typed into it: yours, unread.
+        let mut s = session("a");
+        s.sent = Some("fix it".into());
+        s.apply(&event("prompt", 10), &said(Some("and this")));
+        apply(&mut s, "idle", 20);
+        assert!(s.unread);
+        // A question in it reaches you all the same; its end after, read.
+        let mut s = session("a");
+        s.sent = Some("fix it".into());
+        apply(&mut s, "needs-input", 10);
+        assert!(s.unread);
+        s.unread = false;
+        apply(&mut s, "working", 11);
+        apply(&mut s, "idle", 20);
+        assert!(!s.unread);
+        // Ended once what it left running is done: read too.
+        let mut s = session("a");
+        s.sent = Some("fix it".into());
+        let subagent = Report {
+            subagent: Some("x1".into()),
+            ..Report::default()
+        };
+        s.apply(&event("subagent-start", 10), &subagent);
+        apply(&mut s, "idle", 20);
+        assert!(s.awaiting && !s.unread);
+        s.subagent_stopped("x1", 30);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+        // And the turn it takes their result up in, as it tells itself.
+        let woken = Report {
+            woken: true,
+            prompt: Some("x1 is done".into()),
+            ..Report::default()
+        };
+        s.apply(&event("prompt", 40), &woken);
+        apply(&mut s, "idle", 50);
+        assert_eq!((s.unread, s.sent.as_deref()), (false, None));
+        // Its words as it says it took them, however spaced.
+        let mut s = session("a");
+        s.sent = Some("fix it\nnow".into());
+        s.apply(&event("prompt", 10), &said(Some("fix it\r\n now ")));
+        apply(&mut s, "idle", 20);
+        assert!(!s.unread);
+        // Codex given it on its command line as it started.
+        let mut s = session("a");
+        (s.given_prompt, s.sent) = (Some("fix it".into()), Some("fix it".into()));
+        apply(&mut s, "session", 10);
+        s.apply(&event("prompt", 11), &said(Some("fix it")));
+        apply(&mut s, "idle", 20);
+        assert!(!s.unread);
+        // Its turn over another way (compacted, cut short, a new start), or
+        // a prompt at idle, which a sent one never is: what comes next is
+        // yours, a prompt that doesn't say included.
+        for kind in ["compacted", "interrupted", "session", ""] {
+            let mut s = session("a");
+            s.sent = Some("fix it".into());
+            if !kind.is_empty() {
+                apply(&mut s, kind, 10);
+            }
+            s.state = State::Idle;
+            s.apply(&event("prompt", 11), &said(None));
+            apply(&mut s, "idle", 20);
+            assert!(s.unread, "{kind:?}");
+        }
+        // A screen-tracked agent's turn after it was typed in.
+        let mut g = session("g");
+        g.agent = "echo".into();
+        g.sent = Some("fix it".into());
+        g.screen_hash = Some("a".into());
+        g.observe_generic("b", 10, 1000);
+        g.observe_generic("b", 2000, 1000);
+        assert_eq!(
+            (g.state, g.unread, g.sent.as_deref()),
+            (State::Idle, false, None)
+        );
     }
 
     #[test]

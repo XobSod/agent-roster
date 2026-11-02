@@ -255,6 +255,7 @@ impl Adapter for Codex {
                 transcript_path: None,
                 transcript_written: false,
                 model: None,
+                prompt: None,
                 ..report
             };
         }

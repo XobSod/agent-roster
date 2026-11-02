@@ -411,6 +411,7 @@ fn a_save_of_what_changed_writes_every_column_save_session_does() {
     after.fork_from = Some("f".into());
     after.asked_by = Some("a1".into());
     after.given_prompt = Some("g".into());
+    after.sent = Some("s".into());
     after.subagents = [(
         "a2".to_string(),
         crate::model::Subagent {
@@ -565,7 +566,11 @@ fn a_first_prompt_not_typed_in_is_put_back() {
     let (db, mut s) = db_with_session();
     s.pending_prompt = Some("fix it".into());
     db.save_session(&s).unwrap();
+    s.sent = Some("left".into());
+    db.save_session(&s).unwrap();
     let taken = db.take_pending_prompt(&s.id, |_| true).unwrap().unwrap();
+    // Yours: no other session's.
+    assert_eq!(db.session(&s.id).unwrap().sent, None);
     assert!(db.give_back_pending(&taken).unwrap());
     assert_eq!(
         db.session(&s.id).unwrap().pending_prompt.as_deref(),
@@ -616,6 +621,9 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
         .unwrap();
     assert_eq!(db.session(&s.id).unwrap().state, State::Working);
     assert_eq!(turn.before.state, s.state);
+    // Sent by another, its turn is that one's; yours, yours.
+    assert_eq!(turn.after.sent.as_deref(), Some("one"));
+    assert_eq!(db.session(&s.id).unwrap().sent.as_deref(), Some("one"));
     // Another roster about to type into it finds its turn taken.
     let idle = |s: &mut Session| s.state == State::Idle;
     assert!(db.take_queued(&s.id, idle).unwrap().is_none());
@@ -649,7 +657,8 @@ fn a_queue_goes_in_first_to_last_up_to_its_limit_and_with_its_session() {
     db.save_changes(&turn.after, &asked).unwrap();
     assert!(db.give_back_queued(&turn).unwrap());
     assert_eq!(db.queue(&s.id).unwrap()[0], first);
-    assert_eq!(db.session(&s.id).unwrap().state, State::NeedsInput);
+    let back = db.session(&s.id).unwrap();
+    assert_eq!((back.state, back.sent), (State::NeedsInput, None));
     assert!(db.edit_queued(&s.id, first.id, "one more").unwrap());
     assert_eq!(prompts(&db), ["one more", "two"]);
     assert_eq!(db.queues().unwrap()[&s.id].len(), 2);

@@ -19,6 +19,7 @@ const STATED_COLUMNS: &[&str] = &[
     "last_event_at",
     "screen_hash",
     "screen_changed_at",
+    "sent",
 ];
 
 pub(super) const SESSION_COLUMNS: &str =
@@ -26,7 +27,7 @@ pub(super) const SESSION_COLUMNS: &str =
     s.transcript_path, s.state, s.unread, s.exit_status, s.last_event_at, s.screen_hash,
     s.screen_changed_at, s.created_at, s.deleted_at, s.baseline_at, s.title, s.model, s.effort,
     s.state_since, s.pending_prompt, s.running_model, s.running_effort, s.title_override, s.turns,
-    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.subagents, s.awaiting, s.shells,
+    s.worked_ms, s.fork_from, s.asked_by, s.given_prompt, s.sent, s.subagents, s.awaiting, s.shells,
     s.started_at, s.session_at, s.conversation_begun, s.note, s.note_pin, s.note_at, s.worktree";
 
 impl Db {
@@ -170,6 +171,7 @@ impl Db {
             fork_from,
             asked_by,
             given_prompt,
+            sent,
             subagents,
             shells,
             awaiting,
@@ -226,6 +228,7 @@ impl Db {
             fork_from,
             asked_by,
             given_prompt,
+            sent,
             awaiting
         );
         // What changes with its state (`Session::set_state`), and what it was
@@ -319,7 +322,12 @@ impl Db {
         id: &str,
         begin: impl FnOnce(&mut Session) -> bool,
     ) -> Result<Option<Turn<String>>> {
-        self.take_turn(id, |_, s| Ok(s.pending_prompt.take()), begin)
+        // Yours: its turn as yours are.
+        let take = |_: &Connection, s: &mut Session| {
+            s.sent = None;
+            Ok(s.pending_prompt.take())
+        };
+        self.take_turn(id, take, begin)
     }
 
     /// `take` takes what's to be typed into session `id`'s agent, if `begin`
@@ -388,6 +396,12 @@ impl Db {
                 ..turn.before.clone()
             };
             self.save_changes(&turn.after, &before)?;
+        } else {
+            // Whose the turn under way is, as it was, unless that changed too.
+            tx.execute(
+                "UPDATE sessions SET sent = ?2 WHERE id = ?1 AND sent IS ?3",
+                params![turn.after.id, turn.before.sent, turn.after.sent],
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -543,6 +557,7 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
              fork_from = :fork_from,
              asked_by = :asked_by,
              given_prompt = :given_prompt,
+             sent = :sent,
              subagents = :subagents,
              shells = :shells,
              awaiting = :awaiting,
@@ -577,6 +592,7 @@ pub(super) fn save_session(conn: &Connection, s: &Session) -> Result<()> {
             ":fork_from": s.fork_from,
             ":asked_by": s.asked_by,
             ":given_prompt": s.given_prompt,
+            ":sent": s.sent,
             ":subagents": subagents_text(&s.subagents),
             ":shells": shells_text(&s.shells),
             ":awaiting": s.awaiting,
@@ -630,6 +646,7 @@ pub(super) fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         fork_from: r.get("fork_from")?,
         asked_by: r.get("asked_by")?,
         given_prompt: r.get("given_prompt")?,
+        sent: r.get("sent")?,
         subagents: (r.get::<_, Option<String>>("subagents")?)
             .map(|text| subagents_from(&text))
             .unwrap_or_default(),

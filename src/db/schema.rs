@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) const SCHEMA_VERSION: i64 = 21;
+pub(super) const SCHEMA_VERSION: i64 = 22;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -51,6 +51,7 @@ CREATE TABLE sessions (
     note_at           INTEGER,
     asked_by          TEXT,
     given_prompt      TEXT,
+    sent              TEXT,
     subagents         TEXT,
     awaiting          INTEGER NOT NULL DEFAULT 0,
     shells            TEXT,
@@ -272,6 +273,7 @@ pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
          );
          CREATE INDEX queued_session ON queued(session_id);"),
     ),
+    (22, Sql("ALTER TABLE sessions ADD COLUMN sent TEXT;")),
 ];
 
 /// Schema 12: what was spent refers to its file and model by number, and to

@@ -676,10 +676,10 @@ mod tests {
     /// second's first turn. Each file, in codex's directory at `dir`; the
     /// second filed under another day.
     fn edited_twice(dir: &Path) -> [std::path::PathBuf; 3] {
-        let id = "01a1923a-6e2c-71b3-9d29-5012da0153ca";
+        let id = "01a1923a-0000-7000-8000-000000000001";
         let edits = [
-            "01a1923b-3130-7f62-b9da-01fec7c64220",
-            "01a1923b-829c-7372-bc1b-699dc62df116",
+            "01a1923b-0000-7000-8000-000000000001",
+            "01a1923b-0000-7000-8000-000000000002",
         ];
         let header = |base: Option<(&str, u64)>| {
             let mut payload = json!({"id": id, "cwd": "/work/app", "history_mode": "paginated"});

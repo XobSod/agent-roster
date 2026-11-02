@@ -504,6 +504,9 @@ pub struct Report {
     /// A prompt it was given by itself: told that something it left running
     /// ended, not by you.
     pub woken: bool,
+    /// The prompt it took, as it says it (Claude's and codex's
+    /// UserPromptSubmit).
+    pub prompt: Option<String>,
     /// A permission it asked that no one is asked to give: decided by a
     /// reviewer of the agent's own (codex's `auto_review`), so its work goes
     /// on rather than waiting for you.
@@ -604,6 +607,7 @@ pub(crate) fn hook_report(payload: &serde_json::Value) -> Report {
         started: source == Some("startup"),
         compacted: source == Some("compact"),
         model: text(payload.get("model")),
+        prompt: text(payload.get("prompt")),
         transcript_written: transcript_written(payload),
         ..Report::default()
     }

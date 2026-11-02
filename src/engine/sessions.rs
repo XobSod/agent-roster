@@ -435,6 +435,8 @@ impl Roster {
         if agent::adapter(&s.agent).takes_prompt() {
             s.given_prompt = s.pending_prompt.take().or(s.given_prompt.take());
         }
+        // A new run: a turn another session's prompt began, if given one.
+        s.sent = queued_first.as_ref().and_then(crate::db::sent_by_another);
         s.set_state(State::Working, now);
         s.started_at = Some(now);
         s.unread = false;

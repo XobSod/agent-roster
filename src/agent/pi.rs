@@ -307,6 +307,7 @@ mod tests {
                 shells: Vec::new(),
                 shells_ended: Vec::new(),
                 woken: false,
+                prompt: None,
                 not_asked: false,
             }
         );

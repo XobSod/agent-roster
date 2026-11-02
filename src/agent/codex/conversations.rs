@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn a_thread_with_a_prompt_edited_is_the_file_it_went_on_in() {
         let dir = tempfile::tempdir().unwrap();
-        let id = "01a191c0-d4d8-78e3-a58b-bb61909b1af2";
+        let id = "01a191c0-0000-7000-8000-000000000001";
         let header =
             format!(r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/work/app"}}}}"#);
         let prompt = |text: &str| {
@@ -458,7 +458,7 @@ mod tests {
             fs::write(&path, [header.clone(), prompt(text)].join("\n") + "\n").unwrap();
             path
         };
-        let first = edit("01a191c1-4de7-70c3-9b07-e21b465dd246", "one, edited");
+        let first = edit("01a191c1-0000-7000-8000-000000000001", "one, edited");
         let edited = edit("01a191c2-0000-7000-8000-000000000001", "one, edited again");
         // Whatever their files' times say (copied, say).
         let set = |path: &Path, ago: u64| {

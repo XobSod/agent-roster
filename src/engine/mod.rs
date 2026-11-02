@@ -489,15 +489,22 @@ impl Roster {
                                 // left with only shells running too, as when
                                 // its end is reported. Subagents still at work
                                 // put that off, the mark theirs to give.
-                                if s.correct_stale_working(
+                                let corrected = s.correct_stale_working(
                                     now,
                                     adapter.subagents_outlive_interrupts(),
-                                ) && s.subagents.is_empty()
+                                );
+                                if corrected
+                                    && s.subagents.is_empty()
                                     && let Some(path) = transcript
                                     && let Some(ended) = adapter.turn_ended(path)
                                     && since.is_none_or(|since| ended >= since)
                                 {
-                                    s.unread = true;
+                                    s.turn_over_unread();
+                                }
+                                // Its turn over, unheard: a prompt sent it is
+                                // of no turn after.
+                                if corrected && s.state == State::Idle {
+                                    s.sent = None;
                                 }
                             }
                         }
@@ -907,6 +914,23 @@ pub(crate) fn project_removal_question<'a>(
 mod tests {
     use super::*;
     use crate::model::Shell;
+
+    #[test]
+    fn a_missed_stop_with_shells_left_keeps_whose_turn_it_is() {
+        let mut s = on_shells(Path::new("t.jsonl"), &["shell-1"], 0, false);
+        s.sent = Some("run the tests".into());
+        s.last_event_at = Some(10);
+        s.screen_changed_at = Some(10);
+        let now = 10 + QUIET_MS + 1;
+        // A still screen and a turn its transcript says ended, no Stop heard.
+        assert!(s.correct_stale_working(now, true));
+        assert!(s.awaiting);
+        s.turn_over_unread();
+        assert!(!s.unread);
+        // The same errand, once what it left running ends.
+        s.shells_ended(&[("shell-1".into(), now + 1)]);
+        assert_eq!((s.state, s.unread), (State::Idle, false));
+    }
 
     /// What's found of ended shells and how far it was read.
     fn pair(found: crate::db::ShellsFound) -> (Vec<(String, i64)>, Option<u64>) {

@@ -86,7 +86,7 @@ impl Db {
         id: &str,
         begin: impl FnOnce(&mut Session) -> bool,
     ) -> Result<Option<Turn<Queued>>> {
-        let take = |tx: &Connection, _: &mut Session| -> Result<Option<Queued>> {
+        let take = |tx: &Connection, s: &mut Session| -> Result<Option<Queued>> {
             let first = tx
                 .query_row(
                     "SELECT id, prompt, sender, sender_label, sent_at FROM queued
@@ -97,6 +97,7 @@ impl Db {
                 .optional()?;
             if let Some(q) = &first {
                 tx.execute("DELETE FROM queued WHERE id = ?1", [q.id])?;
+                s.sent = sent_by_another(q);
             }
             Ok(first)
         };
@@ -157,6 +158,12 @@ impl Db {
         let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+/// `Session::sent` for the turn `q` begins: its prompt, if another session
+/// sent it.
+pub fn sent_by_another(q: &Queued) -> Option<String> {
+    q.sender.is_some().then(|| q.prompt.clone())
 }
 
 /// `Db::put_back_queued`, on `conn`.

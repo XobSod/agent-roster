@@ -485,3 +485,70 @@ fn a_prompt_sent_waits_for_a_turn_a_question_and_you_at_its_agent() {
         (t.ok(&["show", "g"]).lines()).any(|l| l.trim() == "while you were there")
     });
 }
+
+#[test]
+fn a_turn_another_session_began_ends_read_and_yours_as_they_were() {
+    let Some(t) = TestEnv::new("sendread") else {
+        return;
+    };
+    add_agents(&t, "");
+    t.ok(&["new", "demo", "--agent", "calm", "--name", "lead"]);
+    t.ok(&["new", "demo", "--name", "c"]);
+    let lead = t.session("lead", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let c = t.session("c", false).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let transcript = t.path("x.jsonl");
+    let hook = |prompt: &str| {
+        serde_json::json!({
+            "session_id": "x",
+            "transcript_path": transcript,
+            "prompt": prompt,
+        })
+        .to_string()
+    };
+    let unread = |t: &TestEnv| t.session("c", false).unwrap()["unread"] == true;
+    t.report(&c, "session", &hook(""));
+    // What a turn sent by another ends with went back to it: read.
+    let out = run_in(&t, &lead, &["send", "c", "from the lead"]);
+    assert!(said(&out).contains("Typed into demo/c"), "{}", said(&out));
+    t.report(&c, "prompt", &hook("from the lead"));
+    t.report(&c, "idle", &hook(""));
+    assert!(!unread(&t));
+    // Yours sent so are as they were: unread.
+    assert!(
+        t.ok(&["send", "c", "from you"])
+            .contains("Typed into demo/c")
+    );
+    t.report(&c, "prompt", &hook("from you"));
+    t.report(&c, "idle", &hook(""));
+    assert!(unread(&t));
+    t.ok(&["read", "c"]);
+    // As is one sent by another that you typed into too.
+    let out = run_in(&t, &lead, &["send", "c", "again from the lead"]);
+    assert!(said(&out).contains("Typed into demo/c"), "{}", said(&out));
+    t.report(&c, "prompt", &hook("and from you"));
+    t.report(&c, "idle", &hook(""));
+    assert!(unread(&t));
+    t.ok(&["read", "c"]);
+
+    // A screen-tracked agent's turn after it was typed in.
+    t.ok(&["new", "demo", "--agent", "calm", "--name", "g"]);
+    let g_unread = |t: &TestEnv| t.session("g", false).unwrap()["unread"] == true;
+    t.wait_for("g ready", |t| {
+        let out = run_in(t, &lead, &["send", "g", "from the lead"]);
+        String::from_utf8_lossy(&out.stdout).contains("Typed into demo/g")
+            || !t.ok(&["send", "g", "--list"]).is_empty()
+    });
+    t.wait_for("its turn over", |t| {
+        (t.ok(&["show", "g"]).lines()).any(|l| l.trim() == "from the lead")
+            && t.session("g", false).unwrap()["state"] == "idle"
+    });
+    assert!(!g_unread(&t));
+    t.ok(&["send", "g", "from you"]);
+    t.wait_for("yours over, unread", g_unread);
+}

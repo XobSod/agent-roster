@@ -756,8 +756,16 @@ newline.
 
 ```sh
 cargo test     # unit tests, plus end-to-end tests that need tmux
-ci/lint.sh && ci/test.sh   # all CI checks on each push: formatting, clippy, both crates' tests
-ci/docker.sh               # CI's steps as GitHub's runner runs them, in an Ubuntu container (needs Docker)
+ci/lint.sh && ci/test.sh   # CI's checks but the release build: formatting, clippy, both crates' tests
+ci/docker.sh               # all of CI's steps as GitHub's runner runs them, the static musl release build too (needs Docker)
+```
+
+With `musl-tools` and Rust's musl target installed, `ci/lint.sh` lints the static build
+too, and `ci/dist.sh` makes the release archive:
+
+```sh
+sudo apt-get install musl-tools
+rustup target add x86_64-unknown-linux-musl
 ```
 
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a

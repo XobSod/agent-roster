@@ -500,6 +500,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         stopped_cards,
         queue_limit,
         memory_warning,
+        update_check,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
         prices: _,
@@ -551,6 +552,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 &["sidebar_usage"],
                 sidebar_usage.unwrap_or(true),
                 "under the session list, what your Claude and codex accounts have used of their limits",
+            ),
+            bool_setting(
+                &["update_check"],
+                update_check.unwrap_or(true),
+                "the TUI asks GitHub, once a day at most as it starts, whether a newer roster is out (roster update asks anyway)",
             ),
             bool_setting(
                 &["trust_project_folders"],
@@ -970,6 +976,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         server,
         settings,
         usage,
+        releases,
         // Gone, not a setting (`Config::gone`).
         group: _,
     } = view;
@@ -992,6 +999,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                 "usage",
                 usage,
                 "what the agents' accounts have used of their limits",
+            ),
+            v(
+                "releases",
+                releases,
+                "what's new: the notes of the releases since this one, and updating",
             ),
         ],
     });

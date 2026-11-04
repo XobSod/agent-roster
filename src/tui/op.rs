@@ -149,6 +149,8 @@ pub enum Op {
         step: Option<LeavingStep>,
     },
     KillOrphans,
+    /// The newest release installed over this roster, if it's newer.
+    Update,
     Quit,
 }
 

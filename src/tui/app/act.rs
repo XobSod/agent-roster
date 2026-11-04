@@ -16,6 +16,7 @@ impl App {
             Action::ShowSettings => self.toggle_view(Mode::Settings),
             Action::ShowUsage => self.toggle_view(Mode::Usage),
             Action::ShowProjects => self.toggle_view(Mode::Projects),
+            Action::ShowReleases => self.releases = Some(Default::default()),
             _ => {
                 return match self.mode {
                     Mode::Sessions => self.act_in_list(action),

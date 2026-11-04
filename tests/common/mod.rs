@@ -23,6 +23,21 @@ const FAKE_AGENT: &str = include_str!("../fakes/claude.sh");
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Where updating asks for releases, unless a test serves them: a port
+/// nothing listens on, so no test asks GitHub (a TUI asks as it starts).
+const NO_RELEASES: &str = "http://127.0.0.1:9";
+
+/// What would send roster's asking through a proxy (`update`), whose
+/// answer for a port here isn't the test's.
+const PROXIES: &[&str] = &[
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+];
+
 pub struct TestEnv {
     dir: tempfile::TempDir,
     pub socket: String,
@@ -160,7 +175,12 @@ impl TestEnv {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_roster"));
+        self.command_of(std::path::Path::new(env!("CARGO_BIN_EXE_roster")), args)
+    }
+
+    /// `command`, run by the roster at `exe` (a copy of it, say).
+    pub fn command_of(&self, exe: &std::path::Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new(exe);
         cmd.args(args)
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_STATE_HOME", self.path("state"))
@@ -169,19 +189,28 @@ impl TestEnv {
             .env("CLAUDE_CONFIG_DIR", self.claude_dir())
             .env("PI_CODING_AGENT_DIR", self.pi_dir())
             .env("CODEX_HOME", self.codex_dir())
+            .env("ROSTER_UPDATE_URL", NO_RELEASES)
             .env_remove("PI_CODING_AGENT_SESSION_DIR")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env_remove("ROSTER_SESSION")
             .env_remove("ROSTER_DB")
             .stdin(Stdio::null());
+        for proxy in PROXIES {
+            cmd.env_remove(proxy);
+        }
         cmd
     }
 
     /// The same as a shell command line, for running roster in a terminal.
     pub fn shell_command(&self) -> String {
         format!(
-            "env -u TMUX -u TMUX_PANE -u PI_CODING_AGENT_SESSION_DIR XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' PATH='{}' CLAUDE_CONFIG_DIR='{}' PI_CODING_AGENT_DIR='{}' CODEX_HOME='{}' '{}'",
+            "env -u TMUX -u TMUX_PANE -u PI_CODING_AGENT_SESSION_DIR {} XDG_CONFIG_HOME='{}' XDG_STATE_HOME='{}' ROSTER_TMUX_SOCKET='{}' PATH='{}' CLAUDE_CONFIG_DIR='{}' PI_CODING_AGENT_DIR='{}' CODEX_HOME='{}' ROSTER_UPDATE_URL='{NO_RELEASES}' '{}'",
+            PROXIES
+                .iter()
+                .map(|p| format!("-u {p}"))
+                .collect::<Vec<_>>()
+                .join(" "),
             self.path("config").display(),
             self.path("state").display(),
             self.socket,

@@ -18,9 +18,11 @@ rm -rf "$HOME"
 mkdir -p "$XDG_CONFIG_HOME/agent-roster"
 # The agents are the stand-in, on the PATH as claude, pi and codex (setup.sh). The
 # warning below a quarter of the machine, so the processes scene's build is marked.
+# GitHub never asked: a release out would show in the recording's footer.
 cat >"$XDG_CONFIG_HOME/agent-roster/config.toml" <<TOML
 fit_preview = "always"
 memory_warning = "1G"
+update_check = false
 TOML
 for p in webapp api docs; do
   mkdir -p "$HOME/$p"

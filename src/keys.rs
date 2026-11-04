@@ -70,6 +70,8 @@ pub enum Action {
     ShowServer,
     ShowSettings,
     ShowUsage,
+    /// The notes of the releases since this one, where it's updated.
+    ShowReleases,
 }
 
 impl Action {
@@ -114,6 +116,7 @@ impl Action {
             Action::ShowServer => "tmux server and processes",
             Action::ShowSettings => "settings",
             Action::ShowUsage => "usage",
+            Action::ShowReleases => "what's new",
         }
     }
 }
@@ -365,6 +368,13 @@ impl Keymap {
             &mut labels,
         )?;
         view.bind(t, "usage", &k.usage, Action::ShowUsage, &mut labels)?;
+        view.bind(
+            t,
+            "releases",
+            &k.releases,
+            Action::ShowReleases,
+            &mut labels,
+        )?;
 
         let menus = HashMap::from([
             (Menu::Session, session),
@@ -493,6 +503,7 @@ mod tests {
             Some(Action::ShowProjects)
         );
         assert_eq!(map.menu_label(Menu::View, Action::ShowProjects), Some("p"));
+        assert_eq!(map.menu(Menu::View, &chr('r')), Some(Action::ShowReleases));
         assert_eq!(
             map.menu_label(Menu::Project, Action::ShowProjects),
             Some("l")

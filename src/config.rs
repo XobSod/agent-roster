@@ -32,6 +32,8 @@
 //!                                 # (its card, header, a folded group's heading, the
 //!                                 # summary); "off"; default: a quarter of the
 //!                                 # machine's memory
+//! update_check = false            # default true: the TUI asks GitHub, once a day
+//!                                 # at most, whether a newer roster is out
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,
@@ -137,6 +139,9 @@ pub struct Config {
     /// Above how much memory a session's processes are said to use too much
     /// (default: a quarter of the machine's).
     pub memory_warning: Option<MemoryWarning>,
+    /// Whether the TUI asks GitHub for a newer release as it starts, at
+    /// most once a day (default on).
+    pub update_check: Option<bool>,
     /// What models' calls cost, by model: in place of roster's own prices,
     /// or for models it has none for (`tokens::Prices`).
     pub prices: BTreeMap<String, Price>,
@@ -422,6 +427,8 @@ pub struct ViewKeys {
     pub settings: KeyList,
     /// What the agents' accounts have used of their limits.
     pub usage: KeyList,
+    /// What's new: the notes of the releases since this one, and updating.
+    pub releases: KeyList,
     /// The key that grouped the list by project, gone (`group_by` does it):
     /// taken, and said to be gone (`Config::gone`).
     pub group: Option<toml::Value>,
@@ -559,6 +566,7 @@ impl Default for ViewKeys {
             server: keys(&["t"]),
             settings: keys(&["s"]),
             usage: keys(&["u"]),
+            releases: keys(&["r"]),
             group: None,
         }
     }
@@ -771,6 +779,10 @@ impl Config {
         self.sidebar_usage.unwrap_or(true)
     }
 
+    pub fn update_check(&self) -> bool {
+        self.update_check.unwrap_or(true)
+    }
+
     pub fn card_subagents(&self) -> CardSubagents {
         self.card_subagents.unwrap_or_default()
     }
@@ -866,6 +878,12 @@ mod tests {
         assert!(config.agent("claude").command.is_none());
         assert!(config.status_line());
         assert!(!Config::parse("status_line = false").unwrap().status_line());
+        assert!(config.update_check());
+        assert!(
+            !Config::parse("update_check = false")
+                .unwrap()
+                .update_check()
+        );
     }
 
     #[test]

@@ -7,7 +7,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 target=x86_64-unknown-linux-musl
-cargo build --release --locked --target "$target"
+# Marked a release's, which alone updates itself: any other build is for what
+# made it to update.
+ROSTER_RELEASE_BUILD=1 cargo build --release --locked --target "$target"
 bin=target/$target/release/roster
 if readelf --program-headers "$bin" | grep -q INTERP; then
   echo "$bin isn't static: it asks for a program interpreter" >&2

@@ -214,6 +214,12 @@ pub enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Ask GitHub for the newest release of roster, and install it over this one if it's newer
+    Update {
+        /// Only say whether a newer release is out, with the notes of each since this one
+        #[arg(long)]
+        check: bool,
+    },
     /// Show status events reported by agent hooks
     Events {
         #[arg(short, long)]

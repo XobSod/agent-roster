@@ -8,3 +8,4 @@ pub mod notes;
 pub mod projects;
 pub mod send;
 pub mod sessions;
+pub mod update;

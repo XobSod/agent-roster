@@ -13,6 +13,7 @@ mod pi;
 mod send;
 mod sessions;
 mod tokens;
+mod update;
 mod usage;
 mod worktrees;
 
@@ -20,8 +21,12 @@ mod worktrees;
 /// pre-release, maybe build metadata (how far past a release, and the commit).
 #[test]
 fn the_version_is_semver() {
+    // Not the real state's: what its database knows is said after it.
+    let scratch = tempfile::tempdir().unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_roster"))
         .arg("--version")
+        .env("XDG_STATE_HOME", scratch.path())
+        .env("XDG_CONFIG_HOME", scratch.path())
         .output()
         .unwrap();
     assert!(out.status.success());

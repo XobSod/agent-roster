@@ -48,6 +48,30 @@ cargo build                # a debug build, quicker to build, slower to run: ./t
 while no message shows: a release, its version alone; one built from a checkout,
 also its commit and whether it was changed.
 
+To update, `v r` in the TUI shows the notes of each release since yours, newest
+first, and `u` there installs the newest shown, the TUI going on meanwhile (one
+published since shows first, for `u` again); `roster update`
+prints those notes and installs it at once, and `roster update --check` only says
+whether there's one, with the notes. Either asks GitHub then, and puts the new
+`roster` where the one running is, once what it downloaded matches the checksum
+published with it and has run. A TUI goes on as it was till you restart it (the
+next start says it was updated), and agents running go on too. Only a release's own
+binary updates itself: one built from a checkout, a source archive or a package is
+for what made it to update. It refuses a roster whose binary was replaced since it
+started, which you restart instead; and where it can't write, it says how to do it
+by hand.
+
+The TUI also asks on its own as it starts, in the background, once a day at most
+(an hour after asking that failed); `update_check = false` turns that off. A newer
+release then shows in its footer beside the version (`v0.1.0 → v0.2.0`), and
+`roster --version` says it on a second line, on stderr, so what reads the version
+from its output gets the version alone. GitHub is asked over HTTPS only, trusting
+the system's certificates, through the proxy named by the first that's set of
+`ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` (or their lowercase), except for the
+hosts in `NO_PROXY` (comma-separated, without spaces). A SOCKS proxy isn't
+supported: named there, it's passed by, whatever the others say, and GitHub is
+asked directly.
+
 Installing puts only the `roster` binary in place. What else roster needs it makes
 as it runs, in `~/.local/state/agent-roster/`: its database, its tmux config, and
 the extension it loads into the [pi](#pi) sessions it starts.
@@ -75,7 +99,7 @@ queued](#agents-working-together), `!queued` those without): `Enter` keeps the f
 |---|---|
 | `s` session | `n` new · `c` new chat (no project needed) · `e` edit · `s` start · `x` stop · `X` kill (it and all it started, at once) · `r` restart · `u` read/unread · `t` new title · `o` note · `q` queued prompts (read, edit, drop) · `a` archive / restore · `D` delete for good · `A` adopt a conversation |
 | `p` project | `n` new · `e` edit · `o` note · `f` show only this project · `d` remove · `l` list (all projects; there these work without `p`) |
-| `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage |
+| `v` view | `p` all projects · `t` tmux server, database and processes · `s` settings · `u` usage · `r` what's new (and `u` there updates) |
 
 ### Sessions and shelves
 
@@ -426,6 +450,8 @@ roster config unset fit_preview         # back to its default
 roster config add-agent gemini --yolo   # an agent for new sessions, named after what it runs
 roster config --defaults                # a config.toml with every setting, prices' shape too, commented out
 roster config --edit                    # config.toml in $EDITOR (from those defaults if there's none)
+roster update --check                   # whether a newer release is out, and the notes of each since yours
+roster update                           # those notes, then the newest installed over this one
 ```
 
 Sessions are addressed as `project/name`, `name`, or an id prefix. `roster --help`
@@ -485,6 +511,9 @@ All files are optional and live in `~/.config/agent-roster/`:
     many are over; till it's back under 90% of it. A size of at least a megabyte (`"8G"`,
     `"512M"`, `"1.5GiB"`) or `"off"`; by default a quarter of the machine's memory (or of
     the container's, if it's given less).
+  - `update_check`: `false`: the TUI never asks GitHub on its own whether a newer
+    roster is out (it does once a day at most, as it starts); `roster update` still
+    asks.
   - `[prices."<model>"]`: what a model's calls cost, in dollars per million tokens
     (`input`, `output`, `cache_read`, `cache_write`, the last two 0 unless set, and
     `long = { above = 272000, input = …, output = … }` for a call sending more than
@@ -573,6 +602,7 @@ All files are optional and live in `~/.config/agent-roster/`:
     server = "t"              # the tmux server, the database and processes
     settings = "s"            # every setting, to see and change
     usage = "u"               # what the agents' accounts have used of their limits
+    releases = "r"            # what's new: the notes of the releases since yours, and updating
     ```
 
   - `[agents.claude]`, `[agents.pi]` and `[agents.codex]`: `command`, `args` (added to
@@ -770,6 +800,11 @@ rustup target add x86_64-unknown-linux-musl
 
 `ROSTER_TMUX_SOCKET=<name>` (and `XDG_CONFIG_HOME`/`XDG_STATE_HOME`) keep a
 development build apart from your real sessions.
+
+For tests, `ROSTER_UPDATE_URL=<url>` has updating ask a server of its own in place
+of GitHub's API (`https://api.github.com/repos/XobSod/agent-roster`), plain HTTP
+allowed then, and
+`ROSTER_UPDATE_CHECKOUT=1` lets a build that isn't a release's update as one would.
 
 `demo/render.sh` records the GIFs above from `demo/tapes/` with
 [VHS](https://github.com/charmbracelet/vhs) in Docker, in a home of its own, with

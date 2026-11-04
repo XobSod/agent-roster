@@ -25,6 +25,7 @@ use super::note::{self, NoteEditor, OpenNotes, Side};
 use super::op::{self, Op};
 use super::picker::{Picked, Picker};
 use super::queue::{self, QueueView};
+use super::releases::{self, ReleasesView};
 use crate::keys::{Action, Keymap, Menu};
 use crate::model::{Project, Session, State};
 use crate::note::Whose;
@@ -239,6 +240,21 @@ pub struct App {
     /// drawn).
     pub usage_scroll: usize,
     pub usage_scroll_max: Cell<usize>,
+    /// What's known of roster's releases, as last read from the database,
+    /// and the text it was read from.
+    pub known: crate::update::Known,
+    known_text: Option<String>,
+    /// The notes of the releases since this one (`v r`), open; keys go to
+    /// it.
+    pub releases: Option<ReleasesView>,
+    /// The published releases, being asked for as the TUI started.
+    pub checking: Option<Receiver<anyhow::Result<Vec<crate::update::Published>>>>,
+    /// An update (`u` in what's new), going on on its thread.
+    pub updating: Option<Receiver<releases::Updating>>,
+    /// What's said whenever no other message is: while something goes on
+    /// (an update), and till roster restarts (an update installed).
+    meanwhile: Option<Message>,
+    lasting: Option<Message>,
 }
 
 impl App {
@@ -309,6 +325,13 @@ impl App {
             usage_period: None,
             usage_scroll: 0,
             usage_scroll_max: Cell::new(0),
+            known: Default::default(),
+            known_text: None,
+            releases: None,
+            checking: None,
+            updating: None,
+            meanwhile: None,
+            lasting: None,
         }
     }
 
@@ -772,12 +795,59 @@ impl App {
         });
     }
 
+    /// `flash`, and said again whenever no other message is, till roster
+    /// restarts.
+    pub fn flash_lasting(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.flash(text.clone());
+        self.lasting = Some(Message {
+            text,
+            error: false,
+            at: Instant::now(),
+        });
+    }
+
+    /// What's said whenever no other message is while something goes on;
+    /// None once it's over.
+    pub fn say_meanwhile(&mut self, text: Option<String>) {
+        self.meanwhile = text.map(|text| Message {
+            text,
+            error: false,
+            at: Instant::now(),
+        });
+    }
+
     /// The current message: an error until the next key press, anything else
-    /// while it's recent.
+    /// while it's recent; else what's said while something goes on, or till
+    /// roster restarts.
     pub fn message(&self) -> Option<&Message> {
-        self.message
-            .as_ref()
+        (self.message.as_ref())
             .filter(|m| m.error || m.at.elapsed() < MESSAGE_TTL)
+            .or(self.meanwhile.as_ref())
+            .or(self.lasting.as_ref())
+    }
+
+    /// What's known of roster's releases, as the database has it now (its
+    /// text, read again only when that changed).
+    pub fn set_known(&mut self, text: Option<String>) {
+        if text != self.known_text {
+            self.known = crate::update::Known::parse(text.as_deref());
+            self.known_text = text;
+        }
+    }
+
+    /// What a roster updated to `release` says on its first start: so, and
+    /// where its notes are.
+    pub fn updated_said(&self, release: &crate::update::Release) -> String {
+        let keys = (self.keymap.label(Action::Open(Menu::View)))
+            .zip(self.keymap.menu_label(Menu::View, Action::ShowReleases));
+        match keys {
+            Some((menu, key)) => format!(
+                "Updated to v{release} · {menu} {key} {}",
+                Action::ShowReleases.describe()
+            ),
+            None => format!("Updated to v{release}"),
+        }
     }
 
     pub fn on_key(&mut self, e: KeyEvent) -> Option<Op> {
@@ -795,6 +865,16 @@ impl App {
         }
         if self.queue.is_some() {
             return self.on_queue_key(e);
+        }
+        if let Some(view) = self.releases.as_mut() {
+            return match view.on_key(e) {
+                releases::Asked::None => None,
+                releases::Asked::Close => {
+                    self.releases = None;
+                    None
+                }
+                releases::Asked::Update => Some(Op::Update),
+            };
         }
         if self.typing.is_some() {
             self.on_search_key(e);

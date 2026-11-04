@@ -13,6 +13,7 @@ mod op;
 mod perform;
 mod picker;
 mod queue;
+mod releases;
 mod theme;
 mod tokens;
 mod transcripts;
@@ -43,6 +44,7 @@ use crate::engine::{Defaults, NewSession, NoteSaved, Roster};
 use crate::keys::Keymap;
 use crate::note::Whose;
 use crate::settings::Reloaded;
+use crate::update;
 use app::{App, Mode};
 use list::{Entry, EntryKey, Group};
 use op::Op;
@@ -85,11 +87,109 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     for notice in roster.take_notices() {
         app.fail(notice);
     }
+    say_if_updated(roster, &mut app);
+    app.set_known(roster.db.meta(update::KNOWN).ok().flatten());
+    let tried = (roster.db.meta(update::TRIED).ok().flatten()).and_then(|t| t.parse().ok());
+    let now = crate::util::now_ms();
+    if roster.config.update_check() && update::due(app.known.checked, tried.unwrap_or(0), now) {
+        roster.db.set_meta(update::TRIED, &now.to_string()).ok();
+        let (send, checked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || send.send(update::ask()));
+        app.checking = Some(checked);
+    }
     let mut terminal = ratatui::init();
     restore_only_on_the_main_threads_panic();
     let result = event_loop(&mut terminal, roster, &mut app);
     ratatui::restore();
     result
+}
+
+/// Says so on the first start of a newer release than the last that ran
+/// (`update::updated`), and keeps this one as the last.
+fn say_if_updated(roster: &Roster, app: &mut App) {
+    let running = update::Release::running();
+    let ran = roster.db.meta(update::RAN).ok().flatten();
+    let (updated, keep) = update::updated(ran.as_deref(), &running);
+    if keep {
+        roster.db.set_meta(update::RAN, &running.to_string()).ok();
+    }
+    if let Some(release) = updated {
+        app.notice(app.updated_said(&release));
+    }
+}
+
+/// Keeps what the asking as the TUI started learned, once it's come, for
+/// every roster; asking that failed says nothing, and a start an hour on
+/// asks again.
+fn releases_arrived(roster: &Roster, app: &mut App) {
+    let Some(checking) = &app.checking else {
+        return;
+    };
+    let published = match checking.try_recv() {
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Ok(Ok(published)) => Some(published),
+        Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+    };
+    app.checking = None;
+    let now = crate::util::now_ms();
+    if let Some(kept) = published.and_then(|p| update::keep(&roster.db, &p, now)) {
+        app.set_known(Some(kept));
+    }
+}
+
+/// Takes what the update on its thread said since (`releases::Updating`):
+/// what GitHub answered, kept for every roster; then what it came to. This
+/// TUI goes on as it was: restarting itself would cut short what you were
+/// at in it.
+fn update_arrived(roster: &Roster, app: &mut App) {
+    let Some(updating) = &app.updating else {
+        return;
+    };
+    let mut came = Vec::new();
+    let ended = loop {
+        match updating.try_recv() {
+            Ok(said) => came.push(said),
+            Err(std::sync::mpsc::TryRecvError::Empty) => break false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
+        }
+    };
+    for said in came {
+        match said {
+            releases::Updating::Asked(published) => {
+                let now = crate::util::now_ms();
+                if let Some(kept) = update::keep(&roster.db, &published, now) {
+                    app.set_known(Some(kept));
+                }
+            }
+            releases::Updating::Done(done) => {
+                app.updating = None;
+                app.say_meanwhile(None);
+                match done {
+                    Ok(releases::Updated::Installed(_)) => {
+                        app.releases = None;
+                        app.flash_lasting("Update installed · restart roster to use it");
+                    }
+                    Ok(releases::Updated::Newest) => {
+                        app.notice(format!("roster {} is the newest", env!("ROSTER_VERSION")))
+                    }
+                    // Its notes just came: read first, then `u` again.
+                    Ok(releases::Updated::Unread(release)) => {
+                        if let Some(view) = &mut app.releases {
+                            view.scroll = 0;
+                        }
+                        app.notice(format!(
+                            "roster {release} is out: its notes are here, u installs it"
+                        ));
+                    }
+                    Err(e) => app.fail_too(format!("{e:#}")),
+                }
+            }
+        }
+    }
+    if ended && app.updating.take().is_some() {
+        app.say_meanwhile(None);
+        app.fail_too("The update ended without saying how it went");
+    }
 }
 
 /// ratatui's panic hook gives the terminal back whichever thread panicked: a
@@ -230,6 +330,8 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             app.tokens.read(tokens::scan(roster.paths.db(), prices));
         }
         app.tokens.arrived();
+        releases_arrived(roster, app);
+        update_arrived(roster, app);
         if let Some(period) = period {
             app.tokens.sum(period, tokens::sum(roster.paths.db()));
         }
@@ -268,6 +370,7 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             || app.limits.asking()
             || app.tokens.reading()
             || app.tokens.summing()
+            || app.updating.is_some()
         {
             wait = wait.min(Duration::from_millis(200));
         }
@@ -432,6 +535,10 @@ fn reload(roster: &mut Roster, app: &mut App) {
     }
     if let Ok(names) = roster.db.model_names() {
         app.models.names = names;
+    }
+    // What another roster learned too (`roster update --check`).
+    if let Ok(known) = roster.db.meta(update::KNOWN) {
+        app.set_known(known);
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
     // What codex wrote of its limits since, which costs nothing to read.

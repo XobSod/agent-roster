@@ -2227,3 +2227,104 @@ fn the_queue_shows_a_row_per_prompt_one_whole_or_in_the_editor() {
     assert!(screen.contains(":wq save and close"), "{screen}");
     assert!(!screen.contains("mm pin"), "{screen}");
 }
+
+#[test]
+fn a_newer_release_known_shows_beside_the_version() {
+    let mut app = app();
+    let line = |app: &App, width| -> String {
+        footer_line(app, width, "0.1.0")
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    assert!(
+        line(&app, 120).ends_with("   v0.1.0 "),
+        "{}",
+        line(&app, 120)
+    );
+    app.known = crate::update::Known {
+        checked: 1,
+        newest: Some("0.2.0".into()),
+        releases: Vec::new(),
+    };
+    assert!(
+        line(&app, 120).ends_with("   v0.1.0 → v0.2.0 "),
+        "{}",
+        line(&app, 120)
+    );
+    // A checkout's build past it: by the release it's past.
+    let past = footer_line(&app, 120, "0.2.0+3.g7056428")
+        .iter()
+        .map(|s| s.content.to_string())
+        .collect::<String>();
+    assert!(past.ends_with("   v0.2.0+3.g7056428 "), "{past}");
+    // As drawn, this build's version beside it.
+    app.known.newest = Some("99.0.0".into());
+    let footer = render(&app, 160, 16).lines().last().unwrap().to_string();
+    let shown = format!("v{} → v99.0.0 ", env!("ROSTER_VERSION"));
+    assert!(footer.ends_with(&shown), "{footer}");
+    // A message in its place, as for the version alone.
+    app.flash("Started roster/api");
+    let footer = render(&app, 160, 16).lines().last().unwrap().to_string();
+    assert!(!footer.contains("v99.0.0"), "{footer}");
+}
+
+#[test]
+fn whats_new_shows_the_notes_of_each_release_since_this_one() {
+    let mut app = app();
+    let notes = |version: &str, text: &str| crate::update::Notes {
+        version: version.into(),
+        date: "2026-12-01".into(),
+        text: text.into(),
+    };
+    app.known = crate::update::Known {
+        checked: 1,
+        newest: Some("99.1.0".into()),
+        releases: vec![
+            notes(
+                "99.1.0",
+                "## Fixes\r\n- **Faster** start ([#12](https://example.invalid/12))",
+            ),
+            notes("99.0.0", "First of the 99s."),
+        ],
+    };
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    let screen = render(&app, 120, 30);
+    let at = |needle: &str| {
+        (screen.lines())
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle:?} in\n{screen}"))
+    };
+    assert!(screen.contains("╭ What's new "), "{screen}");
+    // Newest first, its notes as plain text under it.
+    assert!(at("roster 99.1.0 · 2026-12-01") < at("Fixes"));
+    assert!(at("Fixes") < at("• Faster start (#12)"));
+    assert!(at("• Faster start (#12)") < at("roster 99.0.0 · 2026-12-01"));
+    assert!(at("roster 99.0.0") < at("First of the 99s."));
+    let footer = screen.lines().last().unwrap();
+    assert!(
+        footer.starts_with(" j/k scroll   u update   Esc close"),
+        "{footer}"
+    );
+    // Too long for the window: where it is, and scrolled down to its end.
+    let screen = render(&app, 120, 10);
+    assert!(screen.contains(" 1–7 of 8 "), "{screen}");
+    app.on_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+    let screen = render(&app, 120, 10);
+    assert!(screen.contains(" 2–8 of 8 "), "{screen}");
+    assert!(!screen.contains("roster 99.1.0"), "{screen}");
+    // Nothing newer known, nor its own notes: the newest, if a check said.
+    app.known = crate::update::Known {
+        checked: 1,
+        ..Default::default()
+    };
+    let screen = render(&app, 120, 30);
+    let newest = format!("roster {} is the newest", env!("ROSTER_VERSION"));
+    assert!(screen.contains(&newest), "{screen}");
+    // No check that worked yet: not said to be.
+    app.known = Default::default();
+    let screen = render(&app, 120, 30);
+    assert!(!screen.contains(&newest), "{screen}");
+    assert!(screen.contains("Nothing heard yet"), "{screen}");
+}

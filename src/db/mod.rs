@@ -233,6 +233,17 @@ impl Db {
     }
 }
 
+/// A value roster keeps for itself (`Db::meta`), read from the database at
+/// `path` without opening it as roster does (making it, migrating it,
+/// waiting for a writer): none if it can't be read at once.
+pub fn peek_meta(path: &Path, key: &str) -> Option<String> {
+    let conn =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(Duration::from_millis(100)).ok()?;
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .ok()
+}
+
 fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)

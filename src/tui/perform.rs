@@ -382,6 +382,17 @@ pub(super) fn perform(
         Op::KillOrphans => roster
             .kill_orphans()
             .map(|n| format!("Killed {n} orphaned tmux session(s)")),
+        // On a thread, the TUI going on meanwhile (`update_arrived`).
+        Op::Update => match (&app.updating, crate::update::can_update()) {
+            (Some(_), _) => Ok("roster is being updated already".into()),
+            (None, Err(e)) => Err(e),
+            (None, Ok(exe)) => {
+                let shown = app.known.newer(&crate::update::Release::running());
+                app.say_meanwhile(Some(updating_to(shown.as_ref())));
+                app.updating = Some(releases::update_in_background(exe, shown));
+                Ok(String::new())
+            }
+        },
         Op::RemoveProject(name, how) => roster.remove_project(&name, how).map(|(_, said)| {
             [format!("Removed project {name}")]
                 .into_iter()
@@ -422,6 +433,15 @@ pub(super) fn perform(
         Err(e) => app.fail(format!("{e:#}")),
     }
     Ok(())
+}
+
+/// What the footer says while roster is updated: to which release; with
+/// none known, it's asking.
+fn updating_to(release: Option<&crate::update::Release>) -> String {
+    match release {
+        Some(release) => format!("Updating to v{release}…"),
+        None => "Asking what's published…".into(),
+    }
 }
 
 /// Shows a message while a slow operation runs.

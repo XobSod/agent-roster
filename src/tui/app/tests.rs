@@ -1763,3 +1763,54 @@ fn queued_in_the_filter_finds_the_sessions_with_prompts_queued() {
     keys(&mut app, "s4 queued");
     assert!(sessions(&app).is_empty());
 }
+
+#[test]
+fn whats_new_opens_from_the_view_menu_and_u_updates_in_it() {
+    let mut app = app();
+    assert_eq!(keys(&mut app, "vr"), None);
+    assert!(app.releases.is_some());
+    // Keys go to it: the list doesn't move, nor menus open.
+    let selected = app.selected;
+    assert_eq!(keys(&mut app, "jks"), None);
+    assert_eq!((app.selected, app.menu), (selected, None));
+    let hints: Vec<String> = app.hints().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(hints, ["j/k", "u", "Esc"]);
+    assert_eq!(keys(&mut app, "u"), Some(Op::Update));
+    assert_eq!(keys(&mut app, "q"), None);
+    assert!(app.releases.is_none());
+    // Back in the list, `u` is nothing.
+    assert_eq!(keys(&mut app, "u"), None);
+}
+
+#[test]
+fn an_update_installed_is_said_till_roster_restarts() {
+    let mut app = app();
+    app.flash_lasting("Update installed · restart roster to use it");
+    let said = |app: &App| app.message().map(|m| m.text.clone());
+    assert_eq!(
+        said(&app).as_deref(),
+        Some("Update installed · restart roster to use it")
+    );
+    // Another message over it, then it's back.
+    app.fail("Can't start alpha/s1");
+    assert_eq!(said(&app).as_deref(), Some("Can't start alpha/s1"));
+    keys(&mut app, "j");
+    assert_eq!(
+        said(&app).as_deref(),
+        Some("Update installed · restart roster to use it")
+    );
+}
+
+#[test]
+fn a_first_start_after_an_update_says_where_whats_new_is() {
+    let mut app = app();
+    let release = crate::update::Release::parse("0.2.0").unwrap();
+    assert_eq!(
+        app.updated_said(&release),
+        "Updated to v0.2.0 · v r what's new"
+    );
+    let mut keys = Keys::default();
+    keys.view.releases = crate::config::KeyList(vec![]);
+    app.keymap = Keymap::new(&keys).unwrap();
+    assert_eq!(app.updated_said(&release), "Updated to v0.2.0");
+}

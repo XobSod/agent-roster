@@ -1493,3 +1493,18 @@ fn redraw_graces_are_shared_till_they_are_over() {
     assert_eq!(db.meta("resized:a").unwrap(), None);
     assert_eq!(db.meta("resized:b").unwrap().as_deref(), Some("5000"));
 }
+
+#[test]
+fn a_meta_value_is_peeked_at_without_making_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("roster.db");
+    assert_eq!(peek_meta(&path, "update:known"), None);
+    assert!(!path.exists());
+    let db = Db::open(&path).unwrap();
+    assert_eq!(peek_meta(&path, "update:known"), None);
+    db.set_meta("update:known", "{}").unwrap();
+    // Read while it's open, and after.
+    assert_eq!(peek_meta(&path, "update:known").as_deref(), Some("{}"));
+    drop(db);
+    assert_eq!(peek_meta(&path, "update:known").as_deref(), Some("{}"));
+}

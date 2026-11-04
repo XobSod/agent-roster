@@ -236,6 +236,35 @@ pub(super) fn draw_queue(f: &mut Frame, app: &App, view: &QueueView, area: Rect)
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// What's new (`v r`): the notes of the releases since this one, as far as
+/// they're scrolled, with where that is when they don't all fit.
+pub(super) fn draw_releases(f: &mut Frame, app: &App, view: &ReleasesView, area: Rect) {
+    let width = area.width.saturating_sub(4).min(90);
+    let running = crate::update::Release::running();
+    let text_width = width.saturating_sub(4) as usize;
+    let lines = releases::lines(&app.known, &running, env!("ROSTER_VERSION"), text_width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let rows = height.saturating_sub(2) as usize;
+    view.scroll_max.set(lines.len().saturating_sub(rows));
+    view.page.set(rows);
+    let scroll = view.scroll.min(view.scroll_max.get());
+    let place = match lines.len() > rows {
+        true => format!("{}–{} of {}", scroll + 1, scroll + rows, lines.len()),
+        false => String::new(),
+    };
+    let inner = popup(f, centered(area, width, height), "What's new", &place);
+    let shown: Vec<Line> = (lines.into_iter().skip(scroll).take(rows))
+        .map(|(heading, text)| match heading {
+            true => Line::styled(
+                format!(" {text}"),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            false => Line::from(format!(" {text}")),
+        })
+        .collect();
+    f.render_widget(Paragraph::new(shown), inner);
+}
+
 pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
     let width = area.width.saturating_sub(4).min(76);
     match dialog {

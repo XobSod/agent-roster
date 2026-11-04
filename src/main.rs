@@ -24,6 +24,7 @@ mod title;
 mod tmux;
 mod tokens;
 mod tui;
+mod update;
 mod usage;
 mod util;
 // build.rs's, here for its tests.
@@ -73,7 +74,20 @@ fn main() -> ExitCode {
             .collect();
         crate::agent::trust_and_run(&args);
     }
-    match run(Cli::parse()) {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion => {
+            e.print().ok();
+            // On stderr: what reads the version from the output (ci/dist.sh,
+            // say) gets the version alone.
+            if let Some(newer) = update::newer_known() {
+                eprintln!("roster {newer} is out: roster update");
+            }
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => e.exit(),
+    };
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("roster: {e:#}");
@@ -83,6 +97,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // Before roster opens: an update goes ahead whatever its config or its
+    // database (a newer roster's, say).
+    if let Some(Cmd::Update { check }) = cli.command {
+        return cmd::update::update(check);
+    }
     // Roster's own, in the background or under the list's screen: what
     // they'd say goes nowhere.
     let helper = matches!(
@@ -223,6 +242,8 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.
         Cmd::Report { .. } | Cmd::Trust { .. } => {}
+        // Before roster opens (`run`).
+        Cmd::Update { .. } => {}
         Cmd::Deliver { session } => cmd::sessions::deliver(r, session)?,
         Cmd::DeliverQueued => r.deliver_queued()?,
         Cmd::Send {

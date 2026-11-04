@@ -15,6 +15,9 @@ impl App {
         if let Some(view) = &self.queue {
             return view.hints();
         }
+        if let Some(view) = &self.releases {
+            return view.hints();
+        }
         if self.typing.is_some() {
             return [("Enter", "keep"), ("Esc", "cancel"), ("↑↓ C-p C-n", "move")]
                 .map(|(key, what)| (key.to_string(), what))

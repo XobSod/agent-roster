@@ -35,6 +35,7 @@ use super::form::{Form, Kind};
 use super::list::{Entry, Group};
 use super::picker::Picker;
 use super::queue::QueueView;
+use super::releases::{self, ReleasesView};
 use super::theme::{
     self, ACCENT, ATTACHED_BG, ERROR, FAINT, INPUT, MUTED, PACE_EVEN, PACE_FAST, PACE_SLOW,
     SELECTED_BG, UNREAD, WORKING,
@@ -80,6 +81,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if let Some(view) = &app.queue {
         draw_queue(f, app, view, main);
+    }
+    if let Some(view) = &app.releases {
+        draw_releases(f, app, view, main);
     }
     if let Some(dialog) = &app.dialog {
         draw_dialog(f, dialog, main);
@@ -372,8 +376,9 @@ fn header(app: &App, width: usize, now: i64) -> Vec<Span<'static>> {
 
 /// The key hints, and the latest message flush right, so the hints stay in
 /// sight. Where the two would meet, the last hints give way, whole. Without a
-/// message, roster's version is in its place, faint, and goes first where
-/// there's no room for it beside the hints.
+/// message, roster's version is in its place, faint, with a newer release
+/// if one is known, and goes first where there's no room for it beside the
+/// hints.
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let line = footer_line(app, area.width as usize, env!("ROSTER_VERSION"));
     f.render_widget(Paragraph::new(Line::from(line)), area);
@@ -415,7 +420,11 @@ fn footer_line(app: &App, width: usize, version: &str) -> Vec<Span<'static>> {
         hints.clear();
     }
     let right = if message.is_empty() {
-        let version = format!("v{version} ");
+        let newer = crate::update::Release::parse(version).and_then(|r| app.known.newer(&r));
+        let version = match newer {
+            Some(newer) => format!("v{version} → v{newer} "),
+            None => format!("v{version} "),
+        };
         if all && used + 3 + version.width() <= width {
             vec![Span::styled(version, Style::new().fg(FAINT))]
         } else {

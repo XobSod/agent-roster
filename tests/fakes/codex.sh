@@ -49,8 +49,9 @@ case "$sub" in
 esac
 started=no
 # What it was run with, an argument a line, as the screen may wrap it:
-# written before it says it's up.
-mkdir -p "$CODEX_HOME" && printf '%s\n' "$@" > "$CODEX_HOME/argv"
+# written before it says it's up, there whole or not at all.
+mkdir -p "$CODEX_HOME" && printf '%s\n' "$@" > "$CODEX_HOME/argv.tmp" &&
+  mv "$CODEX_HOME/argv.tmp" "$CODEX_HOME/argv"
 echo "fake codex: $*"
 report() { printf '%s' "$2" | "$ROSTER_EXE" report "$1"; }
 turn() {

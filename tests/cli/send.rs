@@ -412,7 +412,10 @@ fn codex_started_for_a_prompt_sent_is_given_it_on_its_command_line() {
     t.ok(&["stop", "--yes", "c"]);
     fs::remove_file(t.codex_dir().join("argv")).unwrap();
     let term = Terminal::start(&t, &format!("{} attach c", t.shell_command()), (100, 30));
-    term.wait_for("codex", "fake codex:");
+    // Its arguments, roster's path in each hook, can fill the screen: what
+    // it was run with is in its argv file, written before it says it's up.
+    term.wait_for("attached", "C-q back");
+    t.wait_for("codex started", |t| t.codex_dir().join("argv").exists());
     let argv = fs::read_to_string(t.codex_dir().join("argv")).unwrap();
     assert!(
         argv.contains("resume\n") && !argv.contains("--\n"),

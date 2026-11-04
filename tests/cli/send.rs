@@ -497,7 +497,7 @@ fn a_prompt_sent_waits_for_a_turn_a_question_and_you_at_its_agent() {
 }
 
 #[test]
-fn a_turn_another_session_began_ends_read_and_yours_as_they_were() {
+fn a_turn_another_session_began_ends_read_and_yours_unread() {
     let Some(t) = TestEnv::new("sendread") else {
         return;
     };
@@ -529,7 +529,7 @@ fn a_turn_another_session_began_ends_read_and_yours_as_they_were() {
     t.report(&c, "prompt", &hook("from the lead"));
     t.report(&c, "idle", &hook(""));
     assert!(!unread(&t));
-    // Yours sent so are as they were: unread.
+    // Yours sent so end unread.
     assert!(
         t.ok(&["send", "c", "from you"])
             .contains("Typed into demo/c")

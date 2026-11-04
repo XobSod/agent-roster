@@ -266,13 +266,34 @@ project is removed.
 An agent gives another a task by sending it a prompt, `roster send api "…"` ([the
 CLI](#the-cli)), and the other answers the same way; you can send from a shell too. What's
 sent waits in the session's queue and is typed into its agent once it's idle and no
-terminal is attached, one at a time. A card or row with prompts queued says how many,
+terminal is attached, one at a time. Codex, ready only after a turn of its own, is given
+the first on its command line as it starts; started without one, it takes none till
+you've typed a turn into it. A card or row with prompts queued says how many,
 `⧗2`, and the preview, above the agent's screen, what they are and who sent the first:
 `⧗ 2 queued, from demo/lead: "rerun the tests" · "then the linter"` (`from demo/lead and
 others` when another sent some too). A stopped session keeps its queue, waiting for
 someone to start it. How many such sessions there are shows at the end of the summary at
 the top, `2 need input · ⧗1`, and on the heading of the shelf or group holding them, open
 or folded, before its fold mark: `Stopped (3) ──── ⧗1 ⌄`.
+
+Roster adds nothing to what's sent: who's asking, what's wanted, how to answer and where
+are the prompt's to say. Inside an agent, `roster info` with no session says the agent's
+own address, for its brief; an agent whose `PATH` has no `roster` runs `"$ROSTER_EXE"
+send`. A brief that works, sent by a lead to a worker:
+
+```text
+I'm demo/lead. Run the tests in tests/api and fix what fails. When you're done,
+answer me with: roster send demo/lead "w1: passed|failed, <what you changed, one line>"
+Don't answer what I send back to that.
+```
+
+The last line keeps two agents from answering each other's answers. An agent asks before
+running `roster send`, as it asks before running anything, and letting it send without
+asking is that agent's own setting: in Claude Code, a rule like `Bash(roster send:*)` in
+`permissions.allow` of the project's `.claude/settings.json` (it matches the command as
+the agent runs it, so give the agent `roster` on its `PATH`). Codex's sandbox keeps its
+commands from writing roster's database, so it may ask to run `roster send` outside it,
+as for `roster note`.
 
 `s q` opens the queue, a row per prompt with who sent it and when: `j`/`k` move, `Enter`
 shows the prompt whole (`j`/`k` scroll it, `Esc` goes back), `e` edits it in the note
@@ -283,6 +304,15 @@ so; so does an edit of a prompt changed meanwhile (`roster send --edit`), which 
 doesn't undo. What such an edit had is kept in a file, and the message says where.
 A prompt another session sent says which, `from demo/lead`, among a stopped or
 archived session's last prompts and as a session's last prompt in a heading's preview.
+
+A turn another session's prompt started ends read: its answer went back by sending, so
+what's marked unread is what's for you. A question asked in it reaches you as any does,
+and a turn you typed a prompt of your own into is yours, as is one you sent yourself from
+a shell. (pi, which doesn't say which prompt it took, and an agent followed by its screen
+count the turn after the prompt went in.) Nothing is typed into an agent while a
+terminal is attached to it, but a line you typed there and left unsent gets what's
+queued after it once you've gone, as roster sees the agent's screen, not its input: send
+or clear it before you leave an agent others send to.
 
 ### Processes
 
@@ -366,8 +396,8 @@ roster note api --restore 2             # bring one back; the note it replaces i
 roster note --project myproj --append "- [ ] retry on 429"   # a project's note; the same options
 roster note api --project               # api's project's
 roster note --append "- [x] tests pass" # inside an agent: its own session's note; --project alone, its project's
-roster send api "rerun the tests"       # typed in once it's ready, else queued behind the others; --start a stopped one
-roster send api --list                  # what's queued for it, and who sent each; --edit 2, --drop 2, --drop (all)
+roster send api "rerun the tests"       # typed in once it's ready, else queued ("-": from stdin); --start a stopped one
+roster send api --list                  # what's queued for it, and who sent each; --edit 2, --drop 2, --drop (all; asks, --yes doesn't)
 roster info                             # inside an agent: its own session, the address others send to
 roster new myproj --worktree --prompt "fix the flaky test"   # in a git worktree of its own; --worktree fix --base main
 roster new myproj --in api              # in api's worktree, beside it (or a directory in one)
@@ -378,7 +408,7 @@ roster project edit myproj --effort default
 roster ls                               # ● marks sessions with a turn you haven't seen, ✎ those with a note
 roster ls --project myproj --sort attention   # like the TUI's shelves
 roster ls --resources                   # CPU and memory of each agent and all it started (builds, tests, …)
-roster ls auth rework                   # only those matching (fuzzy, like / in the TUI)
+roster ls auth rework                   # only those matching (fuzzy, like / in the TUI; queued, !queued too)
 roster show api                         # print its current screen
 roster attach api                       # going in and out with Ctrl+Q marks it read
 roster stop api && roster start api     # start resumes the conversation

@@ -144,7 +144,8 @@ pub(super) enum Migration {
 
 pub(super) use Migration::{Code, Sql};
 
-/// What each schema version adds to the one before.
+/// What each schema version adds to the one before; a version with none
+/// here adds nothing.
 pub(super) const MIGRATIONS: &[(i64, Migration)] = &[
     (
         2,

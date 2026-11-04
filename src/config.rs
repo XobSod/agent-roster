@@ -1067,8 +1067,9 @@ mod tests {
 
     #[test]
     fn a_default_key_gives_way_to_one_the_config_sets() {
-        // Set for another action before archive took "a", adopt "A", kill
-        // "X" or queue "q": theirs, and said.
+        // A key archive ("a"), adopt ("A"), kill ("X") or queue ("q") takes by
+        // default, set in the config for another action: that action's, and
+        // said.
         for (text, by, yields) in [
             ("toggle_read = \"a\"", "toggle_read", "archive"),
             ("adopt = \"a\"", "adopt", "archive"),

@@ -5,12 +5,17 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input;
 use crate::update::notes::{heading, plain};
 use crate::update::{self, Known, Published, Release};
+
+/// How long after opening on its own the window lets go the keys that close
+/// it or update: what was typed then was meant for the list it came over.
+const HELD: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub struct ReleasesView {
@@ -19,6 +24,8 @@ pub struct ReleasesView {
     pub scroll: usize,
     pub scroll_max: Cell<usize>,
     pub page: Cell<usize>,
+    /// Opened on its own: till when it's held open (`HELD`).
+    pub held_till: Option<Instant>,
 }
 
 /// What a key asks of the app.
@@ -30,15 +37,35 @@ pub enum Asked {
 }
 
 impl ReleasesView {
+    /// Opened on its own, at `now`.
+    pub fn on_its_own(now: Instant) -> ReleasesView {
+        ReleasesView {
+            held_till: Some(now + HELD),
+            ..Default::default()
+        }
+    }
+
     pub fn on_key(&mut self, e: KeyEvent) -> Asked {
+        self.on_key_at(e, Instant::now())
+    }
+
+    /// `on_key` at `now`.
+    fn on_key_at(&mut self, e: KeyEvent, now: Instant) -> Asked {
         let ctrl = e.modifiers.contains(KeyModifiers::CONTROL);
+        let asked = match e.code {
+            KeyCode::Char('u') if !ctrl => Asked::Update,
+            KeyCode::Char('q') => Asked::Close,
+            _ if input::cancels(e) => Asked::Close,
+            _ => Asked::None,
+        };
+        if asked != Asked::None {
+            let held = self.held_till.is_some_and(|till| now < till);
+            return if held { Asked::None } else { asked };
+        }
         let (max, page) = (self.scroll_max.get(), self.page.get().max(1));
         // Drawn shorter since, it's no further than it can be.
         let at = self.scroll.min(max);
         let to = match (e.code, input::vertical(e)) {
-            (KeyCode::Char('u'), _) if !ctrl => return Asked::Update,
-            (KeyCode::Char('q'), _) => return Asked::Close,
-            _ if input::cancels(e) => return Asked::Close,
             (_, Some(true)) | (KeyCode::Char('j'), _) => at + 1,
             (_, Some(false)) | (KeyCode::Char('k'), _) => at.saturating_sub(1),
             (KeyCode::PageDown | KeyCode::Char(' '), _) => at + page,
@@ -61,6 +88,14 @@ impl ReleasesView {
             .map(|(key, what)| (key.to_string(), what))
             .into()
     }
+}
+
+/// Whether the window opens on its own: the newest release `known` is newer
+/// than `running`, and than `shown`, the newest whose notes were shown
+/// (`update::SHOWN`); and the TUI is in its plain list state (`plain`), so
+/// it doesn't come over what you're in the middle of.
+pub fn opens(known: &Known, running: &Release, shown: Option<&Release>, plain: bool) -> bool {
+    plain && (known.newer(running)).is_some_and(|newer| shown.is_none_or(|shown| newer > *shown))
 }
 
 /// What an update on its thread says (`update_in_background`).
@@ -251,6 +286,24 @@ mod tests {
     }
 
     #[test]
+    fn whats_new_opens_on_its_own_for_a_release_not_shown_yet_and_never_mid_task() {
+        let release = |v: &str| Release::parse(v).unwrap();
+        let running = release("0.2.0+3.g7056428");
+        let known = known(&["0.3.0", "0.2.0"]);
+        // Never shown: it opens, in the plain list only.
+        assert!(opens(&known, &running, None, true));
+        assert!(!opens(&known, &running, None, false));
+        // Shown, or one newer than it: not again.
+        assert!(!opens(&known, &running, Some(&release("0.3.0")), true));
+        assert!(!opens(&known, &running, Some(&release("0.4.0")), true));
+        // An older one shown: this one's new.
+        assert!(opens(&known, &running, Some(&release("0.2.1")), true));
+        // None newer than this roster, or nothing known.
+        assert!(!opens(&known, &release("0.3.0"), None, true));
+        assert!(!opens(&Known::default(), &running, None, true));
+    }
+
+    #[test]
     fn keys_scroll_close_and_update() {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut view = ReleasesView::default();
@@ -272,5 +325,28 @@ mod tests {
         assert_eq!(view.on_key(key(KeyCode::Char('u'))), Asked::Update);
         assert_eq!(view.on_key(key(KeyCode::Esc)), Asked::Close);
         assert_eq!(view.on_key(key(KeyCode::Char('q'))), Asked::Close);
+    }
+
+    #[test]
+    fn opened_on_its_own_a_key_meant_for_the_list_neither_closes_it_nor_updates() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let opened = Instant::now();
+        let mut view = ReleasesView::on_its_own(opened);
+        view.scroll_max.set(30);
+        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('u')] {
+            assert_eq!(view.on_key_at(key(code), opened), Asked::None, "{code:?}");
+        }
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(view.on_key_at(ctrl_c, opened), Asked::None);
+        // Scrolling, as ever.
+        view.on_key_at(key(KeyCode::Char('j')), opened);
+        assert_eq!(view.scroll, 1);
+        // Held no more.
+        let later = opened + HELD;
+        assert_eq!(view.on_key_at(key(KeyCode::Char('q')), later), Asked::Close);
+        assert_eq!(
+            view.on_key_at(key(KeyCode::Char('u')), later),
+            Asked::Update
+        );
     }
 }

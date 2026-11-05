@@ -25,7 +25,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Where updating asks for releases, unless a test serves them: a port
 /// nothing listens on, so no test asks GitHub (a TUI asks as it starts).
-const NO_RELEASES: &str = "http://127.0.0.1:9";
+pub const NO_RELEASES: &str = "http://127.0.0.1:9";
 
 /// What would send roster's asking through a proxy (`update`), whose
 /// answer for a port here isn't the test's.

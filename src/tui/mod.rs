@@ -89,9 +89,11 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     }
     say_if_updated(roster, &mut app);
     app.set_known(roster.db.meta(update::KNOWN).ok().flatten());
+    app.set_releases_shown(roster.db.meta(update::SHOWN).ok().flatten().as_deref());
+    app.update_check = roster.config.update_check();
     let tried = (roster.db.meta(update::TRIED).ok().flatten()).and_then(|t| t.parse().ok());
     let now = crate::util::now_ms();
-    if roster.config.update_check() && update::due(app.known.checked, tried.unwrap_or(0), now) {
+    if app.update_check && update::due(app.known.checked, tried.unwrap_or(0), now) {
         roster.db.set_meta(update::TRIED, &now.to_string()).ok();
         let (send, checked) = std::sync::mpsc::channel();
         std::thread::spawn(move || send.send(update::ask()));
@@ -272,6 +274,7 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.order = roster.config.order.clone();
     app.notes = roster.config.notes.clone();
     app.account_limits = roster.config.account_limits();
+    app.update_check = roster.config.update_check();
     app.sidebar_usage = roster.config.sidebar_usage();
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
@@ -332,6 +335,12 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
         app.tokens.arrived();
         releases_arrived(roster, app);
         update_arrived(roster, app);
+        // Not kept (the database busy), they open again at the next start:
+        // read twice, nothing's lost.
+        if let Some(shown) = app.take_shown() {
+            update::keep_shown(&roster.db, &shown).ok();
+        }
+        app.open_unread_releases();
         if let Some(period) = period {
             app.tokens.sum(period, tokens::sum(roster.paths.db()));
         }
@@ -536,9 +545,13 @@ fn reload(roster: &mut Roster, app: &mut App) {
     if let Ok(names) = roster.db.model_names() {
         app.models.names = names;
     }
-    // What another roster learned too (`roster update --check`).
+    // What another roster learned too (`roster update --check`), and the
+    // notes it printed.
     if let Ok(known) = roster.db.meta(update::KNOWN) {
         app.set_known(known);
+    }
+    if let Ok(shown) = roster.db.meta(update::SHOWN) {
+        app.set_releases_shown(shown.as_deref());
     }
     app.chat_project = roster.chat_project_id().ok().flatten();
     // What codex wrote of its limits since, which costs nothing to read.

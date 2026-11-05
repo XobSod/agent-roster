@@ -28,6 +28,10 @@ pub const RAN: &str = "update:ran";
 /// the meta table.
 pub const TRIED: &str = "update:tried";
 
+/// The newest release whose notes the TUI showed, closed since, in the meta
+/// table: they open on their own only for a newer one.
+pub const SHOWN: &str = "update:shown";
+
 /// The TUI asks at most this often, and after asking that failed, this
 /// long later.
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -245,6 +249,16 @@ pub fn keep(db: &Db, published: &[Published], now: i64) -> Option<String> {
     Some(json)
 }
 
+/// Keeps in `db` that the notes of `newest` and those before it were shown
+/// (`SHOWN`), in the TUI or printed, unless a newer one's were.
+pub fn keep_shown(db: &Db, newest: &Release) -> Result<()> {
+    let kept = db.meta(SHOWN)?.as_deref().and_then(Release::parse);
+    if kept.as_ref() < Some(newest) {
+        db.set_meta(SHOWN, &newest.to_string())?;
+    }
+    Ok(())
+}
+
 /// The release newer than this build that the database knows of, read
 /// without changing it, for `--version` to say; none if there's none, or
 /// the database can't be read at once.
@@ -352,6 +366,22 @@ mod tests {
         assert!(!due(0, tried, now));
         // Asked "tomorrow", by a clock put back since.
         assert!(due(now + DAY_MS, now + DAY_MS, now));
+    }
+
+    #[test]
+    fn notes_shown_are_kept_as_the_newest_shown() {
+        let db = Db::open_in_memory().unwrap();
+        let kept = || db.meta(SHOWN).unwrap();
+        keep_shown(&db, &release("0.3.0")).unwrap();
+        assert_eq!(kept().as_deref(), Some("0.3.0"));
+        // An older roster's, shown since: the newer stays.
+        keep_shown(&db, &release("0.2.0")).unwrap();
+        assert_eq!(kept().as_deref(), Some("0.3.0"));
+        keep_shown(&db, &release("0.4.0")).unwrap();
+        assert_eq!(kept().as_deref(), Some("0.4.0"));
+        db.set_meta(SHOWN, "garbled").unwrap();
+        keep_shown(&db, &release("0.1.0")).unwrap();
+        assert_eq!(kept().as_deref(), Some("0.1.0"));
     }
 
     #[test]

@@ -33,7 +33,8 @@
 //!                                 # summary); "off"; default: a quarter of the
 //!                                 # machine's memory
 //! update_check = false            # default true: the TUI asks GitHub, once a day
-//!                                 # at most, whether a newer roster is out
+//!                                 # at most, whether a newer roster is out, and
+//!                                 # opens what's new once for each
 //!
 //! [order]                         # within each shelf: "oldest" or "newest" first
 //! needs_input = "oldest"          # the defaults: first come, first served,

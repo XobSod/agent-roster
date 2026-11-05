@@ -65,12 +65,15 @@ The TUI also asks on its own as it starts, in the background, once a day at most
 (an hour after asking that failed); `update_check = false` turns that off. A newer
 release then shows in its footer beside the version (`v0.1.0 → v0.2.0`), and
 `roster --version` says it on a second line, on stderr, so what reads the version
-from its output gets the version alone. GitHub is asked over HTTPS only, trusting
-the system's certificates, through the proxy named by the first that's set of
-`ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` (or their lowercase), except for the
-hosts in `NO_PROXY` (comma-separated, without spaces). A SOCKS proxy isn't
-supported: named there, it's passed by, whatever the others say, and GitHub is
-asked directly.
+from its output gets the version alone. The first time the TUI learns of one,
+what's new opens on its own as soon as you're in the plain session list, and once
+closed (or its notes printed by `roster update`), not again till a newer one is
+out; `update_check = false` stops it opening on its own. GitHub is asked over
+HTTPS only, trusting the system's certificates, through the proxy named by the
+first that's set of `ALL_PROXY`, `HTTPS_PROXY` and `HTTP_PROXY` (or their
+lowercase), except for the hosts in `NO_PROXY` (comma-separated, without spaces).
+A SOCKS proxy isn't supported: named there, it's passed by, whatever the others
+say, and GitHub is asked directly.
 
 Installing puts only the `roster` binary in place. What else roster needs it makes
 as it runs, in `~/.local/state/agent-roster/`: its database, its tmux config, and
@@ -512,8 +515,8 @@ All files are optional and live in `~/.config/agent-roster/`:
     `"512M"`, `"1.5GiB"`) or `"off"`; by default a quarter of the machine's memory (or of
     the container's, if it's given less).
   - `update_check`: `false`: the TUI never asks GitHub on its own whether a newer
-    roster is out (it does once a day at most, as it starts); `roster update` still
-    asks.
+    roster is out (it does once a day at most, as it starts), nor opens what's new on
+    its own; `roster update` still asks.
   - `[prices."<model>"]`: what a model's calls cost, in dollars per million tokens
     (`input`, `output`, `cache_read`, `cache_write`, the last two 0 unless set, and
     `long = { above = 272000, input = …, output = … }` for a call sending more than

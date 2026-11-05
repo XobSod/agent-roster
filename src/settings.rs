@@ -556,7 +556,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             bool_setting(
                 &["update_check"],
                 update_check.unwrap_or(true),
-                "the TUI asks GitHub, once a day at most as it starts, whether a newer roster is out (roster update asks anyway)",
+                "the TUI asks GitHub, once a day at most as it starts, whether a newer roster is out, and opens what's new once for each (roster update asks anyway)",
             ),
             bool_setting(
                 &["trust_project_folders"],

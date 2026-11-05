@@ -1814,3 +1814,141 @@ fn a_first_start_after_an_update_says_where_whats_new_is() {
     app.keymap = Keymap::new(&keys).unwrap();
     assert_eq!(app.updated_said(&release), "Updated to v0.2.0");
 }
+
+/// What's known of the releases as kept in the meta table (`update::KNOWN`),
+/// `newest` the newest published.
+fn known_text(newest: &str) -> Option<String> {
+    let known = crate::update::Known {
+        checked: 1,
+        newest: Some(newest.into()),
+        releases: Vec::new(),
+    };
+    Some(serde_json::to_string(&known).unwrap())
+}
+
+/// What's new opened on its own, as it is once it's no longer held open.
+fn held_no_more(app: &mut App) {
+    app.releases.as_mut().unwrap().held_till = None;
+}
+
+/// What's new opened on its own, held open however long a test takes.
+fn held_on(app: &mut App) {
+    if let Some(view) = &mut app.releases {
+        view.held_till = Some(Instant::now() + Duration::from_secs(3600));
+    }
+}
+
+#[test]
+fn whats_new_opens_on_its_own_once_for_each_newer_release() {
+    let release = |v: &str| crate::update::Release::parse(v);
+    // A start: what the meta table has, then the first check.
+    let started = |newest: &str, shown: Option<&str>| {
+        let mut app = app();
+        app.set_known(known_text(newest));
+        app.set_releases_shown(shown);
+        app.open_unread_releases();
+        held_on(&mut app);
+        app
+    };
+    // Nothing shown yet: it opens; a key meant for the list as it did
+    // doesn't close it.
+    let mut app = started("99.0.0", None);
+    assert!(app.releases.is_some());
+    keys(&mut app, "q");
+    assert!(app.releases.is_some());
+    assert_eq!(app.take_shown(), None);
+    // Closed, it's the newest shown, to keep once, and stays closed.
+    held_no_more(&mut app);
+    keys(&mut app, "q");
+    assert!(app.releases.is_none());
+    assert_eq!(app.take_shown(), release("99.0.0"));
+    assert_eq!(app.take_shown(), None);
+    app.open_unread_releases();
+    assert!(app.releases.is_none());
+    // Nor does it open at the next start; by hand, as ever.
+    let mut app = started("99.0.0", Some("99.0.0"));
+    assert!(app.releases.is_none());
+    keys(&mut app, "vr");
+    assert!(app.releases.is_some());
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.releases.is_none());
+    // A newer one learned: open again.
+    app.set_known(known_text("99.1.0"));
+    app.open_unread_releases();
+    assert!(app.releases.is_some());
+    // Learned and printed by `roster update --check` meanwhile, as the
+    // next reload reads them: not opened.
+    let mut app = started("98.0.0", Some("98.0.0"));
+    app.set_known(known_text("99.0.0"));
+    app.set_releases_shown(Some("99.0.0"));
+    app.open_unread_releases();
+    assert!(app.releases.is_none());
+    // One shown here and not kept stays shown, whatever's read.
+    app.set_known(known_text("99.1.0"));
+    keys(&mut app, "vrq");
+    app.set_releases_shown(Some("99.0.0"));
+    app.open_unread_releases();
+    assert!(app.releases.is_none());
+    assert_eq!(app.take_shown(), release("99.1.0"));
+    // Nothing newer than this roster: nothing to open, nor to keep.
+    let mut app = started("0.0.1", None);
+    assert!(app.releases.is_none());
+    keys(&mut app, "vrq");
+    assert_eq!(app.take_shown(), None);
+    // Kept as garbled: as if none were.
+    let app = started("99.0.0", Some("garbled"));
+    assert!(app.releases.is_some());
+    // The TUI not asking (`update_check = false`): never on its own.
+    let mut app = started("0.0.1", None);
+    app.update_check = false;
+    app.set_known(known_text("99.0.0"));
+    app.open_unread_releases();
+    assert!(app.releases.is_none());
+}
+
+#[test]
+fn updating_from_whats_new_keeps_what_it_showed_then() {
+    let release = |v: &str| crate::update::Release::parse(v);
+    let mut app = app();
+    app.set_known(known_text("99.0.0"));
+    keys(&mut app, "vr");
+    assert_eq!(keys(&mut app, "u"), Some(Op::Update));
+    assert_eq!(app.take_shown(), release("99.0.0"));
+    // The update's asking found a newer one: shown in the window still
+    // open, it's what Esc keeps.
+    app.set_known(known_text("99.1.0"));
+    assert!(app.releases.is_some());
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.releases.is_none());
+    assert_eq!(app.take_shown(), release("99.1.0"));
+    app.open_unread_releases();
+    assert!(app.releases.is_none());
+}
+
+#[test]
+fn whats_new_waits_till_youre_not_in_the_middle_of_something() {
+    let (esc, enter) = (key(KeyCode::Esc), key(KeyCode::Enter));
+    // What opens each, and what closes it.
+    let cases = [
+        ("a form", "sn", vec![esc]),
+        ("a question", "sX", vec![chr('n')]),
+        ("the note editor", "so", vec![chr(':'), chr('q'), enter]),
+        ("the filter being typed", "/al", vec![enter]),
+        ("a menu", "s", vec![esc]),
+        ("help", "?", vec![esc]),
+        ("a view", "vs", vec![esc]),
+    ];
+    for (what, open, close) in cases {
+        let mut app = app();
+        keys(&mut app, open);
+        app.set_known(known_text("99.0.0"));
+        app.open_unread_releases();
+        assert!(app.releases.is_none(), "{what}");
+        for e in close {
+            app.on_key(e);
+        }
+        assert!(app.plain_list(), "{what}");
+        app.open_unread_releases();
+        assert!(app.releases.is_some(), "{what}");
+    }
+}

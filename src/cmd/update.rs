@@ -28,11 +28,13 @@ pub fn update(check: bool) -> Result<()> {
         for said in notes {
             println!("\n{said}");
         }
+        notes_read(db.as_ref(), &newest.version);
         return Ok(());
     };
     for said in notes {
         println!("{said}\n");
     }
+    notes_read(db.as_ref(), &newest.version);
     update::install(newest, &exe)?;
     println!(
         "Installed roster {} at {}: what's running goes on as it was, and uses it from its next start",
@@ -40,4 +42,14 @@ pub fn update(check: bool) -> Result<()> {
         util::short_path(&exe)
     );
     Ok(())
+}
+
+/// Printed at a terminal, someone read them: a TUI doesn't open them on its
+/// own after. To a script or a file, no one may have, so it still does.
+fn notes_read(db: Option<&db::Db>, newest: &update::Release) {
+    if let Some(db) = db
+        && io::stdout().is_terminal()
+    {
+        update::keep_shown(db, newest).ok();
+    }
 }

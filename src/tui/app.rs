@@ -247,6 +247,13 @@ pub struct App {
     /// The notes of the releases since this one (`v r`), open; keys go to
     /// it.
     pub releases: Option<ReleasesView>,
+    /// Whether the TUI asks for releases on its own (`update_check`): if
+    /// not, what's new doesn't open on its own either.
+    pub update_check: bool,
+    /// The newest release whose notes were shown (`update::SHOWN`); and
+    /// one shown here since, for the run loop to keep.
+    releases_shown: Option<crate::update::Release>,
+    shown_to_keep: Option<crate::update::Release>,
     /// The published releases, being asked for as the TUI started.
     pub checking: Option<Receiver<anyhow::Result<Vec<crate::update::Published>>>>,
     /// An update (`u` in what's new), going on on its thread.
@@ -328,6 +335,9 @@ impl App {
             known: Default::default(),
             known_text: None,
             releases: None,
+            update_check: true,
+            releases_shown: None,
+            shown_to_keep: None,
             checking: None,
             updating: None,
             meanwhile: None,
@@ -836,6 +846,52 @@ impl App {
         }
     }
 
+    /// The newest release whose notes were shown, as the database has it
+    /// now (`update::SHOWN`), printed by `roster update` too; one shown
+    /// here since stays shown, kept or not.
+    pub fn set_releases_shown(&mut self, text: Option<&str>) {
+        let kept = text.and_then(crate::update::Release::parse);
+        self.releases_shown = self.releases_shown.take().max(kept);
+    }
+
+    /// The newest release whose notes were shown here since this was last
+    /// asked, to keep (`update::keep_shown`).
+    pub fn take_shown(&mut self) -> Option<crate::update::Release> {
+        self.shown_to_keep.take()
+    }
+
+    /// What's new, opened on its own for a release newer than any whose
+    /// notes were shown (`releases::opens`), unless the TUI doesn't ask.
+    pub fn open_unread_releases(&mut self) {
+        let running = crate::update::Release::running();
+        let shown = self.releases_shown.as_ref();
+        if self.update_check && releases::opens(&self.known, &running, shown, self.plain_list()) {
+            self.releases = Some(ReleasesView::on_its_own(Instant::now()));
+        }
+    }
+
+    /// What's new closed, or left to update: the newest release it showed
+    /// is shown, unless a newer one was.
+    fn releases_read(&mut self) {
+        let newer = self.known.newer(&crate::update::Release::running());
+        self.releases_shown = self.releases_shown.take().max(newer.clone());
+        self.shown_to_keep = self.shown_to_keep.take().max(newer);
+    }
+
+    /// In the session list with nothing over it nor being typed in it: no
+    /// dialog (a form, a question), note, queue, what's new, menu or help,
+    /// nor the filter being typed.
+    fn plain_list(&self) -> bool {
+        self.mode == Mode::Sessions
+            && self.dialog.is_none()
+            && self.note.is_none()
+            && self.queue.is_none()
+            && self.releases.is_none()
+            && self.menu.is_none()
+            && !self.help
+            && self.typing.is_none()
+    }
+
     /// What a roster updated to `release` says on its first start: so, and
     /// where its notes are.
     pub fn updated_said(&self, release: &crate::update::Release) -> String {
@@ -871,9 +927,13 @@ impl App {
                 releases::Asked::None => None,
                 releases::Asked::Close => {
                     self.releases = None;
+                    self.releases_read();
                     None
                 }
-                releases::Asked::Update => Some(Op::Update),
+                releases::Asked::Update => {
+                    self.releases_read();
+                    Some(Op::Update)
+                }
             };
         }
         if self.typing.is_some() {

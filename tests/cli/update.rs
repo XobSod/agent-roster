@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::Digest;
 
-use crate::common::TestEnv;
+use crate::common::{NO_RELEASES, Terminal, TestEnv};
 
 /// What the server answers, by path (and query).
 type Files = Arc<Mutex<HashMap<String, Vec<u8>>>>;
@@ -151,6 +151,16 @@ fn update_installs_the_newest_release_over_the_roster_that_runs() {
     let (stdout, stderr) = said(&out);
     assert_eq!(stdout, format!("roster {}\n", version(real)));
     assert_eq!(stderr, "roster 9.9.9 is out: roster update\n");
+    // Printed to a pipe, no one may have read them: they still open in the
+    // TUI on their own.
+    assert_eq!(shown(&t), None);
+    // At a terminal, read, as the TUI's would be: they don't.
+    let shell = t.shell_command().replace(NO_RELEASES, &url);
+    let command = format!("{shell} update --check; echo CHECKED; sleep 600");
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("the notes printed", "CHECKED");
+    drop(term);
+    assert_eq!(shown(&t).as_deref(), Some("9.9.9"));
 
     // A copy of roster, never the one the tests run.
     let bin = t.path("bin");
@@ -237,6 +247,8 @@ fn update_installs_the_newest_release_over_the_roster_that_runs() {
     assert_eq!(stdout, newest);
     let (_, stderr) = said(&t.run(&["--version"]));
     assert_eq!(stderr, "");
+    // The notes read before stay read.
+    assert_eq!(shown(&t).as_deref(), Some("9.9.9"));
 
     // GitHub not answering is said.
     files.lock().unwrap().clear();
@@ -247,6 +259,14 @@ fn update_installs_the_newest_release_over_the_roster_that_runs() {
         stderr.contains("can't ask GitHub for roster's releases"),
         "{stderr}"
     );
+}
+
+/// The newest release whose notes were shown, as the database has it.
+fn shown(t: &TestEnv) -> Option<String> {
+    let db = rusqlite::Connection::open(t.db()).unwrap();
+    let key = "update:shown";
+    db.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .ok()
 }
 
 /// The version the roster at `exe` says it is.

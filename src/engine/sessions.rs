@@ -1,10 +1,24 @@
 //! Sessions: finding them, creating, starting, stopping, archiving, restoring and deleting them.
 
 use super::*;
+use crate::model::Queued;
 
 /// The lock a start holds from claiming its session till it's saved as
 /// started.
 const STARTING_LOCK: &str = "starting.lock";
+
+/// What a start launches its agent with (`Roster::prepare_launch`), made
+/// before the start is claimed.
+struct Launching {
+    launch: agent::Launch,
+    /// The file the launch script gives its agent `launch.prompt` from.
+    prompt: Option<PathBuf>,
+    /// `launch.argv` as roster's shell runs it.
+    argv: Vec<String>,
+    env: Vec<(&'static str, String)>,
+    /// The first of its queue, given it on its command line.
+    queued_first: Option<Queued>,
+}
 
 impl Roster {
     pub fn sessions(&self, include_archived: bool) -> Result<Vec<Session>> {
@@ -234,8 +248,63 @@ impl Roster {
         if let StartCheck::Refused(why) = start_check(&s, Starting::Start) {
             bail!(why);
         }
-        // Its worktree gone: made again where it was (asked about first),
-        // and set up again, being new.
+        self.remake_worktree(&before, &mut s)?;
+        // One its agent no longer has (asked about first) begins anew on its
+        // id: nothing of it said yet, and no copy of the one it came from.
+        if agent::conversation_lost(&s) {
+            s.conversation_begun = false;
+            s.fork_from = None;
+        }
+        // Written, it has begun, whatever roster saw of it, so it's missed
+        // once its agent deletes it.
+        if (s.transcript_path.as_deref()).is_some_and(|p| Path::new(p).exists()) {
+            s.conversation_begun = true;
+        }
+        let launching = self.prepare_launch(&mut s, queued)?;
+        let name = s.tmux_name();
+        // One roster at a time from here till the start is saved, so one
+        // reading the session meanwhile doesn't claim it as well, stopped as
+        // it still reads, and start over the agent just started. Waited for
+        // (it's short), then claiming fails: it's started. Started in vain,
+        // or the roster killed, the next start finds nothing in its way.
+        let starting_lock = state_lock(&self.paths.state_dir, STARTING_LOCK)?;
+        // No panes, no server: tmux exits with its last session (unless the
+        // user's tmux.conf turns exit-empty off; checking then finds nothing).
+        let (has_pane, no_server) = {
+            let panes = self.panes()?;
+            (panes.contains_key(&name), panes.is_empty())
+        };
+        self.sweep_prompts(&s.id);
+        // Written once nothing but starting it is left to fail.
+        if let (Some(file), Some(text)) = (&launching.prompt, &launching.launch.prompt) {
+            self.write_prompt(file, text)?;
+        }
+        // Before its agent runs, so what it reports of this run comes after.
+        let now = now_ms();
+        self.claim(&before, &s, &launching, now)?;
+        self.spawn(&s, &name, has_pane, &launching)?;
+        // The session runs either way, so what this finds is only said.
+        if !has_pane
+            && no_server
+            && let Some(e) = self.tmux.check_config()
+        {
+            self.notices.push(config_notice(&e));
+        }
+        self.save_started(&before, s, &launching, now)?;
+        drop(starting_lock);
+        if let Some(q) = &launching.queued_first {
+            self.record_sent(id, q, now)?;
+        }
+        // What's left queued goes in as its agent is ready, whoever runs.
+        if !self.db.queue(id)?.is_empty() {
+            self.deliver_queued_in_background();
+        }
+        Ok(())
+    }
+
+    /// `s`'s worktree gone: made again where it was (asked about first),
+    /// and set up again, being new.
+    fn remake_worktree(&self, before: &Session, s: &mut Session) -> Result<()> {
         if let Some(w) = s.worktree.as_mut().filter(|w| !w.root.exists()) {
             if let Some(parent) = w.root.parent() {
                 fs::create_dir_all(parent)
@@ -260,26 +329,21 @@ impl Roster {
                 worktree: s.worktree.clone(),
                 ..before.clone()
             };
-            self.db.save_changes(&before, &remade)?;
+            self.db.save_changes(before, &remade)?;
         }
-        // One its agent no longer has (asked about first) begins anew on its
-        // id: nothing of it said yet, and no copy of the one it came from.
-        if agent::conversation_lost(&s) {
-            s.conversation_begun = false;
-            s.fork_from = None;
-        }
-        // Written, it has begun, whatever roster saw of it, so it's missed
-        // once its agent deletes it.
-        if (s.transcript_path.as_deref()).is_some_and(|p| Path::new(p).exists()) {
-            s.conversation_begun = true;
-        }
+        Ok(())
+    }
+
+    /// What `s`'s agent is launched with, nothing of it written yet; with
+    /// `queued`, `s` given the first of its queue, if its agent takes it.
+    fn prepare_launch(&self, s: &mut Session, queued: bool) -> Result<Launching> {
         // An agent given its first prompt on its command line (Codex, which
         // says it's ready only once it has had a turn), and none to give,
         // takes the first of its queue there; out of the queue as its agent
         // starts.
         let queued_first =
             match queued && agent::adapter(&s.agent).takes_prompt() && s.pending_prompt.is_none() {
-                true => self.db.queue(id)?.into_iter().next(),
+                true => self.db.queue(&s.id)?.into_iter().next(),
                 false => None,
             };
         if let Some(q) = &queued_first {
@@ -289,7 +353,7 @@ impl Roster {
             roster: &self.exe,
             state_dir: &self.paths.state_dir,
         };
-        let launch = agent::launch(&s, &self.config, &cx)?;
+        let launch = agent::launch(s, &self.config, &cx)?;
         // Too long, it stays, and isn't lost to a failing start.
         if let Some(text) = &launch.prompt {
             check_prompt_fits(&s.agent, text)?;
@@ -316,7 +380,7 @@ impl Roster {
             head.extend([s.agent.clone(), "--".into()]);
             command.splice(0..0, head);
         }
-        let argv = self.wrapped(&s, prompt.as_deref(), true, &command)?;
+        let argv = self.wrapped(s, prompt.as_deref(), true, &command)?;
         // What an agent's hooks need to report (`roster report`); for a
         // worktree's setup script, where its project's checkout is.
         let mut env = vec![
@@ -332,26 +396,18 @@ impl Roster {
                 project.origin.to_string_lossy().into_owned(),
             ));
         }
-        let name = s.tmux_name();
-        // One roster at a time from here till the start is saved, so one
-        // reading the session meanwhile doesn't claim it as well, stopped as
-        // it still reads, and start over the agent just started. Waited for
-        // (it's short), then claiming fails: it's started. Started in vain,
-        // or the roster killed, the next start finds nothing in its way.
-        let starting_lock = state_lock(&self.paths.state_dir, STARTING_LOCK)?;
-        // No panes, no server: tmux exits with its last session (unless the
-        // user's tmux.conf turns exit-empty off; checking then finds nothing).
-        let (has_pane, no_server) = {
-            let panes = self.panes()?;
-            (panes.contains_key(&name), panes.is_empty())
-        };
-        self.sweep_prompts(&s.id);
-        // Written once nothing but starting it is left to fail.
-        if let (Some(file), Some(text)) = (&prompt, &launch.prompt) {
-            self.write_prompt(file, text)?;
-        }
-        // Before its agent runs, so what it reports of this run comes after.
-        let now = now_ms();
+        Ok(Launching {
+            launch,
+            prompt,
+            argv,
+            env,
+            queued_first,
+        })
+    }
+
+    /// Claims `s`'s start at `now`, then the prompt queued first: either not
+    /// claimed, the prompt's file is removed.
+    fn claim(&self, before: &Session, s: &Session, launching: &Launching, now: i64) -> Result<()> {
         // Its start known before its agent runs: a roster seeing it run
         // meanwhile doesn't take it to be as ready for a prompt as before it
         // stopped. Kept though the start fails: the next one sets it again.
@@ -361,18 +417,18 @@ impl Roster {
             starting.baseline_at = Some(now + BOOT_GRACE_MS);
         }
         // Claimed so: of rosters starting it at once, one does.
-        if !self.db.claim_start(&before, &starting)? {
-            if let Some(file) = &prompt {
+        if !self.db.claim_start(before, &starting)? {
+            if let Some(file) = &launching.prompt {
                 let _ = fs::remove_file(file);
             }
             bail!("{} is being started already", s.label());
         }
         // Claimed as it goes in, so it's typed by no other roster, and it's
         // what's given it: changed or gone meanwhile, the start is off.
-        if let Some(q) = &queued_first
-            && !self.db.take_queued_as(id, q)?
+        if let Some(q) = &launching.queued_first
+            && !self.db.take_queued_as(&s.id, q)?
         {
-            if let Some(file) = &prompt {
+            if let Some(file) = &launching.prompt {
                 let _ = fs::remove_file(file);
             }
             bail!(
@@ -380,8 +436,15 @@ impl Roster {
                 s.label()
             );
         }
+        Ok(())
+    }
+
+    /// Runs `s`'s agent in its pane, `name`, if it `has_pane`, else in a new
+    /// tmux session.
+    fn spawn(&self, s: &Session, name: &str, has_pane: bool, launching: &Launching) -> Result<()> {
+        let (env, argv) = (&launching.env, &launching.argv);
         let started = if has_pane {
-            self.tmux.respawn(&name, &s.workdir, &env, &argv)
+            self.tmux.respawn(name, &s.workdir, env, argv)
         } else {
             let (w, h) = util::terminal_size().unwrap_or(DEFAULT_SIZE);
             // A row less for the status line, so attaching doesn't resize it;
@@ -391,34 +454,38 @@ impl Roster {
             if always {
                 size = self.preview_size().unwrap_or(size);
             }
-            let started = self.tmux.new_session(&name, &s.workdir, size, &env, &argv);
+            let started = self.tmux.new_session(name, &s.workdir, size, env, argv);
             // Kept so as an attach comes; if not, the TUI fits it again.
             if always && started.is_ok() {
-                self.tmux.resize_fixed(&name, size).ok();
+                self.tmux.resize_fixed(name, size).ok();
             }
             started
         };
         // Not started: no script to read the prompt's file and remove it.
         if let Err(e) = started {
-            if let Some(file) = &prompt {
+            if let Some(file) = &launching.prompt {
                 let _ = fs::remove_file(file);
             }
-            if let Some(q) = &queued_first
-                && let Err(lost) = self.db.put_back_queued(id, q)
+            if let Some(q) = &launching.queued_first
+                && let Err(lost) = self.db.put_back_queued(&s.id, q)
             {
                 return Err(e.context(format!("and the prompt queued first is lost: {lost:#}")));
             }
             return Err(e);
         }
-        // The session runs either way, so what this finds is only said.
-        if !has_pane
-            && no_server
-            && let Some(e) = self.tmux.check_config()
-        {
-            self.notices.push(config_notice(&e));
-        }
-        if launch.conversation_id.is_some() {
-            s.conversation_id = launch.conversation_id;
+        Ok(())
+    }
+
+    /// Saves `s` as started at `now`, and what it runs with.
+    fn save_started(
+        &self,
+        before: &Session,
+        mut s: Session,
+        launching: &Launching,
+        now: i64,
+    ) -> Result<()> {
+        if launching.launch.conversation_id.is_some() {
+            s.conversation_id = launching.launch.conversation_id.clone();
         }
         // What it runs with now, until its agent says: what this start asked
         // for, a model as it was learned to be, else as asked (not unknown,
@@ -436,7 +503,7 @@ impl Roster {
             s.given_prompt = s.pending_prompt.take().or(s.given_prompt.take());
         }
         // A new run: a turn another session's prompt began, if given one.
-        s.sent = queued_first.as_ref().and_then(crate::db::sent_by_another);
+        s.sent = (launching.queued_first.as_ref()).and_then(crate::db::sent_by_another);
         s.set_state(State::Working, now);
         s.started_at = Some(now);
         s.unread = false;
@@ -450,16 +517,7 @@ impl Roster {
             s.last_event_at = None;
             s.baseline_at = Some(now + BOOT_GRACE_MS);
         }
-        self.db.save_changes(&before, &s)?;
-        drop(starting_lock);
-        if let Some(q) = &queued_first {
-            self.record_sent(id, q, now)?;
-        }
-        // What's left queued goes in as its agent is ready, whoever runs.
-        if !self.db.queue(id)?.is_empty() {
-            self.deliver_queued_in_background();
-        }
-        Ok(())
+        self.db.save_changes(before, &s)
     }
 
     /// `argv` run by roster's shell for `s`, after it sources the env files:

@@ -9,6 +9,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
+use std::thread::sleep;
+use std::time::Duration;
 
 use sha2::Digest;
 
@@ -99,6 +101,14 @@ fn run(t: &TestEnv, exe: &Path, url: &str, args: &[&str], checkout: bool) -> Out
         cmd.env("ROSTER_UPDATE_CHECKOUT", "1");
     } else {
         cmd.env_remove("ROSTER_UPDATE_CHECKOUT");
+    }
+    // Copied just before, `exe` can still be open for writing in a process
+    // another test is forking meanwhile: running it then fails as busy.
+    for _ in 0..100 {
+        match cmd.output() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => sleep(Duration::from_millis(20)),
+            out => return out.unwrap(),
+        }
     }
     cmd.output().unwrap()
 }

@@ -63,6 +63,20 @@ pub(super) fn check_prompt_fits(agent: &str, prompt: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether an agent is waiting for its first prompt: for one with hooks,
+/// after it has reported its session since it was last started (idle by
+/// its screen alone, it may be at a screen it shows first, which would
+/// take the prompt); for others, idle after starting up. (An agent that
+/// takes its first prompt on its command line never waits.)
+pub(super) fn ready_for_prompt(s: &Session, now: i64) -> bool {
+    s.state == State::Idle
+        && if agent::adapter(&s.agent).reports() {
+            s.waits_since_started()
+        } else {
+            s.baseline_at.is_some_and(|b| now > b)
+        }
+}
+
 impl Roster {
     /// A first prompt that couldn't be typed into session `id`: one that never
     /// got into its agent stays (this roster tries it a few times, then
@@ -95,7 +109,7 @@ impl Roster {
     /// on a report of its own (a screen-tracked agent's screen given
     /// `idle_after` from now to change), so nothing else is typed into it.
     pub(super) fn begin_turn(&self, s: &mut Session, now: i64) -> bool {
-        if s.deleted_at.is_some() || !self.ready_for_prompt(s, now) {
+        if s.deleted_at.is_some() || !ready_for_prompt(s, now) {
             return false;
         }
         s.set_state(State::Working, now);
@@ -185,20 +199,6 @@ impl Roster {
             }
             sleep(Duration::from_millis(500));
         }
-    }
-
-    /// Whether an agent is waiting for its first prompt: for one with hooks,
-    /// after it has reported its session since it was last started (idle by
-    /// its screen alone, it may be at a screen it shows first, which would
-    /// take the prompt); for others, idle after starting up. (An agent that
-    /// takes its first prompt on its command line never waits.)
-    pub(super) fn ready_for_prompt(&self, s: &Session, now: i64) -> bool {
-        s.state == State::Idle
-            && if agent::adapter(&s.agent).reports() {
-                s.waits_since_started()
-            } else {
-                s.baseline_at.is_some_and(|b| now > b)
-            }
     }
 }
 

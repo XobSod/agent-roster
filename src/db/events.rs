@@ -44,15 +44,28 @@ impl Db {
                 };
             }
             if let Some(s) = touched.get_mut(&e.session_id) {
-                let report = match e.kind.as_str() {
+                let report = match &e.kind {
                     // roster's own, in its own terms.
-                    crate::model::WORKTREE | crate::model::SENT => Default::default(),
-                    crate::model::AUTO_TITLE => e
+                    EventKind::Worktree | EventKind::Sent => Default::default(),
+                    EventKind::AutoTitle => e
                         .payload
                         .as_deref()
                         .and_then(|p| serde_json::from_str(p).ok())
                         .unwrap_or_default(),
-                    _ => crate::agent::read_report(&s.agent, e.payload.as_deref()),
+                    EventKind::Session
+                    | EventKind::Prompt
+                    | EventKind::Working
+                    | EventKind::Idle
+                    | EventKind::NeedsInput
+                    | EventKind::Interrupted
+                    | EventKind::Compacting
+                    | EventKind::Compacted
+                    | EventKind::SubagentStart
+                    | EventKind::SubagentStop
+                    | EventKind::Info
+                    | EventKind::Unknown(_) => {
+                        crate::agent::read_report(&s.agent, e.payload.as_deref())
+                    }
                 };
                 s.apply(e, &report);
                 let mut learned = Vec::new();
@@ -60,7 +73,7 @@ impl Db {
                 // the agent started; switched to later inside it, it isn't what
                 // was asked, and a conversation cleared, compacted or resumed in
                 // it reports the one it runs.
-                let started = e.kind == "session" && report.started;
+                let started = e.kind == EventKind::Session && report.started;
                 if let Some(model) = report.model.clone().filter(|_| started) {
                     let asked = s.model.as_deref().unwrap_or("default");
                     let key = crate::agent::learned_key(&s.agent, asked);
@@ -92,7 +105,7 @@ impl Db {
             params![
                 last,
                 now - EVENT_RETENTION_MS,
-                crate::model::SENT,
+                EventKind::Sent.as_str(),
                 KEPT_PROMPTS
             ],
         )?;
@@ -231,7 +244,7 @@ pub(super) fn events_after(
         Ok(Event {
             id: r.get(0)?,
             session_id: r.get(1)?,
-            kind: r.get(2)?,
+            kind: EventKind::from(r.get::<_, String>(2)?.as_str()),
             at: r.get(3)?,
             payload: r.get(4)?,
         })

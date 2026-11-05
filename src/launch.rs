@@ -18,7 +18,7 @@ use crate::config::Config;
 /// the worktree is set up: one session at a time (a lock beside the record,
 /// where `flock` is there, which what the script leaves running doesn't
 /// hold), so a session started in it meanwhile waits for it rather than
-/// setting it up too. Done, it's recorded, and reported (`model::WORKTREE`).
+/// setting it up too. Done, it's recorded, and reported (`EventKind::Worktree`).
 /// Each `.` must stay the last command of its `&&` list: on the left of `&&`/`||`
 /// the shell ignores `set -e`, also inside the sourced file.
 const SCRIPT: &str = r#"trap 'echo "roster: preparing the environment failed (exit $?)" >&2' EXIT

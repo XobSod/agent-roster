@@ -11,7 +11,7 @@ use rusqlite::{
     Connection, OptionalExtension, Row, Transaction, TransactionBehavior, named_params, params,
 };
 
-use crate::model::{Event, Project, Session, State};
+use crate::model::{Event, EventKind, Project, Session, State};
 use crate::note::{Note, Version, Whose};
 
 mod events;

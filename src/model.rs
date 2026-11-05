@@ -55,11 +55,6 @@ pub struct Queued {
     pub sent_at: i64,
 }
 
-/// The kind of event recorded as a queued prompt is typed into a session's
-/// agent: `{"from": <its sender's id, or null>, "label": <what the sender
-/// was called then>, "prompt": <its text>}`.
-pub const SENT: &str = "sent";
-
 /// The git worktree a session works in, in place of its project's checkout.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Worktree {
@@ -292,18 +287,88 @@ pub struct Session {
     pub worktree: Option<Worktree>,
 }
 
-/// The kind of event roster records with a title it made for a session's
-/// conversation (`Roster::auto_title`), in roster's own terms (`Report`):
-/// folded in with the agents' reports, so no save of the session overwrites it.
-pub const AUTO_TITLE: &str = "auto-title";
+/// What an event is of, by the word it's stored and reported with (`roster
+/// report <kind>`): those agents report, as `agent` tells them, and those
+/// roster records itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Session,
+    Prompt,
+    Working,
+    Idle,
+    NeedsInput,
+    Interrupted,
+    Compacting,
+    Compacted,
+    SubagentStart,
+    SubagentStop,
+    /// Pi's word of its session's name, model or thinking changed: only its
+    /// payload counts.
+    Info,
+    /// Recorded with a title roster made for a session's conversation
+    /// (`Roster::auto_title`), in roster's own terms (`Report`): folded in
+    /// with the agents' reports, so no save of the session overwrites it.
+    AutoTitle,
+    /// What a session's own launch records of its worktree, run in the
+    /// session's environment: its setup script done (`{"set_up": true}`),
+    /// its folder's trust written in the agent's config (`{"trusted_in":
+    /// <file>}`).
+    Worktree,
+    /// Recorded as a queued prompt is typed into a session's agent:
+    /// `{"from": <its sender's id, or null>, "label": <what the sender was
+    /// called then>, "prompt": <its text>}`.
+    Sent,
+    /// Any other word, kept as it came: only its payload counts. Never
+    /// another kind's word, every kind read or reported being made by
+    /// `from`; one built by hand with one isn't that kind.
+    Unknown(String),
+}
 
-/// The kind of event a session's own launch records of its worktree, run
-/// in the session's environment: its setup script done (`{"set_up":
-/// true}`), its folder's trust written in the agent's config
-/// (`{"trusted_in": <file>}`).
-pub const WORKTREE: &str = "worktree";
+impl EventKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            EventKind::Session => "session",
+            EventKind::Prompt => "prompt",
+            EventKind::Working => "working",
+            EventKind::Idle => "idle",
+            EventKind::NeedsInput => "needs-input",
+            EventKind::Interrupted => "interrupted",
+            EventKind::Compacting => "compacting",
+            EventKind::Compacted => "compacted",
+            EventKind::SubagentStart => "subagent-start",
+            EventKind::SubagentStop => "subagent-stop",
+            EventKind::Info => "info",
+            EventKind::AutoTitle => "auto-title",
+            EventKind::Worktree => "worktree",
+            EventKind::Sent => "sent",
+            EventKind::Unknown(kind) => kind,
+        }
+    }
+}
 
-/// What a `WORKTREE` event says.
+impl From<&str> for EventKind {
+    fn from(kind: &str) -> EventKind {
+        match kind {
+            "session" => EventKind::Session,
+            "prompt" => EventKind::Prompt,
+            "working" => EventKind::Working,
+            "idle" => EventKind::Idle,
+            "needs-input" => EventKind::NeedsInput,
+            "interrupted" => EventKind::Interrupted,
+            "compacting" => EventKind::Compacting,
+            "compacted" => EventKind::Compacted,
+            "subagent-start" => EventKind::SubagentStart,
+            "subagent-stop" => EventKind::SubagentStop,
+            "info" => EventKind::Info,
+            "auto-title" => EventKind::AutoTitle,
+            "worktree" => EventKind::Worktree,
+            "sent" => EventKind::Sent,
+            other => EventKind::Unknown(other.to_string()),
+        }
+    }
+}
+
+/// What an `EventKind::Worktree` event says.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeReport {
     #[serde(default)]
@@ -316,7 +381,7 @@ pub struct WorktreeReport {
 pub struct Event {
     pub id: i64,
     pub session_id: String,
-    pub kind: String,
+    pub kind: EventKind,
     pub at: i64,
     pub payload: Option<String>,
 }
@@ -532,10 +597,10 @@ impl Session {
         }
         // Roster's own record of a sent prompt typed in; what it started is
         // the agent's to report.
-        if e.kind == SENT {
+        if e.kind == EventKind::Sent {
             return;
         }
-        if e.kind == WORKTREE {
+        if e.kind == EventKind::Worktree {
             let said: WorktreeReport = (e.payload.as_deref())
                 .and_then(|p| serde_json::from_str(p).ok())
                 .unwrap_or_default();
@@ -547,7 +612,7 @@ impl Session {
             }
             return;
         }
-        if e.kind == AUTO_TITLE {
+        if e.kind == EventKind::AutoTitle {
             // Unless it's on another conversation by now, or has a title.
             if report.conversation_id.is_some()
                 && report.conversation_id == self.conversation_id
@@ -593,7 +658,7 @@ impl Session {
         // The agent starting again on the conversation without a name for it
         // (pi, which roster made the title of) leaves the title it has.
         if let Some(title) = &report.title
-            && (title.is_some() || moved_on || e.kind != "session")
+            && (title.is_some() || moved_on || e.kind != EventKind::Session)
         {
             self.title = title.clone();
         }
@@ -601,16 +666,20 @@ impl Session {
         // was given, taken.
         let given = self.given_prompt.is_some();
         if matches!(
-            e.kind.as_str(),
-            "session" | "prompt" | "working" | "idle" | "needs-input"
+            e.kind,
+            EventKind::Session
+                | EventKind::Prompt
+                | EventKind::Working
+                | EventKind::Idle
+                | EventKind::NeedsInput
         ) {
             self.given_prompt = None;
         }
         // A turn of its own: its conversation is kept from now on.
         if report.subagent.is_none()
             && matches!(
-                e.kind.as_str(),
-                "prompt" | "working" | "idle" | "needs-input"
+                e.kind,
+                EventKind::Prompt | EventKind::Working | EventKind::Idle | EventKind::NeedsInput
             )
         {
             self.conversation_begun = true;
@@ -621,7 +690,10 @@ impl Session {
             match self.subagents.get_mut(id) {
                 Some(subagent) => subagent.heard = subagent.heard.max(e.at),
                 None if report.subagents_start_said
-                    && matches!(e.kind.as_str(), "working" | "prompt" | "needs-input") =>
+                    && matches!(
+                        e.kind,
+                        EventKind::Working | EventKind::Prompt | EventKind::NeedsInput
+                    ) =>
                 {
                     let subagent = Subagent {
                         kind: report.subagent_kind.clone(),
@@ -641,12 +713,12 @@ impl Session {
         self.add_shells(&report.shells, e.at);
         // A permission no one is asked for (decided by the agent's own
         // reviewer): work going on.
-        let kind = match e.kind.as_str() {
-            "needs-input" if report.not_asked => "working",
+        let kind = match &e.kind {
+            EventKind::NeedsInput if report.not_asked => &EventKind::Working,
             kind => kind,
         };
         match kind {
-            "subagent-start" => {
+            EventKind::SubagentStart => {
                 if let Some(id) = &report.subagent {
                     self.subagents.insert(
                         id.clone(),
@@ -658,7 +730,7 @@ impl Session {
                     );
                 }
             }
-            "subagent-stop" => match &report.subagent {
+            EventKind::SubagentStop => match &report.subagent {
                 Some(id) => self.subagent_stopped(id, e.at),
                 None => {
                     self.end_awaited_turn(e.at);
@@ -668,7 +740,7 @@ impl Session {
             // turn, or after it (one left running): either way not a turn of
             // its own. Its question is the session's to answer, though, and
             // once it works on, it's answered.
-            "working" | "prompt" if report.subagent.is_some() => {
+            EventKind::Working | EventKind::Prompt if report.subagent.is_some() => {
                 if self.state == State::NeedsInput && self.asked_by == report.subagent {
                     self.set_state(State::Working, e.at);
                 }
@@ -678,15 +750,15 @@ impl Session {
             // given itself (told that something it left running ended)
             // takes up what was left to read: it's no longer for you till
             // this turn ends.
-            "working" | "prompt" => {
-                if e.kind == "prompt" && self.awaiting {
+            EventKind::Working | EventKind::Prompt => {
+                if e.kind == EventKind::Prompt && self.awaiting {
                     self.turns += 1;
                 }
                 // A prompt other than the one sent it, yours, makes the turn
                 // yours (one it gave itself, told something it left running
                 // ended, goes on with whoever's it was); as does one at idle,
                 // a sent one's turn begun as it's typed in.
-                if e.kind == "prompt" && !report.woken {
+                if e.kind == EventKind::Prompt && !report.woken {
                     let other = (report.prompt.as_deref())
                         .is_some_and(|p| self.sent.as_deref().map(words) != Some(words(p)));
                     if other || self.state == State::Idle {
@@ -701,7 +773,7 @@ impl Session {
             }
             // Its own turn ended: with subagents or shells left running it
             // works on, as it takes their results up when they're done.
-            "idle" => {
+            EventKind::Idle => {
                 self.forget_quiet_subagents(e.at);
                 if self.subagents.is_empty() && self.shells.is_empty() {
                     self.set_state(State::Idle, e.at);
@@ -715,7 +787,7 @@ impl Session {
                     self.left_on_shells();
                 }
             }
-            "needs-input" => {
+            EventKind::NeedsInput => {
                 // Whose question it is: its own waits for you whatever a
                 // subagent asks meanwhile.
                 let its_own = self.state == State::NeedsInput && self.asked_by.is_none();
@@ -733,7 +805,7 @@ impl Session {
             // nothing): idle, and not unread, as you did it yourself, a
             // question it asked included; what it left running goes on, its
             // subagents finishing theirs, and it works on them.
-            "interrupted" => {
+            EventKind::Interrupted => {
                 if report.subagent.is_some() {
                     return;
                 }
@@ -748,14 +820,14 @@ impl Session {
             // A compaction you asked for: work, though not a turn, while it
             // runs, waiting as it was once done; what else it was at (a
             // question, subagents left running) stays.
-            "compacting" => {
+            EventKind::Compacting => {
                 if report.subagent.is_none() && self.state == State::Idle {
                     let turns = self.turns;
                     self.set_state(State::Working, e.at);
                     self.turns = turns;
                 }
             }
-            "compacted" => {
+            EventKind::Compacted => {
                 if report.subagent.is_none() && self.state == State::Working && !self.awaiting {
                     self.set_state(State::Idle, e.at);
                     self.sent = None;
@@ -763,10 +835,10 @@ impl Session {
             }
             // A compaction, which Claude and codex make mid-turn when the
             // context is full, leaves it as it was.
-            "session" if report.compacted => {}
+            EventKind::Session if report.compacted => {}
             // The agent (re)started or cleared its conversation and waits
             // for a prompt: what it left running is gone or not its now.
-            "session" => {
+            EventKind::Session => {
                 self.subagents.clear();
                 self.shells.clear();
                 self.awaiting = false;
@@ -780,7 +852,13 @@ impl Session {
                 }
                 self.session_at = Some(e.at);
             }
-            _ => return,
+            // Only what its payload says counts; roster's own are applied
+            // above.
+            EventKind::Info
+            | EventKind::Unknown(_)
+            | EventKind::AutoTitle
+            | EventKind::Worktree
+            | EventKind::Sent => return,
         }
         self.last_event_at = Some(e.at);
     }
@@ -1243,7 +1321,7 @@ pub mod tests {
             assert_eq!(s.given_prompt, None, "{kind}");
         }
         // A title roster made, or a kind it doesn't know, isn't its agent's.
-        for kind in [AUTO_TITLE, "unknown"] {
+        for kind in [EventKind::AutoTitle.as_str(), "unknown"] {
             let mut s = session("a");
             s.given_prompt = Some("fix it".into());
             apply(&mut s, kind, 10);
@@ -1430,14 +1508,14 @@ pub mod tests {
         };
         let mut s = session("a");
         s.conversation_id = Some("c-2".into());
-        s.apply(&event(AUTO_TITLE, 10), &made("c-1"));
+        s.apply(&event(EventKind::AutoTitle.as_str(), 10), &made("c-1"));
         assert_eq!(s.title, None);
-        s.apply(&event(AUTO_TITLE, 10), &made("c-2"));
+        s.apply(&event(EventKind::AutoTitle.as_str(), 10), &made("c-2"));
         assert_eq!(s.title.as_deref(), Some("Parser fixes"));
         assert_eq!(s.last_event_at, None);
         // One it got meanwhile stays.
         s.title = Some("Named".into());
-        s.apply(&event(AUTO_TITLE, 20), &made("c-2"));
+        s.apply(&event(EventKind::AutoTitle.as_str(), 20), &made("c-2"));
         assert_eq!(s.title.as_deref(), Some("Named"));
     }
 
@@ -2052,6 +2130,73 @@ pub mod tests {
         s.deleted_at = Some(1);
         apply(&mut s, "idle", 20);
         assert_eq!(s.state, State::Working);
+    }
+
+    #[test]
+    fn every_kind_is_stored_and_reported_by_its_word() {
+        // The list and a match on what it lists, made of the same words: a
+        // kind left out of it leaves the match short, which doesn't compile.
+        macro_rules! known {
+            ($($kind:ident => $word:literal),* $(,)?) => {{
+                let _every = |kind: &EventKind| match kind {
+                    $(EventKind::$kind => {})*
+                    EventKind::Unknown(_) => {}
+                };
+                [$((EventKind::$kind, $word)),*]
+            }};
+        }
+        let known = known![
+            Session => "session",
+            Prompt => "prompt",
+            Working => "working",
+            Idle => "idle",
+            NeedsInput => "needs-input",
+            Interrupted => "interrupted",
+            Compacting => "compacting",
+            Compacted => "compacted",
+            SubagentStart => "subagent-start",
+            SubagentStop => "subagent-stop",
+            Info => "info",
+            AutoTitle => "auto-title",
+            Worktree => "worktree",
+            Sent => "sent",
+        ];
+        for (kind, word) in known {
+            assert_eq!(kind.as_str(), word);
+            assert_eq!(EventKind::from(word), kind, "{word}");
+        }
+        // Any other word is kept as it came, case and all.
+        for word in ["bogus", "Idle", "needs_input", ""] {
+            let kind = EventKind::from(word);
+            assert_eq!(kind, EventKind::Unknown(word.into()));
+            assert_eq!(kind.as_str(), word);
+        }
+    }
+
+    #[test]
+    fn a_kind_roster_doesnt_know_counts_for_its_payload_alone() {
+        let mut s = session("a");
+        s.given_prompt = Some("fix it".into());
+        let bogus = event("bogus", 10);
+        assert_eq!(bogus.kind, EventKind::Unknown("bogus".into()));
+        let before = s.clone();
+        s.apply(&bogus, &Report::default());
+        assert_eq!(s, before);
+        // What its payload says is taken as from pi's `info`.
+        let said = Report {
+            conversation_id: Some("c-1".into()),
+            model: Some("claude-opus-5-5".into()),
+            ..Report::default()
+        };
+        let mut info = before.clone();
+        info.apply(&event("info", 10), &said);
+        s.apply(&bogus, &said);
+        assert_eq!(s, info);
+        assert_eq!(
+            (s.state, s.last_event_at, s.running_model.as_deref()),
+            (State::Working, None, Some("claude-opus-5-5"))
+        );
+        assert_eq!(s.given_prompt.as_deref(), Some("fix it"));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Question, Report};
 use crate::config::Config;
-use crate::model::Session;
+use crate::model::{EventKind, Session};
 use crate::stats::{Jsonl, Transcript};
 use crate::tokens::Spending;
 use crate::usage::Usage;
@@ -47,18 +47,22 @@ const EFFORTS: &[&str] = &[
 /// other question tool, `request_user_input_async`, waits for nothing (the
 /// question ends the turn). As Claude's, a compaction is reported only when
 /// you ask for one: codex's own, mid-turn, isn't a turn's end.
-const HOOKS: &[(&str, Option<&str>, &str)] = &[
-    ("SessionStart", None, "session"),
-    ("UserPromptSubmit", None, "prompt"),
-    ("PreToolUse", Some("^request_user_input$"), "needs-input"),
-    ("PostToolUse", None, "working"),
-    ("PermissionRequest", None, "needs-input"),
-    ("PreCompact", Some("manual"), "compacting"),
-    ("PostCompact", Some("manual"), "compacted"),
-    ("Stop", None, "idle"),
-    ("Interrupt", None, "interrupted"),
-    ("SubagentStart", None, "subagent-start"),
-    ("SubagentStop", None, "subagent-stop"),
+const HOOKS: &[(&str, Option<&str>, EventKind)] = &[
+    ("SessionStart", None, EventKind::Session),
+    ("UserPromptSubmit", None, EventKind::Prompt),
+    (
+        "PreToolUse",
+        Some("^request_user_input$"),
+        EventKind::NeedsInput,
+    ),
+    ("PostToolUse", None, EventKind::Working),
+    ("PermissionRequest", None, EventKind::NeedsInput),
+    ("PreCompact", Some("manual"), EventKind::Compacting),
+    ("PostCompact", Some("manual"), EventKind::Compacted),
+    ("Stop", None, EventKind::Idle),
+    ("Interrupt", None, EventKind::Interrupted),
+    ("SubagentStart", None, EventKind::SubagentStart),
+    ("SubagentStop", None, EventKind::SubagentStop),
 ];
 
 /// What a one-off run turns off, as config overrides: every feature that
@@ -409,7 +413,7 @@ impl Adapter for Codex {
 fn hooks(exe: &str) -> Vec<String> {
     let mut argv = Vec::new();
     for (event, matcher, kind) in HOOKS {
-        let command = format!("{} report {kind}", sh_quote(exe));
+        let command = format!("{} report {}", sh_quote(exe), kind.as_str());
         let matcher = matcher.map_or_else(String::new, |m| format!("matcher={},", toml_str(m)));
         // Codex gives an Interrupt hook 1 s unless told longer, 3 at most;
         // a report may wait on the database longer than 1.
@@ -573,7 +577,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 String::from_utf8_lossy(&out.stdout),
-                format!("ran report {kind}\n"),
+                format!("ran report {}\n", kind.as_str()),
                 "{command}"
             );
         }

@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 
+use crate::model::EventKind;
 use crate::paths::Paths;
 use crate::util::now_ms;
 
@@ -54,12 +55,12 @@ fn report(args: &[String]) -> Result<()> {
             .take(MAX_PAYLOAD)
             .read_to_string(&mut payload)?;
     }
-    record(kind, payload.trim())
+    record(&EventKind::from(kind.as_str()), payload.trim())
 }
 
 /// Records a report of `kind` with `payload` for the session this runs in
 /// (`ROSTER_SESSION`), in its database (`ROSTER_DB`).
-pub fn record(kind: &str, payload: &str) -> Result<()> {
+pub fn record(kind: &EventKind, payload: &str) -> Result<()> {
     let session = std::env::var("ROSTER_SESSION").context("ROSTER_SESSION not set")?;
     let db = match std::env::var_os("ROSTER_DB") {
         Some(path) => PathBuf::from(path),
@@ -74,10 +75,11 @@ pub fn record(kind: &str, payload: &str) -> Result<()> {
     // (eight subagents starting at once, say) is a state wrong
     // till the agent's next; the agent waits only while roster writes.
     conn.busy_timeout(Duration::from_secs(5))?;
-    let running = (kind == "interrupted").then(|| crate::procs::session_commands(&session, &db));
+    let running =
+        (*kind == EventKind::Interrupted).then(|| crate::procs::session_commands(&session, &db));
     let payload = stored(payload, running);
     let payload = (!payload.is_empty()).then_some(payload.as_str());
-    crate::db::insert_event(&conn, &session, kind, now_ms(), payload)
+    crate::db::insert_event(&conn, &session, kind.as_str(), now_ms(), payload)
 }
 
 /// The payload as it's stored: without its long top-level values, but for

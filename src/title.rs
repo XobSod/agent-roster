@@ -63,7 +63,7 @@ impl Roster {
         let made = serde_json::json!({ "conversation_id": conversation, "title": title });
         self.db.insert_event(
             id,
-            crate::model::AUTO_TITLE,
+            crate::model::EventKind::AutoTitle.as_str(),
             crate::util::now_ms(),
             Some(&made.to_string()),
         )?;

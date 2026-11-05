@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::{Adapter, Ask, Choices, Context, Conversation, Launch, Mark, Model, Report};
 use crate::config::Config;
-use crate::model::Session;
+use crate::model::{EventKind, Session};
 use crate::stats::{Jsonl, Transcript};
 use crate::tokens::Spending;
 use crate::usage::Usage;
@@ -275,24 +275,24 @@ impl Adapter for Claude {
 /// Extra settings for this run only: hooks that report to roster. They run next to
 /// the user's and the project's own hooks.
 fn settings(roster_exe: &Path) -> String {
-    let command = |kind: &str| json!({"type": "command", "command": format!("{} report {kind}", sh_quote(&roster_exe.to_string_lossy()))});
-    let report = |kind: &str| json!([{"hooks": [command(kind)]}]);
+    let command = |kind: EventKind| json!({"type": "command", "command": format!("{} report {}", sh_quote(&roster_exe.to_string_lossy()), kind.as_str())});
+    let report = |kind: EventKind| json!([{"hooks": [command(kind)]}]);
     json!({"hooks": {
-        "SessionStart": report("session"),
+        "SessionStart": report(EventKind::Session),
         // Working too, and tells that you gave it a task.
-        "UserPromptSubmit": report("prompt"),
-        "PostToolUse": report("working"),
-        "PermissionRequest": report("needs-input"),
-        "Stop": report("idle"),
+        "UserPromptSubmit": report(EventKind::Prompt),
+        "PostToolUse": report(EventKind::Working),
+        "PermissionRequest": report(EventKind::NeedsInput),
+        "Stop": report(EventKind::Idle),
         // Its subagents', for a turn of its own that ends with some still at
         // work (in the background) to leave it working.
-        "SubagentStart": report("subagent-start"),
-        "SubagentStop": report("subagent-stop"),
+        "SubagentStart": report(EventKind::SubagentStart),
+        "SubagentStop": report(EventKind::SubagentStop),
         // A compaction you asked for (`/compact`), work without a prompt;
         // Claude's own, mid-turn or a subagent's (which says nothing of
         // whose it is), are left out.
-        "PreCompact": [{"matcher": "manual", "hooks": [command("compacting")]}],
-        "PostCompact": [{"matcher": "manual", "hooks": [command("compacted")]}],
+        "PreCompact": [{"matcher": "manual", "hooks": [command(EventKind::Compacting)]}],
+        "PostCompact": [{"matcher": "manual", "hooks": [command(EventKind::Compacted)]}],
     }})
     .to_string()
 }

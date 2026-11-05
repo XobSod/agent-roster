@@ -2,7 +2,7 @@
 //! time, by whichever roster process gets to each first.
 
 use super::*;
-use crate::model::{Queued, SENT, words};
+use crate::model::{Queued, words};
 
 /// How long before roster's record of a prompt it typed in its agent's hook
 /// can say it took it: the record comes once typing's over.
@@ -228,13 +228,13 @@ impl Db {
              ORDER BY id",
             vec!["?"; ids.len()].join(", ")
         ))?;
-        let params = std::iter::once(SENT).chain(ids.iter().copied());
+        let params = std::iter::once(EventKind::Sent.as_str()).chain(ids.iter().copied());
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             let from: Option<String> = r.get(4)?;
             let label: Option<String> = r.get(5)?;
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
+                EventKind::from(r.get::<_, String>(1)?.as_str()),
                 r.get::<_, i64>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 from.map(|f| label.unwrap_or(f)),
@@ -244,7 +244,7 @@ impl Db {
         for row in rows {
             if let (id, kind, at, Some(prompt), from) = row? {
                 let taken = taken.entry(id).or_default();
-                match kind == SENT {
+                match kind == EventKind::Sent {
                     true => taken.sent(prompt, from, at),
                     false => taken.heard(prompt, at),
                 }

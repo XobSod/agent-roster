@@ -3,7 +3,7 @@
 //! gets to each first; one in the background while nothing else runs.
 
 use super::*;
-use crate::model::{Queued, SENT};
+use crate::model::{EventKind, Queued};
 
 /// How long the roster typing what's queued in the background goes on: past
 /// it, what's left waits for the next roster.
@@ -205,7 +205,8 @@ impl Roster {
             "label": q.sender_label,
             "prompt": q.prompt,
         });
-        self.db.insert_event(id, SENT, now, Some(&said.to_string()))
+        self.db
+            .insert_event(id, EventKind::Sent.as_str(), now, Some(&said.to_string()))
     }
 
     /// Where the prompt `queued` (its id in a queue) is written for

@@ -692,7 +692,7 @@ pub fn trust_and_run(args: &[String]) -> ! {
                     trusted_in: a.trust_config(),
                 };
                 let said = serde_json::to_string(&said).unwrap_or_default();
-                if let Err(e) = crate::report::record(crate::model::WORKTREE, &said) {
+                if let Err(e) = crate::report::record(&crate::model::EventKind::Worktree, &said) {
                     eprintln!("roster: couldn't record {}'s trust: {e:#}", dir.display());
                 }
             }

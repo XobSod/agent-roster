@@ -600,7 +600,7 @@ pub fn events(r: &Roster, follow: bool, session: Option<&str>) -> Result<()> {
             println!(
                 "{}  {label}  {}  {}",
                 util::local_time(e.at),
-                e.kind,
+                e.kind.as_str(),
                 summarize(agent, e.payload.as_deref())
             );
             last = e.id;

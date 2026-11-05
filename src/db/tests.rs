@@ -740,18 +740,18 @@ fn who_sent_each_prompt_a_session_took_is_read_back() {
         serde_json::json!({"from": from, "label": label, "prompt": prompt}).to_string()
     };
     let lead = sent(Some("l1"), Some("demo/lead"), "run the tests");
-    db.insert_event(&s.id, crate::model::SENT, 1, Some(&lead))
+    db.insert_event(&s.id, EventKind::Sent.as_str(), 1, Some(&lead))
         .unwrap();
     db.insert_event(&s.id, "prompt", 2, Some(r#"{"prompt":"mine"}"#))
         .unwrap();
     let yours = sent(None, None, "and lint");
-    db.insert_event(&s.id, crate::model::SENT, 3, Some(&yours))
+    db.insert_event(&s.id, EventKind::Sent.as_str(), 3, Some(&yours))
         .unwrap();
     // Another session's, each by its own; a payload not to be read is none's.
     let other = sent(Some("l1"), Some("demo/lead"), "elsewhere");
-    db.insert_event("other", crate::model::SENT, 4, Some(&other))
+    db.insert_event("other", EventKind::Sent.as_str(), 4, Some(&other))
         .unwrap();
-    db.insert_event(&s.id, crate::model::SENT, 5, Some("{"))
+    db.insert_event(&s.id, EventKind::Sent.as_str(), 5, Some("{"))
         .unwrap();
     let lead = Some("demo/lead".to_string());
     let all = db.sent_to(&[&s.id, "other", "none"]).unwrap();
@@ -779,7 +779,7 @@ fn a_prompt_like_one_sent_is_told_from_it_by_what_the_agent_took() {
     let say = |kind: &str, at: i64| {
         let payload = if kind == "prompt" { heard } else { &sent };
         let kind = if kind == "sent" {
-            crate::model::SENT
+            EventKind::Sent.as_str()
         } else {
             kind
         };
@@ -809,7 +809,7 @@ fn a_prompt_like_one_sent_is_told_from_it_by_what_the_agent_took() {
 fn a_prompt_sent_and_heard_goes_with_its_word_not_on_to_a_later_one_of_yours() {
     let (mut db, s) = db_with_session();
     let sent = serde_json::json!({"from": "l1", "label": "demo/lead", "prompt": "go on"});
-    db.insert_event(&s.id, crate::model::SENT, 1, Some(&sent.to_string()))
+    db.insert_event(&s.id, EventKind::Sent.as_str(), 1, Some(&sent.to_string()))
         .unwrap();
     db.insert_event(&s.id, "prompt", 2, Some(r#"{"prompt":"go on"}"#))
         .unwrap();
@@ -1142,6 +1142,22 @@ fn folds_events_once() {
 }
 
 #[test]
+fn events_are_read_back_by_kind_one_roster_doesnt_know_as_it_came() {
+    let (mut db, s) = db_with_session();
+    let before = db.session(&s.id).unwrap();
+    let said = r#"{"hook_event_name":"Notification"}"#;
+    db.insert_event(&s.id, "bogus", 10, Some(said)).unwrap();
+    db.insert_event(&s.id, "sent", 20, None).unwrap();
+    let kinds: Vec<EventKind> = (db.events_after(0, None, 10).unwrap().into_iter())
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(kinds, [EventKind::Unknown("bogus".into()), EventKind::Sent]);
+    // Folded, neither changes the session.
+    assert_eq!(db.fold_events(100).unwrap(), 2);
+    assert_eq!(db.session(&s.id).unwrap(), before);
+}
+
+#[test]
 fn prompts_count_as_working_and_are_found_later() {
     let (mut db, s) = db_with_session();
     db.insert_event(&s.id, "prompt", 10, None).unwrap();
@@ -1381,14 +1397,15 @@ fn prunes_old_applied_events_only() {
     let (mut db, s) = db_with_session();
     db.insert_event(&s.id, "working", 0, None).unwrap();
     // Who sent what it took is kept, however old.
-    db.insert_event(&s.id, crate::model::SENT, 1, None).unwrap();
+    db.insert_event(&s.id, EventKind::Sent.as_str(), 1, None)
+        .unwrap();
     db.insert_event(&s.id, "prompt", 2, None).unwrap();
     db.insert_event(&s.id, "idle", EVENT_RETENTION_MS + 50, None)
         .unwrap();
     db.fold_events(EVENT_RETENTION_MS + 100).unwrap();
     let left = db.events_after(0, None, 10).unwrap();
     let kinds: Vec<&str> = left.iter().map(|e| e.kind.as_str()).collect();
-    assert_eq!(kinds, [crate::model::SENT, "prompt", "idle"]);
+    assert_eq!(kinds, [EventKind::Sent.as_str(), "prompt", "idle"]);
 }
 
 #[test]
@@ -1397,13 +1414,13 @@ fn of_old_prompts_each_session_keeps_its_latest() {
     let kept = KEPT_PROMPTS as usize;
     for at in 0..kept + 3 {
         let kind = if at % 2 == 0 {
-            crate::model::SENT
+            EventKind::Sent.as_str()
         } else {
             "prompt"
         };
         db.insert_event(&s.id, kind, 1, None).unwrap();
     }
-    db.insert_event("other", crate::model::SENT, 3, None)
+    db.insert_event("other", EventKind::Sent.as_str(), 3, None)
         .unwrap();
     db.fold_events(EVENT_RETENTION_MS + 100).unwrap();
     let left = db.events_after(0, None, 1000).unwrap();

@@ -25,7 +25,7 @@ Each [release](https://github.com/XobSod/agent-roster/releases) has roster built
 x86_64 Linux, static, so it runs on any distribution. Into `~/.local/bin`:
 
 ```sh
-v=v0.2.0; a=agent-roster-$v-linux-x86_64
+v=v0.2.1; a=agent-roster-$v-linux-x86_64
 curl -L --remote-name-all https://github.com/XobSod/agent-roster/releases/download/$v/$a.tar.gz{,.sha256}
 sha256sum -c $a.tar.gz.sha256 && tar -xzf $a.tar.gz && install -D $a/roster ~/.local/bin/roster
 ```
@@ -33,7 +33,7 @@ sha256sum -c $a.tar.gz.sha256 && tar -xzf $a.tar.gz && install -D $a/roster ~/.l
 From source, with a recent stable Rust ([rustup](https://rustup.rs)):
 
 ```sh
-cargo install --git https://github.com/XobSod/agent-roster --tag v0.2.0   # into ~/.cargo/bin; without --tag, master as it is
+cargo install --git https://github.com/XobSod/agent-roster --tag v0.2.1   # into ~/.cargo/bin; without --tag, master as it is
 ```
 
 From a clone:

@@ -65,6 +65,9 @@ const MIN_FIT: (u16, u16) = (60, 10);
 pub const LIST_VIEW: &str = "ROSTER_LIST_VIEW";
 /// A list narrower than this is of no use beside an attached agent.
 const MIN_LIST: u16 = 20;
+/// Where the TUI was (`App::keep_place`), as JSON, in the meta table: the
+/// next one opens there. One TUI at a time (`only_one`), so one place.
+const PLACE: &str = "tui:place";
 
 pub fn run(roster: &mut Roster) -> Result<()> {
     let _only = only_one(&roster.paths.state_dir)?;
@@ -91,6 +94,8 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.set_known(roster.db.meta(update::KNOWN).ok().flatten());
     app.set_releases_shown(roster.db.meta(update::SHOWN).ok().flatten().as_deref());
     app.update_check = roster.config.update_check();
+    app.remember_place = roster.config.remember_place();
+    forget_place_unless_remembered(roster, &mut app);
     let tried = (roster.db.meta(update::TRIED).ok().flatten()).and_then(|t| t.parse().ok());
     let now = crate::util::now_ms();
     if app.update_check && update::due(app.known.checked, tried.unwrap_or(0), now) {
@@ -275,6 +280,8 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.notes = roster.config.notes.clone();
     app.account_limits = roster.config.account_limits();
     app.update_check = roster.config.update_check();
+    app.remember_place = roster.config.remember_place();
+    forget_place_unless_remembered(roster, app);
     app.sidebar_usage = roster.config.sidebar_usage();
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
@@ -286,7 +293,17 @@ fn use_config(roster: &Roster, app: &mut App) {
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App) -> Result<()> {
-    reload(roster, app);
+    let loaded = reload(roster, app);
+    // Where the last TUI was, once the data's in to find it in. Not to be
+    // read (the database busy), it's left for the next TUI, not written over.
+    match roster.db.meta(PLACE) {
+        Ok(kept) if loaded => {
+            if app.reopen(kept.as_deref()) {
+                show_reopened(roster, app);
+            }
+        }
+        _ => app.leave_place(),
+    }
     let mut last_reload = Instant::now();
     loop {
         // What each agent has answered of its models, as it answers, into an
@@ -393,15 +410,23 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             let was_opened = opened(app);
             let unfolded = app.unfolded.len();
             match app.on_key(key) {
-                Some(Op::Quit) => return Ok(()),
+                Some(Op::Quit) => {
+                    keep_place(roster, app, true);
+                    return Ok(());
+                }
                 Some(op) => {
+                    if op.hands_over_terminal() {
+                        keep_place(roster, app, true);
+                    }
                     perform(terminal, roster, app, op)?;
                     // What it ended, or started, shows at once.
                     app.resources_read = None;
                     reload(roster, app);
                     last_reload = Instant::now();
                 }
-                None if app.mode != mode => reload(roster, app),
+                None if app.mode != mode => {
+                    reload(roster, app);
+                }
                 // A card unfolded: what its subagents are, at once.
                 None if app.unfolded.len() != unfolded => read_subagents(app),
                 // A stopped session's panel shows its note unless it's open.
@@ -420,6 +445,42 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             reload(roster, app);
             last_reload = Instant::now();
         }
+        keep_place(roster, app, false);
+    }
+}
+
+/// Where the TUI is, kept for the next one if it changed (`App::keep_place`).
+fn keep_place(roster: &Roster, app: &mut App, at_once: bool) {
+    app.keep_place(Instant::now(), at_once, |place| {
+        roster.db.set_meta(PLACE, place).is_ok()
+    });
+}
+
+/// Not to be remembered, the place a TUI last kept is forgotten: turned on
+/// again, the next one opens where it's left then, not where one was long
+/// before. Only a nicety if it fails: the place is restored only when on.
+fn forget_place_unless_remembered(roster: &Roster, app: &mut App) {
+    if !app.remember_place {
+        roster.db.remove_meta(PLACE).ok();
+        app.forget_place();
+    }
+}
+
+/// What shows where the TUI reopened, of the sessions as the first reload
+/// read them: the preview, or the view's report, settings or usage.
+fn show_reopened(roster: &mut Roster, app: &mut App) {
+    read_subagents(app);
+    match app.mode {
+        Mode::Sessions => update_preview(roster, app),
+        Mode::Settings => app.set_settings(roster.settings()),
+        Mode::Server => match roster.diagnose() {
+            Ok(diagnosis) => app.set_report(diagnosis),
+            Err(e) => app.fail(format!("{e:#}")),
+        },
+        Mode::Usage => {
+            app.limits.read_transcripts(&app.sessions);
+        }
+        Mode::Projects => {}
     }
 }
 
@@ -485,7 +546,8 @@ fn title_failures(errors: &[(String, String)]) -> Option<String> {
 
 /// Folds hook events, checks the agents, and reloads the data from the database
 /// (and config.toml, if it changed).
-fn reload(roster: &mut Roster, app: &mut App) {
+/// Reads everything anew; whether the sessions and projects could be.
+fn reload(roster: &mut Roster, app: &mut App) -> bool {
     match roster.reload_config() {
         Ok(Reloaded::InUse(None)) => {
             use_config(roster, app);
@@ -523,13 +585,17 @@ fn reload(roster: &mut Roster, app: &mut App) {
         Ok(()) if !undelivered.is_empty() => app.fail(undelivered.join("; ")),
         Ok(()) => {}
     }
-    match (roster.projects(), roster.sessions(true), roster.db.queues()) {
+    let loaded = match (roster.projects(), roster.sessions(true), roster.db.queues()) {
         (Ok(projects), Ok(sessions), Ok(queues)) => {
             app.queues = queues;
             app.set_data(projects, sessions);
+            true
         }
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => app.fail(format!("{e:#}")),
-    }
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            app.fail(format!("{e:#}"));
+            false
+        }
+    };
     // What the sessions' processes use, every few seconds while it's to be
     // said of any using too much (the server view reads them itself);
     // nothing, if it can't be read.
@@ -572,6 +638,7 @@ fn reload(roster: &mut Roster, app: &mut App) {
     if !notices.is_empty() {
         app.fail_too(notices.join("; "));
     }
+    loaded
 }
 
 /// Agents drawing full screen sized to the preview, so their screens fit it.

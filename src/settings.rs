@@ -498,6 +498,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         group_by,
         card_subagents,
         stopped_cards,
+        remember_place,
         queue_limit,
         memory_warning,
         update_check,
@@ -590,6 +591,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
                     StoppedCards::Unfolded => "unfolded",
                 },
                 "stopped and archived sessions in the list: a line each, or whole cards as the others are",
+            ),
+            bool_setting(
+                &["remember_place"],
+                remember_place.unwrap_or(true),
+                "the TUI opens where the last one was: the session or heading selected (or the session nearest it, gone), the view, what was folded and unfolded, a project shown alone",
             ),
             {
                 let limit = queue_limit.unwrap_or(crate::config::QUEUE_LIMIT);

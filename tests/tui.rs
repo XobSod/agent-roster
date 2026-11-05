@@ -1522,3 +1522,45 @@ fn a_prompt_another_session_sent_says_whose_among_the_last_prompts() {
         "     › rerun the flaky tests  from demo/lead",
     );
 }
+
+#[test]
+fn a_new_tui_opens_on_the_session_the_last_one_was_on() {
+    let Some(t) = TestEnv::new("reopen") else {
+        return;
+    };
+    t.ok(&["project", "add", "demo", t.path("proj").to_str().unwrap()]);
+    // Three waiting for you, on one shelf in this order.
+    for name in ["one", "two", "three"] {
+        t.ok(&["new", "demo", "--name", name]);
+        let id = t.session(name, false).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        t.report(&id, "idle", "{}");
+    }
+    let command = format!("{}; echo TUI-EXIT=$?; sleep 600", t.shell_command());
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("the first selected", "demo / one");
+    term.keys(&["j"]);
+    term.wait_for("the next", "demo / two");
+    term.keys(&["q"]);
+    term.wait_for("the TUI quit", "TUI-EXIT=0");
+    drop(term);
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("where the last one quit", "demo / two");
+    // Moved within the second and attached, then its terminal closed while
+    // attached, which ends the TUI.
+    term.keys(&["k", "j", "j", "Enter"]);
+    term.wait_for("attached", "C-q back");
+    drop(term);
+    let lock = t.path("state/agent-roster/tui.lock");
+    t.wait_for("the TUI gone", |_| {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open(&lock).unwrap();
+        // SAFETY: flock(2) on a descriptor this test owns, let go as it's
+        // closed.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    });
+    let term = Terminal::start(&t, &command, (120, 30));
+    term.wait_for("on the session it attached to", "demo / three");
+}

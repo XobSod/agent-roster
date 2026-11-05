@@ -112,7 +112,13 @@ you've handed off or finished: *Working* (dimmed) and *Archived* (folded; `Enter
 restores one, `s D` deletes it for good). Within a shelf it's first come, first served
 (configurable). `group_by = "project"` puts them under each project instead, archived
 ones still on their shelf. Coming back from an agent you gave a task, the cursor stays
-where it was, on the next one waiting; after only reading, it stays on that agent. A
+where it was, on the next one waiting; after only reading, it stays on that agent. A new
+TUI opens where the last one was (unless `remember_place = false`): the session or heading
+selected (or the session nearest it, gone), the view, what was folded and unfolded, a
+project shown alone, but not a filter typed, nor a popup, form or note left open over the
+list. It's kept as you move, and before an agent or an editor takes the terminal, so a
+closed terminal loses little; nothing starts, the agents running on in roster's tmux
+server either way. A
 stopped or archived session's preview says what it was: when it stopped or was archived,
 its project, title, note and last prompts, and whether starting it resumes its
 conversation (one Claude or pi no longer has, as Claude deletes old ones, can't be:
@@ -506,6 +512,10 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `stopped_cards`: stopped and archived sessions in the list: `"folded"` (default), a
     line each; `"unfolded"`, whole cards as the others are (the preview shows the
     selected one in full either way).
+  - `remember_place`: `false`: the TUI opens at the top of the session list, as on a
+    first start, not where the last one was (the session or heading selected, the view,
+    what was folded and unfolded, a project shown alone); the place kept before is
+    forgotten.
   - `queue_limit` (default 20): how many prompts sent to a session (`roster send`) wait
     in its queue at most; past it, sending is refused.
   - `memory_warning`: a session whose processes (its agent, all it started, and what it

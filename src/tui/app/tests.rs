@@ -1952,3 +1952,314 @@ fn whats_new_waits_till_youre_not_in_the_middle_of_something() {
         assert!(app.releases.is_some(), "{what}");
     }
 }
+
+/// A TUI just started, its data not in yet.
+fn new_app() -> App {
+    App::new(
+        Keymap::new(&Keys::default()).unwrap(),
+        "/work".into(),
+        vec!["claude".to_string()],
+    )
+}
+
+/// Where `app` is, as kept for the next TUI.
+fn place_of(app: &App) -> String {
+    serde_json::to_string(&app.place()).unwrap()
+}
+
+/// A new TUI on `projects` and `sessions`, where `kept` says.
+fn reopened(projects: Vec<Project>, sessions: Vec<Session>, kept: &str) -> App {
+    let mut app = new_app();
+    app.set_data(projects, sessions);
+    assert!(app.reopen(Some(kept)));
+    app
+}
+
+/// What `app` hands on to be kept at `at`, if anything; kept if `ok`.
+fn keeps(app: &mut App, at: Instant, at_once: bool, ok: bool) -> Option<String> {
+    let mut kept = None;
+    app.keep_place(at, at_once, |place| {
+        kept = Some(place.to_string());
+        ok
+    });
+    kept
+}
+
+#[test]
+fn the_place_is_kept_as_json_and_read_back() {
+    let mut app = app();
+    app.folded.insert(Group::Shelf(Shelf::Idle));
+    app.unfolded.insert("s4".into());
+    app.filter = Some(2);
+    app.rebuild();
+    select(&mut app, "s4");
+    app.set_mode(Mode::Server);
+    let place = app.place();
+    let json = place_of(&app);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["selected"], serde_json::json!({"Session": "s4"}));
+    assert_eq!(value["row"], 3);
+    assert_eq!(value["view"], "Server");
+    assert_eq!(value["unfolded"], serde_json::json!(["s4"]));
+    assert_eq!(value["project"], 2);
+    let folded = value["folded"].as_array().unwrap();
+    assert_eq!(folded.len(), 2);
+    for shelf in ["Idle", "Archived"] {
+        assert!(
+            folded.contains(&serde_json::json!({ "Shelf": shelf })),
+            "{json}"
+        );
+    }
+    assert_eq!(serde_json::from_str::<place::Place>(&json).unwrap(), place);
+    // Another TUI on the same data is where this one was.
+    let other = reopened(app.projects.clone(), app.sessions.clone(), &json);
+    assert_eq!(other.place(), place);
+    assert_eq!(shown(&other), shown(&app));
+}
+
+#[test]
+fn reopened_on_a_changed_list_its_as_near_as_it_can_be() {
+    let base = app();
+    let (projects, mut sessions) = (base.projects.clone(), base.sessions.clone());
+    sessions.push(with("s5", (1, "alpha"), State::Idle, false, 15));
+    let mut app = new_app();
+    app.set_data(projects.clone(), sessions.clone());
+    select(&mut app, "s1");
+    let json = place_of(&app);
+    // Its session gone: on what took its row, the one after it.
+    let gone: Vec<Session> = sessions.iter().filter(|s| s.id != "s1").cloned().collect();
+    let other = reopened(projects.clone(), gone, &json);
+    assert_eq!(other.selected_session().unwrap().id, "s5");
+    // Archived: on the folded shelf it's on.
+    let mut archived = sessions.clone();
+    let s1 = archived.iter_mut().find(|s| s.id == "s1").unwrap();
+    (s1.state, s1.deleted_at) = (State::Stopped, Some(50));
+    assert_eq!(
+        reopened(projects.clone(), archived, &json).selected_key(),
+        Some(EntryKey::Group(Group::Shelf(Shelf::Archived)))
+    );
+    // Its project gone: neither shown alone nor folded; the view as it was.
+    app.folded.insert(Group::Project(2));
+    app.filter = Some(2);
+    app.rebuild();
+    app.set_mode(Mode::Projects);
+    let json = place_of(&app);
+    let alpha: Vec<Session> = sessions.into_iter().filter(|s| s.project_id == 1).collect();
+    let other = reopened(vec![project(1, "alpha")], alpha, &json);
+    assert_eq!(other.filter, None);
+    assert!(!other.folded.contains(&Group::Project(2)));
+    assert_eq!(other.mode, Mode::Projects);
+}
+
+#[test]
+fn a_new_tui_opens_where_the_last_one_was() {
+    let mut app = app();
+    select(&mut app, "s1");
+    keys(&mut app, "h");
+    select(&mut app, "s4");
+    // A filter typed and a form left open don't come back.
+    keys(&mut app, "/s4");
+    app.on_key(key(KeyCode::Enter));
+    keys(&mut app, "sn");
+    assert!(app.dialog.is_some());
+    let kept = keeps(&mut app, Instant::now(), true, true).unwrap();
+    let mut new = new_app();
+    new.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(new.reopen(Some(&kept)));
+    assert_eq!(new.selected_session().unwrap().id, "s4");
+    assert_eq!(
+        shown(&new),
+        [
+            EntryKey::Group(Group::Shelf(Shelf::NeedsInput)),
+            EntryKey::Session("s2".into()),
+            EntryKey::Group(Group::Shelf(Shelf::Idle)),
+            EntryKey::Group(Group::Shelf(Shelf::Working)),
+            EntryKey::Session("s4".into()),
+            EntryKey::Group(Group::Shelf(Shelf::Archived)),
+        ]
+    );
+    assert!(new.search.is_empty() && new.dialog.is_none());
+}
+
+#[test]
+fn not_remembered_the_place_is_neither_kept_nor_taken() {
+    let mut app = app();
+    select(&mut app, "s4");
+    app.remember_place = false;
+    assert_eq!(keeps(&mut app, Instant::now(), true, true), None);
+    let mut new = new_app();
+    new.remember_place = false;
+    new.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(!new.reopen(Some(&place_of(&app))));
+    assert_eq!(new.selected_session().unwrap().id, "s2");
+    // Turned on meanwhile, it's kept from then on.
+    app.remember_place = true;
+    assert!(keeps(&mut app, Instant::now(), false, true).is_some());
+}
+
+#[test]
+fn a_place_that_couldnt_be_read_is_left_for_the_next_tui() {
+    let mut app = app();
+    app.leave_place();
+    select(&mut app, "s4");
+    assert_eq!(keeps(&mut app, Instant::now(), true, true), None);
+}
+
+#[test]
+fn a_place_forgotten_is_kept_again_where_the_tui_still_is() {
+    let mut app = app();
+    assert!(keeps(&mut app, Instant::now(), true, true).is_some());
+    assert_eq!(keeps(&mut app, Instant::now(), true, true), None);
+    // `remember_place` off and on again, the cursor where it was.
+    app.forget_place();
+    assert!(keeps(&mut app, Instant::now(), true, true).is_some());
+}
+
+#[test]
+fn the_place_is_kept_as_it_changes_a_second_apart_at_most() {
+    let mut app = app();
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    // At once at first, then not till it changes.
+    assert!(keeps(&mut app, at(0), false, true).is_some());
+    assert_eq!(keeps(&mut app, at(5_000), false, true), None);
+    // A change a while after: at once; another just after, a second on.
+    select(&mut app, "s4");
+    assert!(keeps(&mut app, at(5_100), false, true).is_some());
+    select(&mut app, "s1");
+    assert_eq!(keeps(&mut app, at(5_600), false, true), None);
+    assert!(
+        keeps(&mut app, at(6_100), false, true)
+            .unwrap()
+            .contains("s1")
+    );
+    // Quitting: at once.
+    select(&mut app, "s2");
+    assert!(keeps(&mut app, at(6_200), true, true).is_some());
+    // Not kept (the database busy): tried again, a second on.
+    select(&mut app, "s4");
+    assert!(keeps(&mut app, at(8_000), false, false).is_some());
+    assert_eq!(keeps(&mut app, at(8_500), false, true), None);
+    assert!(keeps(&mut app, at(9_000), false, true).is_some());
+}
+
+/// `app`'s projects and sessions in a TUI just started.
+fn fresh(app: &App) -> App {
+    let mut new = new_app();
+    new.set_data(app.projects.clone(), app.sessions.clone());
+    new
+}
+
+#[test]
+fn a_place_partly_unreadable_loses_only_that_part() {
+    let app = app();
+    let opened = fresh(&app).place();
+    // Nothing kept, or not a place: as a TUI opens.
+    for kept in [None, Some("{not json"), Some("\"somewhere\""), Some("42")] {
+        let mut new = fresh(&app);
+        assert!(!new.reopen(kept), "{kept:?}");
+        assert_eq!(new.place(), opened, "{kept:?}");
+    }
+    // A view and folds a newer roster has, the rest missing: those as a
+    // TUI opens, the folds it knows kept.
+    let mut new = fresh(&app);
+    let kept = r#"{"selected":{"Session":"s4"},"view":"Gallery","folded":[{"Shelf":"Someday"},{"Shelf":"Idle"},{"Pile":3}]}"#;
+    assert!(new.reopen(Some(kept)));
+    assert_eq!(new.selected_session().unwrap().id, "s4");
+    assert_eq!(new.mode, Mode::Sessions);
+    assert_eq!(new.folded, HashSet::from([Group::Shelf(Shelf::Idle)]));
+    assert_eq!(new.filter, None);
+    // Every other part unreadable, each as a TUI opens without it: the
+    // entry still counts.
+    let mut new = fresh(&app);
+    let kept = r#"{"selected":{"Session":"s4"},"row":"far","folded":null,"unfolded":{"a":1},"project":"p"}"#;
+    assert!(new.reopen(Some(kept)));
+    assert_eq!(new.selected_session().unwrap().id, "s4");
+    assert_eq!(new.folded, first_folds());
+    assert!(new.unfolded.is_empty());
+    assert_eq!(new.filter, None);
+    // An entry it doesn't know: on the first session; the folds, missing,
+    // as at first.
+    let mut new = fresh(&app);
+    assert!(new.reopen(Some(
+        r#"{"selected":{"Bookmark":1},"row":5,"view":"Server"}"#
+    )));
+    assert_eq!(new.selected_session().unwrap().id, "s2");
+    assert_eq!(new.mode, Mode::Server);
+    assert_eq!(new.folded, first_folds());
+}
+
+#[test]
+fn a_heading_gone_with_the_grouping_lands_on_the_session_near_it() {
+    let heading = |app: &mut App, group| {
+        app.selected = app.position_of(&EntryKey::Group(group)).unwrap();
+    };
+    // By attention, the Idle shelf's; by project there's no such heading.
+    let mut app = app();
+    heading(&mut app, Group::Shelf(Shelf::Idle));
+    let by_shelf = place_of(&app);
+    heading(&mut app, Group::Shelf(Shelf::Archived));
+    let archived = place_of(&app);
+    let mut new = new_app();
+    new.set_grouped(true);
+    new.set_data(app.projects.clone(), app.sessions.clone());
+    assert!(new.reopen(Some(&by_shelf)));
+    assert_eq!(new.selected_session().unwrap().id, "s2");
+    // Archived's is in both.
+    assert!(new.reopen(Some(&archived)));
+    assert_eq!(
+        new.selected_key(),
+        Some(EntryKey::Group(Group::Shelf(Shelf::Archived)))
+    );
+    // By project, beta's; by attention, on the session near its row.
+    heading(&mut new, Group::Project(2));
+    let by_project = place_of(&new);
+    let mut new = fresh(&app);
+    assert!(new.reopen(Some(&by_project)));
+    assert_eq!(new.selected_session().unwrap().id, "s1");
+}
+
+#[test]
+fn the_last_session_of_a_shelf_gone_the_cursor_is_on_a_session_near_it() {
+    let base = app();
+    let (projects, mut sessions) = (base.projects.clone(), base.sessions.clone());
+    sessions.push(with("s5", (1, "alpha"), State::Idle, false, 15));
+    let mut app = new_app();
+    app.set_data(projects.clone(), sessions.clone());
+    select(&mut app, "s5");
+    let json = place_of(&app);
+    // Below it now, Working's heading: the session under it.
+    sessions.retain(|s| s.id != "s5");
+    let other = reopened(projects, sessions, &json);
+    assert_eq!(other.selected_session().unwrap().id, "s4");
+}
+
+#[test]
+fn the_place_is_kept_at_once_as_the_terminal_is_handed_over() {
+    let mut app = app();
+    let start = Instant::now();
+    assert!(keeps(&mut app, start, false, true).is_some());
+    // Moved, then attached within the second: kept as it attaches.
+    keys(&mut app, "jj");
+    let op = app.on_key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(op, Op::Attach("s1".into()));
+    let soon = start + Duration::from_millis(200);
+    assert_eq!(keeps(&mut app, soon, false, true), None);
+    let at_once = op.hands_over_terminal();
+    assert!(keeps(&mut app, soon, at_once, true).unwrap().contains("s1"));
+    // To an editor too; not what's done without leaving the TUI.
+    let s1 = || "s1".to_string();
+    let handing = [
+        Op::AttachPromptAgain(s1()),
+        Op::EditConfig,
+        Op::EditNote(Whose::Session(s1())),
+        Op::EditQueued {
+            session: s1(),
+            queued: 1,
+            n: 1,
+        },
+    ];
+    assert!(handing.iter().all(Op::hands_over_terminal));
+    let staying = [Op::Start(s1()), Op::Stop(s1()), Op::RetitleSession(s1())];
+    assert!(!staying.iter().any(Op::hands_over_terminal));
+}

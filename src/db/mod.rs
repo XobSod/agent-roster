@@ -190,6 +190,13 @@ impl Db {
         set_meta(&self.conn, key, value)
     }
 
+    /// Forgets a value roster kept for itself.
+    pub fn remove_meta(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// Sessions whose screen changes are, till when (ms), their agent
     /// redrawing for a size a roster gave it: kept here so a roster started
     /// meanwhile knows too. Only those not over at `now`.

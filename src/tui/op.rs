@@ -154,6 +154,21 @@ pub enum Op {
     Quit,
 }
 
+impl Op {
+    /// Whether carrying it out hands the terminal over, to tmux or an
+    /// editor: closing it then ends the TUI there.
+    pub fn hands_over_terminal(&self) -> bool {
+        matches!(
+            self,
+            Op::Attach(_)
+                | Op::AttachPromptAgain(_)
+                | Op::EditConfig
+                | Op::EditNote(_)
+                | Op::EditQueued { .. }
+        )
+    }
+}
+
 /// A note as written in the editor (all blank: none).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteSave {

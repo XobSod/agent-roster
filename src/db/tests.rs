@@ -828,6 +828,16 @@ fn a_prompt_sent_and_heard_goes_with_its_word_not_on_to_a_later_one_of_yours() {
 }
 
 #[test]
+fn a_value_kept_for_roster_is_forgotten() {
+    let (db, _) = db_with_session();
+    db.set_meta("tui:place", "{}").unwrap();
+    db.remove_meta("tui:place").unwrap();
+    assert_eq!(db.meta("tui:place").unwrap(), None);
+    // Nothing kept, nothing to forget.
+    db.remove_meta("tui:place").unwrap();
+}
+
+#[test]
 fn of_rosters_starting_a_session_at_once_one_does() {
     let (db, mut s) = db_with_session();
     s.set_state(State::Stopped, 5);

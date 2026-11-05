@@ -27,6 +27,10 @@
 //!                                 # "count": how many only
 //! stopped_cards = "unfolded"      # stopped and archived sessions: "folded" (default):
 //!                                 # a line each; "unfolded": whole cards
+//! remember_place = false          # default true: the TUI opens where the last one
+//!                                 # was: the session or heading selected, the view,
+//!                                 # what was folded and unfolded, a project shown
+//!                                 # alone
 //! queue_limit = 50                # prompts a session's queue holds at most (default 20)
 //! memory_warning = "8G"           # a session whose processes use more is marked
 //!                                 # (its card, header, a folded group's heading, the
@@ -135,6 +139,9 @@ pub struct Config {
     /// How stopped and archived sessions show in the list (default: a line
     /// each).
     pub stopped_cards: Option<StoppedCards>,
+    /// Whether the TUI opens where the last one was: the selection, the
+    /// view, the folds, a project shown alone (default on).
+    pub remember_place: Option<bool>,
     /// How many prompts sent to a session its queue holds at most.
     pub queue_limit: Option<usize>,
     /// Above how much memory a session's processes are said to use too much
@@ -792,6 +799,10 @@ impl Config {
         self.stopped_cards.unwrap_or_default()
     }
 
+    pub fn remember_place(&self) -> bool {
+        self.remember_place.unwrap_or(true)
+    }
+
     pub fn queue_limit(&self) -> usize {
         self.queue_limit.unwrap_or(QUEUE_LIMIT)
     }
@@ -884,6 +895,12 @@ mod tests {
             !Config::parse("update_check = false")
                 .unwrap()
                 .update_check()
+        );
+        assert!(config.remember_place());
+        assert!(
+            !Config::parse("remember_place = false")
+                .unwrap()
+                .remember_place()
         );
     }
 

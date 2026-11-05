@@ -11,6 +11,7 @@ use ratatui::text::Text;
 
 mod act;
 mod dialog;
+mod place;
 mod settings;
 mod texts;
 
@@ -34,9 +35,10 @@ use crate::search::Hit;
 
 const MESSAGE_TTL: Duration = Duration::from_secs(6);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mode {
     /// The session list, by shelf or by project.
+    #[default]
     Sessions,
     /// Every project, to add, edit, remove, or pick one.
     Projects,
@@ -262,6 +264,13 @@ pub struct App {
     /// (an update), and till roster restarts (an update installed).
     meanwhile: Option<Message>,
     lasting: Option<Message>,
+    /// Whether the TUI opens where the last one was (`remember_place`);
+    /// where this one was last kept for the next, and when that was last
+    /// tried; whether what's kept is left as it is (`leave_place`).
+    pub remember_place: bool,
+    place_kept: Option<place::Place>,
+    place_tried: Option<Instant>,
+    place_left: bool,
 }
 
 impl App {
@@ -274,7 +283,7 @@ impl App {
             search: String::new(),
             hits: None,
             typing: None,
-            folded: HashSet::from([Group::Shelf(Shelf::Archived)]),
+            folded: first_folds(),
             search_folded: HashSet::new(),
             entries: Vec::new(),
             selected: 0,
@@ -342,6 +351,10 @@ impl App {
             updating: None,
             meanwhile: None,
             lasting: None,
+            remember_place: true,
+            place_kept: None,
+            place_tried: None,
+            place_left: false,
         }
     }
 
@@ -516,17 +529,7 @@ impl App {
         );
         // In the server view the list isn't shown, but kept for coming back.
         self.entries = list::entries(&self.projects, &self.sessions, &self.list_options());
-        let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
-        // A selected session that moved into a folded group: select that group.
-        let found = keep.as_ref().and_then(|k| {
-            position(k).or_else(|| match k {
-                EntryKey::Session(id) => {
-                    let s = self.sessions.iter().find(|s| s.id == *id)?;
-                    position(&EntryKey::Group(list::group_of(s, self.grouped)))
-                }
-                _ => None,
-            })
-        });
+        let found = keep.as_ref().and_then(|k| self.position_of(k));
         // At first, the first session rather than a heading.
         let first_session = || self.entries.iter().position(|e| e.session().is_some());
         let fallback = if keep.is_none() {
@@ -542,16 +545,33 @@ impl App {
         // (only looked, or read its turn) it follows the session, as always.
         if let Some(row) = self.keep_row.take()
             && self.mode == Mode::Sessions
-            && !self.entries.is_empty()
         {
-            let n = self.entries.len();
-            let row = row.min(n - 1);
-            // A heading there: the session below it (or above, at the end).
-            self.selected = (row..n)
-                .chain((0..row).rev())
-                .find(|&i| self.entries[i].session().is_some())
-                .unwrap_or(row);
+            self.selected = self.session_near(row);
         }
+    }
+
+    /// Where `key` is in the list; a session in a folded group, at that
+    /// group's heading.
+    fn position_of(&self, key: &EntryKey) -> Option<usize> {
+        let position = |key: &EntryKey| self.entries.iter().position(|e| e.key() == *key);
+        position(key).or_else(|| match key {
+            EntryKey::Session(id) => {
+                let s = self.sessions.iter().find(|s| s.id == *id)?;
+                position(&EntryKey::Group(list::group_of(s, self.grouped)))
+            }
+            EntryKey::Group(_) => None,
+        })
+    }
+
+    /// The session at `row`, or if a heading's there, the one below it (or
+    /// above, at the end).
+    fn session_near(&self, row: usize) -> usize {
+        let n = self.entries.len();
+        let row = row.min(n.saturating_sub(1));
+        (row..n)
+            .chain((0..row).rev())
+            .find(|&i| self.entries[i].session().is_some())
+            .unwrap_or(row)
     }
 
     /// Notes where the cursor is before attaching to session `id`, the selected
@@ -1275,6 +1295,11 @@ impl App {
             self.selected = i;
         }
     }
+}
+
+/// Folded as a TUI first opens: what's finished.
+fn first_folds() -> HashSet<Group> {
+    HashSet::from([Group::Shelf(Shelf::Archived)])
 }
 
 /// The next (or previous) of `len` rows after `row`, past the end back to the

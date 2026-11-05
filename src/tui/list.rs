@@ -79,7 +79,7 @@ pub enum Entry {
     Row(Session),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EntryKey {
     Group(Group),
     Session(String),

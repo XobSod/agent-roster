@@ -13,7 +13,8 @@ pub const PROJECT_ENV: &str = ".agent-roster.env";
 pub struct Paths {
     /// `$XDG_CONFIG_HOME/agent-roster`: config.toml, env, tmux.conf (all hand-edited).
     pub config_dir: PathBuf,
-    /// `$XDG_STATE_HOME/agent-roster`: the database and the generated tmux config.
+    /// `$XDG_STATE_HOME/agent-roster`: the database, the generated tmux
+    /// config, and the secrets (`secrets_file`).
     pub state_dir: PathBuf,
 }
 
@@ -41,6 +42,12 @@ impl Paths {
     /// The user's optional additions to roster's tmux config.
     pub fn user_tmux_conf(&self) -> PathBuf {
         self.config_dir.join("tmux.conf")
+    }
+
+    /// What roster keeps secret (`secrets`): not beside config.toml, which
+    /// may be in a dotfiles repository.
+    pub fn secrets_file(&self) -> PathBuf {
+        self.state_dir.join("secrets.toml")
     }
 
     pub fn db(&self) -> PathBuf {

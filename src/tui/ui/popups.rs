@@ -293,8 +293,11 @@ pub(super) fn draw_dialog(f: &mut Frame, dialog: &Dialog, area: Rect) {
             value,
             choices,
             typed,
-            ..
+            purpose,
         } => {
+            // A secret: nothing of it shows, not even how long it is.
+            let secret = matches!(purpose, crate::tui::app::Purpose::Secret { .. });
+            let value = if secret { "" } else { value.as_str() };
             let rect = centered(area, width, 5);
             let hint = if choices.is_empty() {
                 "Enter ok · Esc cancel"

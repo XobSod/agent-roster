@@ -85,6 +85,19 @@
 //! idle_after = 4                  # seconds without screen changes = idle
 //! fit_preview = "never"           # also per agent; the agent's wins
 //!
+//! [cli_proxy]                     # a CLI Proxy holding several accounts
+//! enabled = true                  # default false: asked for every account it holds,
+//!                                 # in place of Claude and codex themselves
+//! url = "http://127.0.0.1:8317"   # where it answers
+//! icons = true                    # default false: the provider's icon before each
+//!                                 # account in the sidebar
+//!                                 # (its management key: `roster config set
+//!                                 # cli_proxy.key`, kept in the state directory)
+//! [[cli_proxy.labels]]            # what one of its accounts is called in roster
+//! provider = "claude"             # (an account's row in the settings view, or
+//! email = "name@example.com"      # `roster proxy label`, sets it)
+//! label = "Max"
+//!
 //! [prices."gpt-5-codex"]          # what a model's calls cost, in dollars per million
 //! input = 1.25                    # tokens: for one roster has no price for, or in
 //! output = 10.0                   # place of roster's own
@@ -153,6 +166,53 @@ pub struct Config {
     /// What models' calls cost, by model: in place of roster's own prices,
     /// or for models it has none for (`tokens::Prices`).
     pub prices: BTreeMap<String, Price>,
+    /// A CLI Proxy, asked for every account it holds.
+    pub cli_proxy: CliProxy,
+}
+
+/// A CLI Proxy: a local proxy the agents talk to, holding several accounts,
+/// which says what each has used of its limits. Its management key isn't
+/// here (`secrets`).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CliProxy {
+    /// Whether it's asked, in place of the agents (default off).
+    pub enabled: Option<bool>,
+    /// Where it answers: `http://127.0.0.1:8317`.
+    pub url: Option<String>,
+    /// The provider's icon before each account in the sidebar (default off).
+    pub icons: Option<bool>,
+    /// Never here: refused, saying where it goes.
+    pub key: Option<serde::de::IgnoredAny>,
+    /// What its accounts are called in roster.
+    pub labels: Vec<Label>,
+}
+
+/// What an account a CLI Proxy holds is called in roster, by its service
+/// and email: roster's own, not the proxy's.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Label {
+    pub provider: String,
+    pub email: String,
+    pub label: String,
+}
+
+impl Label {
+    /// Whether it's the one of `provider`'s account at `email`.
+    pub fn of(&self, provider: &str, email: &str) -> bool {
+        self.provider.eq_ignore_ascii_case(provider) && self.email.eq_ignore_ascii_case(email)
+    }
+}
+
+impl CliProxy {
+    /// What `provider`'s account at `email` is called, if it's labelled.
+    pub fn label(&self, provider: &str, email: Option<&str>) -> Option<&str> {
+        let email = email?;
+        (self.labels.iter())
+            .find(|l| l.of(provider, email))
+            .map(|l| l.label.as_str())
+    }
 }
 
 /// What a model's calls cost, in dollars per million tokens.
@@ -633,6 +693,32 @@ impl AgentConfig {
     }
 }
 
+/// Whether `url` can be the CLI Proxy's: http or https, to a host, nothing
+/// after its path; empty for none. No user or password in it: roster's key
+/// is set apart.
+fn check_proxy_url(url: &str) -> Result<()> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(());
+    }
+    let wrong = || {
+        format!("cli_proxy.url must be where the proxy answers, as http://host:port, not {url:?}")
+    };
+    let rest = (url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("https://"))
+        .with_context(wrong)?;
+    let host = rest.split('/').next().unwrap_or_default();
+    if host.is_empty() || url.contains(['?', '#']) || url.chars().any(char::is_whitespace) {
+        bail!("{}", wrong());
+    }
+    if host.contains('@') {
+        bail!(
+            "cli_proxy.url: no user or password in it; the management key is set apart (roster config set cli_proxy.key)"
+        );
+    }
+    Ok(())
+}
+
 /// The config file's text; "" if there's none.
 pub fn read_text(path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
@@ -737,6 +823,37 @@ impl Config {
                 bail!("prices.{model:?}.long.above must be a number of tokens, at least 1");
             }
         }
+        if config.cli_proxy.key.is_some() {
+            bail!(
+                "cli_proxy.key doesn't go in config.toml, which may be shared or kept in git: \
+                 take it out (roster config --edit), then set it with \
+                 roster config set cli_proxy.key, which keeps it in roster's state directory"
+            );
+        }
+        if let Some(url) = &config.cli_proxy.url {
+            check_proxy_url(url)?;
+        }
+        for (i, label) in config.cli_proxy.labels.iter().enumerate() {
+            for (name, value) in [
+                ("provider", &label.provider),
+                ("email", &label.email),
+                ("label", &label.label),
+            ] {
+                if value.trim().is_empty() || value.chars().any(char::is_control) {
+                    bail!("cli_proxy.labels: each needs a {name}, on one line");
+                }
+            }
+            if config.cli_proxy.labels[..i]
+                .iter()
+                .any(|l| l.of(&label.provider, &label.email))
+            {
+                bail!(
+                    "cli_proxy.labels: {}'s account {} is labelled twice",
+                    label.provider,
+                    label.email
+                );
+            }
+        }
         Ok(config)
     }
 
@@ -761,6 +878,14 @@ impl Config {
             );
         }
         gone
+    }
+
+    /// Where the CLI Proxy answers, if it's to be asked: enabled, at a URL
+    /// (without a trailing `/`).
+    pub fn cli_proxy(&self) -> Option<&str> {
+        let proxy = &self.cli_proxy;
+        let url = proxy.url.as_deref()?.trim().trim_end_matches('/');
+        (proxy.enabled == Some(true) && !url.is_empty()).then_some(url)
     }
 
     pub fn status_line(&self) -> bool {
@@ -902,6 +1027,44 @@ mod tests {
                 .unwrap()
                 .remember_place()
         );
+    }
+
+    #[test]
+    fn the_cli_proxy_is_asked_once_enabled_at_a_url() {
+        let proxy = |text: &str| Config::parse(text).map(|c| c.cli_proxy().map(String::from));
+        assert_eq!(proxy("").unwrap(), None);
+        let url = "url = \"http://127.0.0.1:8317/\"\n";
+        // Off, or on with nowhere to ask: as if there were none.
+        assert_eq!(proxy(&format!("[cli_proxy]\n{url}")).unwrap(), None);
+        assert_eq!(
+            proxy("[cli_proxy]\nenabled = true\nurl = \"\"").unwrap(),
+            None
+        );
+        assert_eq!(
+            proxy(&format!("[cli_proxy]\nenabled = true\n{url}")).unwrap(),
+            Some("http://127.0.0.1:8317".into())
+        );
+        assert_eq!(
+            proxy("[cli_proxy]\nenabled = true\nurl = \"https://proxy.example.com/cpa\"").unwrap(),
+            Some("https://proxy.example.com/cpa".into())
+        );
+        for wrong in [
+            "127.0.0.1:8317",
+            "ftp://127.0.0.1",
+            "http://",
+            "http://127.0.0.1:8317/?x=1",
+            "http://user:made-up@127.0.0.1:8317",
+        ] {
+            let text = format!("[cli_proxy]\nurl = \"{wrong}\"");
+            let e = Config::parse(&text).unwrap_err().to_string();
+            assert!(e.starts_with("cli_proxy.url"), "{wrong}: {e}");
+        }
+        // The key never: said where it goes.
+        let e = Config::parse("[cli_proxy]\nkey = \"made-up\"")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("roster config --edit"), "{e}");
+        assert!(e.contains("roster config set cli_proxy.key"), "{e}");
     }
 
     #[test]

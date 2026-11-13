@@ -16,8 +16,10 @@ mod note;
 mod paths;
 mod print;
 mod procs;
+mod proxy;
 mod report;
 mod search;
+mod secrets;
 mod settings;
 mod stats;
 mod title;
@@ -238,6 +240,7 @@ fn run_command(r: &mut Roster, command: Cmd) -> Result<()> {
         Cmd::Sidebar { session } => tui::run_sidebar(r, &session)?,
         Cmd::Doctor { fix, yes } => cmd::doctor::doctor(r, fix, yes)?,
         Cmd::Usage { json } => print_usage(r, json)?,
+        Cmd::Proxy { change, json } => cmd::proxy::proxy(r, change, json)?,
         Cmd::Tokens { days, json } => print_tokens(r, days, json)?,
         Cmd::Events { follow, session } => events(r, follow, session.as_deref())?,
         // Dispatched in main before parsing; only reached via unusual argument orders.

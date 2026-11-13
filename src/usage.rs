@@ -4,10 +4,108 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::proxy::Account;
 use crate::util::{local_when, until};
 
 /// What's said where the accounts would be asked, but `account_limits` is off.
 pub const OFF: &str = "Roster doesn't ask your accounts: account_limits is off (`roster config set account_limits true`, or in the settings view)";
+
+/// One round of asking: whether through a CLI Proxy, and what each said.
+pub struct Asked {
+    pub via: Via,
+    pub answers: Vec<Answer>,
+}
+
+/// What one agent, or one account a CLI Proxy holds, said.
+pub struct Answer {
+    /// The agent asked; for an account of the CLI Proxy's, its provider.
+    pub agent: String,
+    /// The CLI Proxy's account it's about; None for an agent's own.
+    pub account: Option<Account>,
+    /// What it has used; None for an account roster doesn't ask (disabled,
+    /// or of a service it can't ask) or that has no plan's limits.
+    pub said: anyhow::Result<Option<Usage>>,
+}
+
+/// Whether a round went through a CLI Proxy.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Via {
+    /// None is to be asked: the agents are.
+    Agents,
+    /// The one at this URL, for the services it holds accounts of; the
+    /// agents for the others.
+    Proxy(String),
+    /// The one at `url` couldn't be asked (`why`): the agents were instead.
+    FellBack { url: String, why: String },
+    /// The one at `url` couldn't be asked (`why`), having answered before:
+    /// what it said then stands, and the agents of its services aren't asked.
+    Failed { url: String, why: String },
+}
+
+impl Via {
+    /// Why the CLI Proxy couldn't be asked, if it couldn't.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Via::FellBack { why, .. } | Via::Failed { why, .. } => Some(why),
+            _ => None,
+        }
+    }
+
+    /// What the round went through, in a line: `via CLI Proxy <url>`, or why
+    /// it didn't.
+    pub fn said(&self) -> Option<String> {
+        Some(match self {
+            Via::Agents => return None,
+            Via::Proxy(url) => format!("via CLI Proxy {url}"),
+            Via::FellBack { url, why } => {
+                format!("CLI Proxy {url} not asked, the agents instead: {why}")
+            }
+            Via::Failed { url, why } => {
+                format!("CLI Proxy {url} can't be asked now, as it last said: {why}")
+            }
+        })
+    }
+}
+
+/// What a round needs from before: whether the CLI Proxy has answered since
+/// it was set (then it isn't fallen back from), the services it held
+/// accounts of, and Claude's accounts' plans, asked once (by account id).
+#[derive(Clone, Debug, Default)]
+pub struct Known {
+    pub answered: bool,
+    pub held: Vec<String>,
+    pub plans: std::collections::HashMap<String, String>,
+}
+
+/// The order services show in: Claude's, Codex's, then the others by name.
+pub fn rank(provider: &str) -> (u8, &str) {
+    match provider {
+        "claude" => (0, ""),
+        "codex" => (1, ""),
+        other => (2, other),
+    }
+}
+
+/// What an account is called where there's room: `Label (email)`, its
+/// email, else its service and the proxy's id for it.
+pub fn account_title(account: &Account, label: Option<&str>) -> String {
+    match (label, &account.email) {
+        (Some(label), Some(email)) => format!("{label} ({email})"),
+        (Some(label), None) => label.to_string(),
+        (None, Some(email)) => email.clone(),
+        (None, None) => format!("{} {}", account.provider, account.id),
+    }
+}
+
+/// What an account is called where there's little room: its label, else
+/// its email up to the `@`, else the proxy's id for it.
+pub fn account_short(account: &Account, label: Option<&str>) -> String {
+    match (label, &account.email) {
+        (Some(label), _) => label.to_string(),
+        (None, Some(email)) => email.split('@').next().unwrap_or(email).to_string(),
+        (None, None) => account.id.clone(),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Usage {

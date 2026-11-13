@@ -23,6 +23,11 @@ pub(super) fn perform(
         Op::ChangeSetting { setting, input } => {
             settings::change_setting(roster, app, setting, input)
         }
+        Op::SetProxyLabel {
+            provider,
+            email,
+            label,
+        } => settings::set_proxy_label(roster, app, provider, email, label),
         Op::EditConfig => settings::edit_config(terminal, roster, app)?,
         Op::AddAgent(line) => settings::add_agent(roster, app, line),
         Op::Attach(id) => lifecycle::attach(terminal, roster, app, id)?,

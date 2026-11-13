@@ -147,7 +147,7 @@ fn agent(timeout: Duration) -> ureq::Agent {
 /// The system's certificates (`SSL_CERT_FILE`, `SSL_CERT_DIR`, else where
 /// the distribution keeps them), which a company's proxy has its own among;
 /// where there are none, Mozilla's, built in.
-fn roots() -> RootCerts {
+pub(crate) fn roots() -> RootCerts {
     let found = rustls_native_certs::load_native_certs();
     let certs: Vec<Certificate<'static>> = (found.certs.iter())
         .map(|c| Certificate::from_der(c.as_ref()).to_owned())

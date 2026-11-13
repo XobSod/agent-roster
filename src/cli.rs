@@ -190,8 +190,16 @@ pub enum Cmd {
         #[arg(long, conflicts_with = "defaults")]
         edit: bool,
     },
-    /// What your Claude and codex accounts have used of their limits: each window, and when it starts over
+    /// What your Claude and codex accounts have used of their limits, or each account a CLI Proxy holds: each window, and when it starts over
     Usage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The CLI Proxy: how it stands, and the accounts it holds with their labels (asking it for its list, nothing more)
+    #[command(args_conflicts_with_subcommands = true)]
+    Proxy {
+        #[command(subcommand)]
+        change: Option<ProxyCmd>,
         #[arg(long)]
         json: bool,
     },
@@ -394,10 +402,26 @@ impl WorksInArgs {
 }
 
 #[derive(Subcommand)]
+pub enum ProxyCmd {
+    /// What an account of the CLI Proxy's is called in roster (`label claude name@example.com
+    /// Max`), kept in config.toml; without a label, its label is taken out
+    Label {
+        /// Its service, as the proxy names it: claude, codex, gemini…
+        provider: String,
+        email: String,
+        label: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCmd {
     /// Change a setting in config.toml (keeping the rest of it): `set agents.pi.title_model
-    /// claude-haiku-4-5`, `set keys.up "k Up"`
-    Set { setting: String, value: String },
+    /// claude-haiku-4-5`, `set keys.up "k Up"`. `set cli_proxy.key` with no value reads the
+    /// key from stdin (not shown as it's typed), and keeps it out of config.toml
+    Set {
+        setting: String,
+        value: Option<String>,
+    },
     /// Take a setting out of config.toml, so its default holds again; a whole
     /// table of them (`unset agents.aider`) asks first
     Unset {

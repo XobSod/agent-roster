@@ -1187,6 +1187,7 @@ fn the_settings_view_changes_settings() {
         chats_dir: "~/chats",
         worktrees_dir: "~/worktrees",
         agents: &agents,
+        proxy_key: &crate::secrets::KeyState::Set,
     };
     app.set_settings(crate::settings::sections(
         &config,
@@ -1297,6 +1298,27 @@ fn the_settings_view_changes_settings() {
         app.on_key(key(KeyCode::Enter)),
         Some(change("agents.claude.title_model", Some("sonnet")))
     );
+    // A secret: typed afresh, Enter setting it, empty taking it out; ←→ and
+    // Tab do nothing to it; `d` takes it out.
+    select(&mut app, "cli_proxy.key");
+    assert_eq!(app.on_key(key(KeyCode::Right)), None);
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert!(matches!(
+        &app.dialog,
+        Some(Dialog::Input { value, purpose: Purpose::Secret { .. }, .. }) if value.is_empty()
+    ));
+    keys(&mut app, "made-up-key");
+    app.on_key(key(KeyCode::Tab));
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(change("cli_proxy.key", Some("made-up-key")))
+    );
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.on_key(key(KeyCode::Enter)),
+        Some(change("cli_proxy.key", Some("")))
+    );
+    assert_eq!(keys(&mut app, "d"), Some(change("cli_proxy.key", None)));
     // Agents: removing one asks first; a new one is a command line.
     select(&mut app, "agents.aider.command");
     keys(&mut app, "x");
@@ -2262,4 +2284,119 @@ fn the_place_is_kept_at_once_as_the_terminal_is_handed_over() {
     assert!(handing.iter().all(Op::hands_over_terminal));
     let staying = [Op::Start(s1()), Op::Stop(s1()), Op::RetitleSession(s1())];
     assert!(!staying.iter().any(Op::hands_over_terminal));
+}
+
+#[test]
+fn the_cli_proxys_accounts_are_rows_of_its_settings() {
+    use crate::proxy::Account;
+    use crate::tui::limits::Said;
+    let mut app = app();
+    keys(&mut app, "vs");
+    let text = "[cli_proxy]\nenabled = true\nurl = \"http://127.0.0.1:8317\"\n";
+    let config = crate::config::Config::parse(text).unwrap();
+    app.proxy_url = config.cli_proxy().map(String::from);
+    app.cli_proxy = config.cli_proxy.clone();
+    let label = |provider: &str, email: &str, label: &str| crate::config::Label {
+        provider: provider.into(),
+        email: email.into(),
+        label: label.into(),
+    };
+    app.cli_proxy.labels = vec![
+        label("claude", "alexandra@example.com", "Max"),
+        label("codex", "gone@example.com", "Old"),
+    ];
+    let account = |provider: &str, id: &str, email: Option<&str>, disabled: bool| Said {
+        agent: provider.into(),
+        account: Some(Account {
+            provider: provider.into(),
+            id: id.into(),
+            email: email.map(String::from),
+            disabled,
+            sign_in: false,
+        }),
+        usage: None,
+        error: None,
+    };
+    let mut max = account("claude", "a1", Some("alexandra@example.com"), false);
+    max.usage = Some(crate::usage::Usage {
+        plan: Some("max 5x".into()),
+        windows: Vec::new(),
+        notes: Vec::new(),
+        at: 0,
+    });
+    app.limits.agents = vec![
+        account("codex", "c3", Some("jordan.lee@example.com"), true),
+        max,
+        account("claude", "e5", None, false),
+    ];
+    app.limits.via = Some(crate::usage::Via::Proxy("http://127.0.0.1:8317".into()));
+    let agents = vec!["claude".to_string()];
+    let env = crate::settings::Env {
+        shell: "/bin/sh",
+        chats_dir: "~/chats",
+        worktrees_dir: "~/worktrees",
+        agents: &agents,
+        proxy_key: &crate::secrets::KeyState::Set,
+    };
+    app.set_settings(crate::settings::sections(&config, text, &env));
+    let row = |app: &App, dotted: &str| {
+        let all = app.all_settings();
+        let at = all.iter().position(|s| s.dotted() == dotted);
+        let at = at.unwrap_or_else(|| {
+            panic!(
+                "no {dotted} among {:?}",
+                all.iter().map(|s| s.dotted()).collect::<Vec<_>>()
+            )
+        });
+        (at, all[at].clone())
+    };
+    let (status, s) = row(&app, "cli_proxy.status");
+    assert_eq!(s.value, "connected");
+    assert!(s.doc.contains("3 accounts"), "{}", s.doc);
+    // After it, by service then name: those listed, then those labelled
+    // that it doesn't list.
+    let (alexandra, s) = row(&app, "cli_proxy.account.alexandra@example.com.claude");
+    assert_eq!((s.name(), s.value.as_str(), s.set), ("claude", "Max", true));
+    assert_eq!(s.doc, "alexandra@example.com · max 5x");
+    let (no_email, s) = row(&app, "cli_proxy.account.e5.claude");
+    assert!(s.doc.starts_with("no email"), "{}", s.doc);
+    let (jordan, s) = row(&app, "cli_proxy.account.jordan.lee@example.com.codex");
+    assert_eq!((s.value.as_str(), s.set), ("no label", false));
+    assert!(s.doc.ends_with("disabled"), "{}", s.doc);
+    let (gone, s) = row(&app, "cli_proxy.account.gone@example.com.codex");
+    assert!(s.doc.ends_with("not listed by the proxy now"), "{}", s.doc);
+    assert!(status < no_email && no_email < alexandra && alexandra < jordan && jordan < gone);
+    // Enter labels one, as it was to start with; `d` takes it out.
+    app.setting_row = alexandra;
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert!(matches!(
+        &app.dialog,
+        Some(Dialog::Input { value, purpose: Purpose::Label { .. }, .. }) if value == "Max"
+    ));
+    keys(&mut app, "2");
+    let label = |label: Option<&str>| Op::SetProxyLabel {
+        provider: "claude".into(),
+        email: "alexandra@example.com".into(),
+        label: label.map(String::from),
+    };
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Some(label(Some("Max2"))));
+    assert_eq!(keys(&mut app, "d"), Some(label(None)));
+    app.on_key(key(KeyCode::Enter));
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(app.on_key(key(KeyCode::Enter)), Some(label(None)));
+    // One without a label has none to take out; one without an email can't
+    // have one.
+    app.setting_row = jordan;
+    assert_eq!(keys(&mut app, "d"), None);
+    app.setting_row = no_email;
+    assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+    assert!(app.dialog.is_none());
+    // Enter on how it stands asks it again.
+    app.setting_row = status;
+    assert_eq!(keys(&mut app, "d"), None);
+    assert!(!app.limits.due(false));
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.limits.due(false));
 }

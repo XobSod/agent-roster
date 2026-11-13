@@ -80,6 +80,8 @@ pub fn run(roster: &mut Roster) -> Result<()> {
     app.notes = roster.config.notes.clone();
     app.account_limits = roster.config.account_limits();
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.cli_proxy = roster.config.cli_proxy.clone();
+    app.proxy_url = roster.config.cli_proxy().map(String::from);
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
@@ -283,6 +285,8 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.remember_place = roster.config.remember_place();
     forget_place_unless_remembered(roster, app);
     app.sidebar_usage = roster.config.sidebar_usage();
+    app.cli_proxy = roster.config.cli_proxy.clone();
+    app.proxy_url = roster.config.cli_proxy().map(String::from);
     app.card_subagents = roster.config.card_subagents();
     app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
@@ -290,6 +294,14 @@ fn use_config(roster: &Roster, app: &mut App) {
     app.preview.fitted.clear();
     app.models.chosen = form::Models::chosen_in(&roster.config);
     app.listing = Some(list_models(roster));
+}
+
+/// Which CLI Proxy is to be asked, and when its key was last written.
+fn proxy_seen(roster: &Roster) -> app::ProxySeen {
+    let key = std::fs::metadata(roster.paths.secrets_file())
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    (roster.config.cli_proxy().map(String::from), key)
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App) -> Result<()> {
@@ -337,9 +349,21 @@ fn event_loop(terminal: &mut DefaultTerminal, roster: &mut Roster, app: &mut App
             update_preview(roster, app);
         }
         // What the agents' accounts have used, asked in the background
-        // while something shows it, unless they're not to be asked.
-        if app.account_limits && app.limits.due(app.sidebar_usage || app.mode == Mode::Usage) {
-            app.limits.ask(roster.usage_reader());
+        // while something shows it, unless they're not to be asked. Another
+        // CLI Proxy, none, or another key of it: what it said is forgotten.
+        let proxy = proxy_seen(roster);
+        if app
+            .proxy_seen
+            .replace(proxy.clone())
+            .is_some_and(|seen| seen != proxy)
+        {
+            app.limits.forget_proxy();
+        }
+        let shown = app.sidebar_usage
+            || app.mode == Mode::Usage
+            || (app.mode == Mode::Settings && app.proxy_url.is_some());
+        if app.account_limits && app.limits.due(shown) {
+            app.limits.ask(roster.usage_reader(app.limits.known()));
         }
         app.limits.arrived();
         // What the agents spent, read in the background while a period of

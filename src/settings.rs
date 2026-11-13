@@ -21,8 +21,8 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Key, Table, TableLike, Va
 
 use crate::agent::{self, locked};
 use crate::config::{
-    AgentConfig, CardSubagents, Config, First, FitPreview, GroupBy, KeyList, Keys, NoteEditor,
-    Notes, Order, ProjectKeys, SessionKeys, StoppedCards, ViewKeys, Worktrees,
+    AgentConfig, CardSubagents, CliProxy, Config, First, FitPreview, GroupBy, KeyList, Keys,
+    NoteEditor, Notes, Order, ProjectKeys, SessionKeys, StoppedCards, ViewKeys, Worktrees,
 };
 
 impl crate::engine::Roster {
@@ -32,11 +32,13 @@ impl crate::engine::Roster {
         let chats = crate::util::short_path(&self.chats_dir());
         let worktrees = crate::util::short_path(&self.worktrees_dir());
         let agents = agent::available(&self.config);
+        let proxy_key = crate::secrets::KeyState::read(&self.paths.secrets_file());
         let env = Env {
             shell: &shell,
             chats_dir: &chats,
             worktrees_dir: &worktrees,
             agents: &agents,
+            proxy_key: &proxy_key,
         };
         sections(&self.config, &self.config_text, &env)
     }
@@ -73,6 +75,10 @@ impl crate::engine::Roster {
     /// checked like a config at startup, and only then written and used: what
     /// another roster or an editor changed meanwhile stays.
     pub fn change_setting(&mut self, dotted: &str, input: Option<&str>) -> Result<()> {
+        // Kept apart from config.toml, and changing nothing in it.
+        if dotted == crate::secrets::PROXY_KEY {
+            return crate::secrets::set_proxy_key(&self.paths.secrets_file(), input);
+        }
         let path: Vec<String> = dotted.split('.').map(String::from).collect();
         // A table of numbers per model, whose names have dots of their own.
         if path[0] == "prices" {
@@ -117,6 +123,38 @@ impl crate::engine::Roster {
         };
         self.use_config(config, text)
             .with_context(|| format!("{dotted} is changed, but roster's tmux didn't take it"))
+    }
+
+    /// Labels the CLI Proxy's account of `provider` at `email` (`label`),
+    /// or with None (or empty), takes its label out: an entry of
+    /// `[[cli_proxy.labels]]` in config.toml, the rest of it as it was.
+    /// Whether the proxy lists that account or can be asked at all doesn't
+    /// matter.
+    pub fn set_proxy_label(
+        &mut self,
+        provider: &str,
+        email: &str,
+        label: Option<&str>,
+    ) -> Result<()> {
+        let (provider, email) = (provider.trim().to_lowercase(), email.trim());
+        if provider.is_empty() || email.is_empty() {
+            bail!("a label is for an account: its provider and its email");
+        }
+        let label = label.map(str::trim).filter(|l| !l.is_empty());
+        let mut written = None;
+        locked::update(&self.paths.config_file(), |text| {
+            let Some(changed) = edit_label(text, &provider, email, label)? else {
+                return Ok(None);
+            };
+            let config = Config::parse(&changed).context("cli_proxy.labels: not changed")?;
+            written = Some((config, changed.clone()));
+            Ok(Some(changed))
+        })?;
+        if let Some((config, text)) = written {
+            self.use_config(config, text)
+                .context("labelled, but roster's tmux didn't take the settings")?;
+        }
+        Ok(())
     }
 
     /// Adds an agent that runs `line` (`gemini --yolo`): named after its
@@ -389,6 +427,18 @@ pub enum Kind {
     Keys,
     /// A tmux key (the back key while attached).
     TmuxKey,
+    /// Text never shown, nor kept in config.toml (`secrets`): the CLI
+    /// Proxy's key.
+    Secret,
+    /// Not a setting: how the CLI Proxy stands, a row of the settings view's
+    /// own, Enter asking it again.
+    Status,
+    /// Not a setting: an account of the CLI Proxy's, a row of the settings
+    /// view's own, Enter labelling it (`cli_proxy.labels`).
+    Label {
+        provider: String,
+        email: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -432,12 +482,14 @@ pub struct Section {
 }
 
 /// What the values that depend on more than the file are: the shell, the
-/// chats' directory, and which agents can be started.
+/// chats' directory, which agents can be started, and whether the CLI
+/// Proxy's key is set.
 pub struct Env<'a> {
     pub shell: &'a str,
     pub chats_dir: &'a str,
     pub worktrees_dir: &'a str,
     pub agents: &'a [String],
+    pub proxy_key: &'a crate::secrets::KeyState,
 }
 
 /// Every setting, as `config` (read from `text`) has it.
@@ -502,6 +554,7 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         queue_limit,
         memory_warning,
         update_check,
+        cli_proxy,
         // A table per model, priced in config.toml by hand (`roster config
         // --edit`); the template shows how.
         prices: _,
@@ -547,7 +600,11 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
             bool_setting(
                 &["account_limits"],
                 account_limits.unwrap_or(true),
-                "ask your Claude and codex accounts what's left of their limits (claude -p, codex app-server)",
+                if config.cli_proxy().is_some() {
+                    "ask what's left of your accounts' limits: those the CLI Proxy holds, asking it (cli_proxy)"
+                } else {
+                    "ask your Claude and codex accounts what's left of their limits (claude -p, codex app-server)"
+                },
             ),
             bool_setting(
                 &["sidebar_usage"],
@@ -739,7 +796,64 @@ pub fn sections(config: &Config, text: &str, cx: &Env) -> Vec<Section> {
         ],
     };
 
-    let mut sections = vec![general, notes, worktrees, shelves];
+    let CliProxy {
+        enabled,
+        url,
+        icons,
+        // Never set: refused (`Config::parse`).
+        key: _,
+        // Each account's, set from its row (shown with the accounts the
+        // proxy lists) or `roster proxy label`; the template shows how.
+        labels: _,
+    } = cli_proxy;
+    let key = {
+        use crate::secrets::KeyState;
+        let (shown, doc) = match cx.proxy_key {
+            KeyState::Set => ("set".to_string(), String::new()),
+            KeyState::NotSet => ("not set".into(), String::new()),
+            KeyState::Unreadable(why) => ("can't be read".into(), format!(" ({why})")),
+        };
+        let mut s = make(
+            &["cli_proxy", "key"],
+            Kind::Secret,
+            shown,
+            String::new(),
+            &format!(
+                "its management key, never shown: kept in secrets.toml in roster's state directory, not in config.toml{doc}"
+            ),
+        );
+        s.set = *cx.proxy_key != KeyState::NotSet;
+        s
+    };
+    let cli_proxy = Section {
+        title: "CLI Proxy".into(),
+        agent: None,
+        table: Some(path(&["cli_proxy"])),
+        settings: vec![
+            bool_setting(
+                &["cli_proxy", "enabled"],
+                enabled.unwrap_or(false),
+                "ask the CLI Proxy for every account it holds, in place of asking Claude and codex themselves",
+            ),
+            Setting {
+                placeholder: Some("\"http://127.0.0.1:8317\"".into()),
+                ..text_setting(
+                    &["cli_proxy", "url"],
+                    url.as_deref(),
+                    "not set",
+                    "where it answers: http://host:port",
+                )
+            },
+            key,
+            bool_setting(
+                &["cli_proxy", "icons"],
+                icons.unwrap_or(false),
+                "in the sidebar, each account's provider's icon before it",
+            ),
+        ],
+    };
+
+    let mut sections = vec![general, cli_proxy, notes, worktrees, shelves];
     for name in agents {
         let adapter = agent::adapter(name);
         let agent = configured.get(name).cloned().unwrap_or_default();
@@ -1120,6 +1234,8 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
             toml_edit::value(lines)
         }
         Kind::Words => Item::Value(Value::Array(split_words(input)?.into_iter().collect())),
+        Kind::Secret => bail!("it's kept in secrets.toml, not config.toml"),
+        Kind::Status | Kind::Label { .. } => bail!("it isn't a setting"),
         Kind::Keys => {
             let keys: Vec<&str> = input.split_whitespace().collect();
             match keys[..] {
@@ -1129,6 +1245,118 @@ pub fn parse_input(kind: &Kind, input: &str) -> Result<Item> {
             }
         }
     })
+}
+
+/// `text` with `provider`'s account at `email` labelled `label`, or its label
+/// taken out (None); None if that changes nothing. Labels are an array of
+/// tables (`[[cli_proxy.labels]]`), or written inline by hand; the rest of
+/// the file stays as it was.
+fn edit_label(
+    text: &str,
+    provider: &str,
+    email: &str,
+    label: Option<&str>,
+) -> Result<Option<String>> {
+    let mut doc: DocumentMut = text.parse()?;
+    let proxy = doc
+        .entry("cli_proxy")
+        .or_insert_with(|| {
+            // Only its labels, if that's all there is.
+            let mut table = Table::new();
+            table.set_implicit(true);
+            Item::Table(table)
+        })
+        .as_table_like_mut()
+        .context("cli_proxy isn't a table")?;
+    let of = |t: &dyn TableLike| {
+        let field = |key| {
+            t.get(key)
+                .and_then(|v: &Item| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        crate::config::Label {
+            provider: field("provider"),
+            email: field("email"),
+            label: String::new(),
+        }
+        .of(provider, email)
+    };
+    let changed = match proxy.get_mut("labels") {
+        None => match label {
+            None => false,
+            Some(label) => {
+                let mut labels = toml_edit::ArrayOfTables::new();
+                labels.push(label_table(provider, email, label));
+                proxy.insert("labels", Item::ArrayOfTables(labels));
+                true
+            }
+        },
+        Some(Item::ArrayOfTables(labels)) => {
+            let at = (0..labels.len()).find(|&i| labels.get(i).is_some_and(|t| of(t)));
+            match (at, label) {
+                (Some(i), Some(label)) => {
+                    let entry = labels.get_mut(i).context("no such label")?;
+                    let same = entry.get("label").and_then(|v| v.as_str()) == Some(label);
+                    entry.insert("label", toml_edit::value(label));
+                    !same
+                }
+                (Some(i), None) => {
+                    labels.remove(i);
+                    if labels.is_empty() {
+                        proxy.remove("labels");
+                    }
+                    true
+                }
+                (None, Some(label)) => {
+                    labels.push(label_table(provider, email, label));
+                    true
+                }
+                (None, None) => false,
+            }
+        }
+        Some(Item::Value(Value::Array(labels))) => {
+            let at = (0..labels.len()).find(|&i| {
+                labels
+                    .get(i)
+                    .and_then(|v| v.as_inline_table())
+                    .is_some_and(|t| of(t))
+            });
+            match (at, label) {
+                (Some(i), Some(label)) => {
+                    let entry = (labels.get_mut(i))
+                        .and_then(|v| v.as_inline_table_mut())
+                        .context("no such label")?;
+                    let same = entry.get("label").and_then(|v| v.as_str()) == Some(label);
+                    entry.insert("label", label.into());
+                    !same
+                }
+                (Some(i), None) => {
+                    labels.remove(i);
+                    true
+                }
+                (None, Some(label)) => {
+                    let mut entry = InlineTable::new();
+                    entry.insert("provider", provider.into());
+                    entry.insert("email", email.into());
+                    entry.insert("label", label.into());
+                    labels.push(entry);
+                    true
+                }
+                (None, None) => false,
+            }
+        }
+        Some(_) => bail!("cli_proxy.labels isn't a list of labels"),
+    };
+    Ok(changed.then(|| doc.to_string()))
+}
+
+fn label_table(provider: &str, email: &str, label: &str) -> Table {
+    let mut table = Table::new();
+    table.insert("provider", toml_edit::value(provider));
+    table.insert("email", toml_edit::value(email));
+    table.insert("label", toml_edit::value(label));
+    table
 }
 
 /// `text` with the setting at `path` set to `item`, or, None, taken out (so
@@ -1507,6 +1735,16 @@ pub fn template(sections: &[Section]) -> String {
             None => out.push_str(&format!("# {}\n", section.title)),
         }
         for s in &section.settings {
+            // Never a value: it doesn't go here.
+            if s.kind == Kind::Secret {
+                out.push_str(&format!(
+                    "# {}: roster config set {}, not here    # {}\n",
+                    s.name(),
+                    s.dotted(),
+                    s.doc
+                ));
+                continue;
+            }
             let value = match parse_input(&s.kind, &s.input) {
                 // Unset text: its default, if that's a value.
                 Ok(_) if s.input.is_empty() && matches!(s.kind, Kind::Text | Kind::Model) => s
@@ -1534,6 +1772,14 @@ pub fn template(sections: &[Section]) -> String {
          # long = { above = 272000, input = 2.5, output = 15.0 }    # a call sending more \
          than `above` tokens: all of it at these\n",
     );
+    // An account's label, one table each, set where its account shows.
+    out.push_str(
+        "\n# [[cli_proxy.labels]]    # what an account of the CLI Proxy's is called in roster \
+         (an account's row in the settings view, or roster proxy label, sets it)\n\
+         # provider = \"claude\"\n\
+         # email = \"name@example.com\"\n\
+         # label = \"Max\"\n",
+    );
     out
 }
 
@@ -1552,6 +1798,7 @@ mod tests {
             chats_dir: "~/chats",
             worktrees_dir: "~/.local/state/agent-roster/worktrees",
             agents: AGENTS.get_or_init(|| vec!["claude".into(), "pi".into(), "aider".into()]),
+            proxy_key: &crate::secrets::KeyState::NotSet,
         }
     }
 
@@ -1929,6 +2176,125 @@ mod tests {
         assert!(
             template.contains("# effort = \"<effort>\"    # the effort new sessions get"),
             "{template}"
+        );
+    }
+
+    #[test]
+    fn the_cli_proxys_key_is_never_a_value_of_config_toml() {
+        use crate::secrets::KeyState;
+        let text = "[cli_proxy]\nenabled = true\nurl = \"http://127.0.0.1:8317\"\n";
+        let config = Config::parse(text).unwrap();
+        let section = |state: &KeyState| {
+            let sections = sections(
+                &config,
+                text,
+                &Env {
+                    proxy_key: state,
+                    ..cx()
+                },
+            );
+            let key = find(&sections, "cli_proxy.key").clone();
+            (sections, key)
+        };
+        let (sections, key) = section(&KeyState::NotSet);
+        assert_eq!(
+            (key.kind, key.value.as_str(), key.set),
+            (Kind::Secret, "not set", false)
+        );
+        assert_eq!(find(&sections, "cli_proxy.enabled").value, "on");
+        assert_eq!(find(&sections, "cli_proxy.icons").value, "off");
+        // Asking the proxy, the accounts' limits say so.
+        assert!(find(&sections, "account_limits").doc.contains("CLI Proxy"));
+        let (_, key) = section(&KeyState::Set);
+        assert_eq!((key.value.as_str(), key.set), ("set", true));
+        let (_, key) = section(&KeyState::Unreadable("made readable by others".into()));
+        assert_eq!(key.value, "can't be read");
+        assert!(key.doc.contains("made readable by others"), "{}", key.doc);
+        // The template says where it's set, never `key = …`.
+        let template = template(&sections);
+        assert!(
+            template.contains("# key: roster config set cli_proxy.key, not here"),
+            "{template}"
+        );
+        assert!(!template.contains("key = "), "{template}");
+        assert!(parse_input(&Kind::Secret, "made-up").is_err());
+        // Off, or nowhere to ask: the agents are asked.
+        let off = super::sections(&Config::default(), "", &cx());
+        assert!(!find(&off, "account_limits").doc.contains("CLI Proxy"));
+    }
+
+    #[test]
+    fn a_label_is_an_entry_of_its_own_the_rest_as_it_was() {
+        let text = "# Mine.\nstatus_line = false\n";
+        let labelled = edit_label(text, "claude", "one@example.com", Some("Max"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            labelled,
+            "# Mine.\nstatus_line = false\n\n[[cli_proxy.labels]]\nprovider = \"claude\"\nemail = \"one@example.com\"\nlabel = \"Max\"\n"
+        );
+        let config = Config::parse(&labelled).unwrap();
+        assert_eq!(
+            config.cli_proxy.label("claude", Some("ONE@example.com")),
+            Some("Max")
+        );
+        // The same email, another service: another label.
+        let two = edit_label(&labelled, "codex", "one@example.com", Some("Plus"))
+            .unwrap()
+            .unwrap();
+        let config = Config::parse(&two).unwrap();
+        assert_eq!(
+            config.cli_proxy.label("codex", Some("one@example.com")),
+            Some("Plus")
+        );
+        assert_eq!(
+            config.cli_proxy.label("claude", Some("one@example.com")),
+            Some("Max")
+        );
+        // Changed, the same, taken out, or not there.
+        let changed = edit_label(&two, "claude", "one@example.com", Some("Work"))
+            .unwrap()
+            .unwrap();
+        assert!(changed.contains("label = \"Work\"") && !changed.contains("\"Max\""));
+        assert_eq!(
+            edit_label(&changed, "claude", "one@example.com", Some("Work")).unwrap(),
+            None
+        );
+        let out = edit_label(&changed, "claude", "one@example.com", None)
+            .unwrap()
+            .unwrap();
+        let out = edit_label(&out, "codex", "one@example.com", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, text);
+        assert_eq!(
+            edit_label(text, "claude", "one@example.com", None).unwrap(),
+            None
+        );
+        // Beside the proxy's settings; written inline by hand, kept so.
+        let with = "[cli_proxy]\nenabled = true\n";
+        let labelled = edit_label(with, "claude", "one@example.com", Some("Max"))
+            .unwrap()
+            .unwrap();
+        assert!(labelled.starts_with(with), "{labelled}");
+        let inline = "[cli_proxy]\nlabels = [{ provider = \"claude\", email = \"one@example.com\", label = \"Max\" }]\n";
+        let changed = edit_label(inline, "claude", "one@example.com", Some("Pro"))
+            .unwrap()
+            .unwrap();
+        assert!(changed.contains("label = \"Pro\" }]"), "{changed}");
+        let added = edit_label(inline, "codex", "two@example.com", Some("Plus"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(Config::parse(&added).unwrap().cli_proxy.labels.len(), 2);
+        // Twice is refused at load.
+        let twice = format!(
+            "{labelled}[[cli_proxy.labels]]\nprovider = \"claude\"\nemail = \"ONE@example.com\"\nlabel = \"Again\"\n"
+        );
+        assert!(
+            Config::parse(&twice)
+                .unwrap_err()
+                .to_string()
+                .contains("labelled twice")
         );
     }
 

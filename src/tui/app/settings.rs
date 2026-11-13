@@ -15,9 +15,16 @@ pub struct Capture {
 }
 
 impl App {
-    /// Shows `sections`, keeping the selected setting where it was.
-    pub fn set_settings(&mut self, sections: Vec<crate::settings::Section>) {
+    /// Shows `sections`, keeping the selected setting where it was: the CLI
+    /// Proxy's with rows of the view's own, how it stands and its accounts.
+    pub fn set_settings(&mut self, mut sections: Vec<crate::settings::Section>) {
         let kept = self.selected_setting().map(Setting::dotted);
+        let proxy = ["cli_proxy".to_string()];
+        if let Some(section) =
+            (sections.iter_mut()).find(|s| s.table.as_deref() == Some(&proxy[..]))
+        {
+            section.settings.extend(self.proxy_rows());
+        }
         self.settings = sections;
         let all = self.all_settings();
         self.setting_row = kept
@@ -82,6 +89,22 @@ impl App {
             }
             KeyCode::Char('d') => {
                 let s = self.selected_setting()?;
+                // A row of the view's own: a label to take out, or nothing.
+                match &s.kind {
+                    Kind::Status => return Some(None),
+                    Kind::Label { provider, email } if s.set => {
+                        return Some(Some(Op::SetProxyLabel {
+                            provider: provider.clone(),
+                            email: email.clone(),
+                            label: None,
+                        }));
+                    }
+                    Kind::Label { .. } => {
+                        self.flash("It has no label");
+                        return Some(None);
+                    }
+                    _ => {}
+                }
                 if !s.set {
                     self.flash(format!("{} is already the default", s.name()));
                     return Some(None);
@@ -107,6 +130,86 @@ impl App {
             _ => self.fail("This is the settings view: Esc goes back to the sessions"),
         }
         None
+    }
+
+    /// How the CLI Proxy stands, then each account it listed last and each
+    /// labelled that it didn't, by service then name: rows of the settings
+    /// view's own, not settings.
+    fn proxy_rows(&self) -> Vec<Setting> {
+        use crate::usage::Via;
+        let row = |path: &[&str], kind: Kind, value: &str, set: bool, doc: String| Setting {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            kind,
+            value: value.to_string(),
+            set,
+            input: String::new(),
+            placeholder: None,
+            doc,
+        };
+        let said: Vec<_> = (self.limits.agents.iter())
+            .filter_map(|s| Some((s.account.as_ref()?, s)))
+            .collect();
+        let again = "; Enter asks it again";
+        let (value, doc) = match (&self.proxy_url, &self.limits.via) {
+            _ if !self.account_limits => (
+                "not asked",
+                "account_limits is off: neither it nor the agents are asked".to_string(),
+            ),
+            (None, _) => (
+                "off",
+                "enabled, at its url, with its key set, it's asked for every account it holds"
+                    .to_string(),
+            ),
+            (Some(url), Some(Via::Proxy(_))) => {
+                let n = said.len();
+                let accounts = if n == 1 { "account" } else { "accounts" };
+                ("connected", format!("{url}: {n} {accounts}{again}"))
+            }
+            (Some(url), Some(via)) if via.why().is_some() => (
+                "can't be asked",
+                format!("{url}: {}{again}", via.why().unwrap_or_default()),
+            ),
+            (Some(url), _) if self.limits.asking() => ("asking…", url.clone()),
+            (Some(url), _) => ("not asked yet", format!("{url}{again}")),
+        };
+        let mut rows = vec![row(
+            &["cli_proxy", "status"],
+            Kind::Status,
+            value,
+            false,
+            doc,
+        )];
+        let accounts = said.iter().map(|(a, _)| *a);
+        for r in crate::proxy::rows(accounts, &self.cli_proxy.labels) {
+            let mut doc = vec![
+                r.email
+                    .clone()
+                    .unwrap_or_else(|| "no email: it can't be labelled".into()),
+            ];
+            let said = r.account.and_then(|a| said.iter().find(|(b, _)| a.same(b)));
+            if let Some(plan) = said.and_then(|(_, s)| s.usage.as_ref()?.plan.clone()) {
+                doc.push(plan);
+            }
+            match r.account {
+                Some(a) if a.disabled => doc.push("disabled".into()),
+                Some(a) if a.sign_in => doc.push("needs signing in again".into()),
+                Some(_) => {}
+                None => doc.push("not listed by the proxy now".into()),
+            }
+            let id = r.email.clone().or_else(|| r.account.map(|a| a.id.clone()));
+            let kind = Kind::Label {
+                provider: r.provider.clone(),
+                email: r.email.clone().unwrap_or_default(),
+            };
+            rows.push(row(
+                &["cli_proxy", "account", &id.unwrap_or_default(), &r.provider],
+                kind,
+                r.label.as_deref().unwrap_or("no label"),
+                r.label.is_some(),
+                doc.join(" · "),
+            ));
+        }
+        rows
     }
 
     /// The agent whose settings the selected one is.
@@ -210,6 +313,52 @@ impl App {
                 });
                 return None;
             }
+            // Asked again, as Enter in the usage view does.
+            Kind::Status if typing => {
+                if !self.account_limits {
+                    self.fail(crate::usage::OFF);
+                } else if self.proxy_url.is_none() {
+                    self.fail("The CLI Proxy isn't on: enabled, at its url, with its key set");
+                } else if self.limits.asking() {
+                    self.flash("Asking it already");
+                } else {
+                    self.limits.want(true);
+                }
+                return None;
+            }
+            Kind::Label { email, .. } if typing && email.is_empty() => {
+                self.fail("It has no email in the proxy's list, which labels are kept by");
+                return None;
+            }
+            Kind::Label { provider, email } if typing => {
+                let prompt = format!("{provider}'s {email}, called (empty for its email):");
+                let label = if s.set {
+                    s.value.clone()
+                } else {
+                    String::new()
+                };
+                self.input(
+                    &prompt,
+                    label,
+                    dialog::Purpose::Label {
+                        provider: provider.clone(),
+                        email: email.clone(),
+                    },
+                );
+                return None;
+            }
+            // Typed afresh, never shown.
+            Kind::Secret if typing => {
+                let prompt = format!("{} ({}):", s.dotted(), typing_hint(&s.kind));
+                self.input(
+                    &prompt,
+                    String::new(),
+                    dialog::Purpose::Secret {
+                        setting: s.dotted(),
+                    },
+                );
+                return None;
+            }
             _ if typing => {
                 let prompt = format!("{} ({}):", s.dotted(), typing_hint(&s.kind));
                 self.input(
@@ -250,6 +399,9 @@ fn typing_hint(kind: &Kind) -> &'static str {
         Kind::Prompts => "a number of prompts",
         Kind::Keys => "key names, e.g. k Up or C-x; empty for none",
         Kind::TmuxKey => "a tmux key, e.g. C-q",
+        Kind::Secret => "not shown as it's typed; empty for none",
+        Kind::Label { .. } => "empty for none",
+        Kind::Status => "",
         Kind::Bool | Kind::Choice(_) => "",
     }
 }

@@ -150,6 +150,9 @@ impl App {
                 hints
             }
             Kind::TmuxKey => self.labelled([(Action::Confirm, "press its key")]),
+            Kind::Secret => self.labelled([(Action::Confirm, "type it")]),
+            Kind::Status => self.labelled([(Action::Confirm, "ask again")]),
+            Kind::Label { .. } => self.labelled([(Action::Confirm, "label it")]),
             Kind::Model => {
                 let mut hints = self.labelled([(Action::Confirm, "type")]);
                 hints.push(("←→".into(), "choose"));
@@ -158,7 +161,12 @@ impl App {
             _ => self.labelled([(Action::Confirm, "change")]),
         };
         if s.set {
-            hints.push(("d".into(), "default"));
+            let what = match s.kind {
+                Kind::Secret => "take it out",
+                Kind::Label { .. } => "take the label out",
+                _ => "default",
+            };
+            hints.push(("d".into(), what));
         }
         if self.selected_agent().is_some() {
             hints.push(("x".into(), "remove its settings"));

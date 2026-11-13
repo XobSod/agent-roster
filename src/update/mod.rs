@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 
+pub(crate) use github::roots;
 pub use github::{Published, ask};
 pub use install::{can_update, install};
 

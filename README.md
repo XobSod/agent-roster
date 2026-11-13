@@ -386,11 +386,42 @@ Claude can't reach the service it may answer with what it kept from up to an hou
 before, which roster can't tell from fresh figures. For Codex it starts Codex's own
 server, `codex app-server`, and asks it.
 It asks at the start, every 5 minutes while the figures show, and when the view opens;
-`Enter` there asks again. Each time, the global env file is sourced once for all of
-them, as for the agents' sessions. `account_limits = false` stops all of it: neither
-agent is started, so nothing is sent; `v u` and `roster usage` say how to turn it back
-on. Codex also writes its limits into its rollouts as it works, which roster reads as
-they change, asked or not. pi and other agents say nothing of the kind.
+`Enter` there asks again; with a CLI Proxy set, the settings view asks too, as it
+opens and on `Enter` on the proxy's status row. Each time, the global env file is
+sourced once for all of them, as for the agents' sessions. `account_limits = false`
+stops all of it: neither agent is started, so nothing is sent; `v u` and
+`roster usage` say how to turn it back on. Codex also writes its limits into its
+rollouts as it works, which roster reads as they change, asked or not. pi and other
+agents say nothing of the kind.
+
+With a [CLI Proxy](https://github.com/router-for-me/CLIProxyAPI) your agents talk to,
+holding several accounts (a Claude Max and a Claude Pro, a Codex Plus, say), roster
+can ask it instead, for every account it holds: set `[cli_proxy]` (`url`, `enabled`,
+and its management key with `roster config set cli_proxy.key`; see Configure).
+Accounts go by their service, not by agent: Claude Code, Claude Code on another model
+and pi pointed at the proxy all use the same ones. `v u` shows each under its
+service's heading, named `Label (email)` or by its email, with its plan (Claude's
+asked once of its profile, Codex's in its usage); a disabled one dim, one needing
+signing in again saying so, one of a service roster can't ask (Gemini, say) as
+`usage unknown`. The sidebar's last lines have an entry for each that has said (but
+a disabled one), two to a line: its label, else its email up to the `@` (at most 7
+columns), and what's left of its windows, or only the 5-hour one where names would
+get too little room (`✱ Max 44%▼ 63%◆  ✱ Pro 99%◆ 37%▼`, with `icons = true`).
+Through the proxy, roster asks each account's own service what Claude Code's and
+Codex's `/usage` ask, with the account's login put in by the proxy: roster never
+sees a login, and changes nothing of the proxy. The agents of services the proxy
+holds no account of are still asked themselves, and Codex's rollouts don't count
+for accounts the proxy holds (they say whichever account answered). If the proxy
+can't be asked (not there, refusing the key, or listing its accounts in a way
+roster doesn't know, which it never reads as fewer accounts or none), the agents
+are, and `v u`, the settings and `roster usage` say why; once it has answered, what
+it said stays instead, dimming as it gets old. One account's usage answered in a
+way roster doesn't know is said for that account, which keeps its figures. Labels
+are roster's own: Enter on an account's row in the settings view (`d` takes one
+out), or `roster proxy label claude name@example.com Max`. API keys the proxy holds
+have no plan's limits and aren't shown. `roster usage --json` gives each one's
+`source` (`agent` or `cli_proxy`), and for an account its `provider` and `account`
+(`id`, `email`, `label`, `disabled`).
 
 To the right of the limits (`h`/`l` move along the tabs), what the agents spent in the
 last 24 hours, 7, 30 or 90 days, from every conversation they keep on this machine,
@@ -451,12 +482,15 @@ roster archive api && roster restore api   # archived sessions keep their conver
 roster rm api                           # delete one for good, archived or not (its conversation can be adopted again)
 roster events --follow                  # what the agents' hooks report
 roster usage                            # what your Claude and Codex accounts have used of their limits
+roster proxy                            # the CLI Proxy: how it stands, its accounts and their labels
+roster proxy label claude name@example.com Max   # what one of its accounts is called in roster
 roster tokens --days 7                  # what the agents spent: tokens by kind, and their cost at API prices
 roster doctor                           # roster's tmux server and database, checked, and each session's processes; --fix removes orphans
 roster config                           # every setting (but prices): its value, yours or the default, what it does
 roster config set agents.pi.title_model claude-haiku-4-5   # one changed in config.toml, the rest kept
 roster config unset fit_preview         # back to its default
 roster config add-agent gemini --yolo   # an agent for new sessions, named after what it runs
+roster config set cli_proxy.key         # the CLI Proxy's management key, typed unseen, kept out of config.toml
 roster config --defaults                # a config.toml with every setting, prices' shape too, commented out
 roster config --edit                    # config.toml in $EDITOR (from those defaults if there's none)
 roster update --check                   # whether a newer release is out, and the notes of each since yours
@@ -494,10 +528,11 @@ All files are optional and live in `~/.config/agent-roster/`:
     "always"`) it's kept current, the list's top line in it. Turning it on or off
     changes sessions' height by a row on their next attach.
   - `account_limits`: `false`: roster never asks your Claude and Codex accounts
-    what's left of their limits (no `claude -p`, no `codex app-server`); `v u` and
-    `roster usage` say so.
-  - `sidebar_usage`: `false` drops the sidebar's last line, what your Claude and
-    Codex accounts have used of their limits (`v u` still shows it).
+    what's left of their limits (no `claude -p`, no `codex app-server`, nor the CLI
+    Proxy); `v u` and `roster usage` say so.
+  - `sidebar_usage`: `false` drops the sidebar's last line (lines, with a CLI Proxy's
+    accounts), what your Claude and Codex accounts have used of their limits (`v u`
+    still shows it).
   - `trust_project_folders`: `true` trusts a session's folder in Claude and Codex as
     it starts there, so neither asks whether to trust it first (off by default:
     it's their own config roster writes, `~/.claude.json` and Codex's
@@ -548,6 +583,23 @@ All files are optional and live in `~/.config/agent-roster/`:
   - `[worktrees]`: `directory`, where new git worktrees for sessions go, a folder per
     project in it (default: roster's state directory, so uninstalling takes them): a
     whole path (or `~/…`), outside the project's repository.
+  - `[cli_proxy]`: a [CLI Proxy](https://github.com/router-for-me/CLIProxyAPI) your
+    agents talk to, holding several accounts. `enabled = true` asks it for every
+    account it holds, in place of asking the agents of the services it holds accounts
+    of; `url`, where it answers (`"http://127.0.0.1:8317"`; over plain http the key
+    goes unencrypted, so keep that to this machine or a container's port);
+    `icons = true`, each account's provider's icon before it in the sidebar. Its
+    management key, `key`, is never in config.toml: `roster config set cli_proxy.key`
+    asks for it (not shown as it's typed) and keeps it in `secrets.toml` in roster's
+    state directory, readable by you alone (one others can read isn't used);
+    `roster config unset cli_proxy.key` takes it out. In the settings view, the
+    section also shows how the proxy stands (Enter asks it again) and a row for each
+    account it holds, Enter labelling it and `d` taking its label out; labels are kept
+    as `[[cli_proxy.labels]]` (`provider`, `email`, `label`). The proxy's management
+    API must be on, and reachable from roster: in Docker, with
+    `remote-management.allow-remote`, as roster's requests come from outside the
+    container. Roster reads it alone, never through a proxy your environment names,
+    nor following a redirect.
   - `fit_preview` (default `"auto"`): agents drawing full screen (in the terminal's
     alternate screen, as Claude Code's fullscreen renderer does) are sized to the
     preview while you're not attached, so it shows all of their screen; `"never"`

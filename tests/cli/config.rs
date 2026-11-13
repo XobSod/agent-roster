@@ -563,3 +563,90 @@ fn a_setting_roster_no_longer_has_is_said_not_refused() {
     assert!(said.contains("config.toml saved"), "{said}");
     assert!(err.contains("keys.view.group is gone"), "{err}");
 }
+
+#[test]
+fn the_cli_proxys_key_is_kept_out_of_config_toml() {
+    let Some(t) = TestEnv::new("proxy-key") else {
+        return;
+    };
+    let file = t.config_dir().join("config.toml");
+    let config = fs::read_to_string(&file).unwrap();
+    let secrets = t.path("state/agent-roster/secrets.toml");
+    let value = |name: &str| -> String {
+        let shown = t.ok(&["config"]);
+        assert!(!shown.contains("made-up-key"), "{shown}");
+        shown
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix(&format!("{name} ")))
+            .map(|rest| rest.trim_start().split("  ").next().unwrap().to_string())
+            .unwrap_or_else(|| panic!("no {name} in {shown}"))
+    };
+    assert_eq!(value("key"), "not set");
+    // Given on stdin, not on the command line (nor in the shell's history).
+    let mut child = t
+        .command(&["config", "set", "cli_proxy.key"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    (child.stdin.take().unwrap())
+        .write_all(b"made-up-key\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("made-up-key"));
+    assert_eq!(fs::read_to_string(&file).unwrap(), config);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(&secrets).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert!(
+        fs::read_to_string(&secrets)
+            .unwrap()
+            .contains("made-up-key")
+    );
+    assert_eq!(value("key"), "set");
+    // Never a value in the template.
+    let defaults = t.ok(&["config", "--defaults"]);
+    assert!(
+        defaults.contains("# [cli_proxy]") && !defaults.contains("key = "),
+        "{defaults}"
+    );
+    // Nothing given: refused, the key kept; unset takes it out.
+    for empty in ["", "  "] {
+        assert!(
+            !t.run(&["config", "set", "cli_proxy.key", empty])
+                .status
+                .success()
+        );
+    }
+    let out = t.run(&["config", "set", "cli_proxy.key"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no key given"),
+        "{out:?}"
+    );
+    assert_eq!(value("key"), "set");
+    t.ok(&["config", "unset", "cli_proxy.key"]);
+    assert_eq!(value("key"), "not set");
+    assert!(
+        !fs::read_to_string(&secrets)
+            .unwrap()
+            .contains("made-up-key")
+    );
+    // Any other setting still needs its value.
+    assert!(!t.run(&["config", "set", "status_line"]).status.success());
+    // Put in config.toml, it's refused, saying what to do instead.
+    fs::write(
+        &file,
+        format!("{config}[cli_proxy]\nkey = \"made-up-key\"\n"),
+    )
+    .unwrap();
+    let out = t.run(&["config"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("roster config --edit") && !said.contains("made-up-key"),
+        "{said}"
+    );
+}

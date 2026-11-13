@@ -8,6 +8,13 @@ pub enum Op {
         setting: String,
         input: Option<String>,
     },
+    /// The CLI Proxy's account of `provider` at `email` labelled, or its
+    /// label taken out (None).
+    SetProxyLabel {
+        provider: String,
+        email: String,
+        label: Option<String>,
+    },
     /// config.toml opened in `$EDITOR`.
     EditConfig,
     /// A new agent that runs this command line.

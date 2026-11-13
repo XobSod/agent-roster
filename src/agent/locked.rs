@@ -28,6 +28,15 @@ const WAIT: Duration = Duration::from_secs(5);
 /// if it did, what `change` last made is what's written.
 pub(crate) fn update(
     file: &Path,
+    change: impl FnMut(&str) -> Result<Option<String>>,
+) -> Result<bool> {
+    update_with(file, crate::settings::write_file, change)
+}
+
+/// `update`, the file written by `write` (given it and its text).
+pub(crate) fn update_with(
+    file: &Path,
+    write: impl Fn(&Path, &str) -> Result<()>,
     mut change: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<bool> {
     let _lock = Lock::take(file, WAIT)?;
@@ -44,7 +53,7 @@ pub(crate) fn update(
         if stamp(file) != read {
             continue;
         }
-        crate::settings::write_file(file, &changed)?;
+        write(file, &changed)?;
         return Ok(true);
     }
     anyhow::bail!("{} kept changing as it was read", file.display())

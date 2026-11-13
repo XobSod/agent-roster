@@ -2,7 +2,7 @@
 //! conversations resume, and its transcript gives the statistics.
 
 pub mod conversations;
-mod limits;
+pub(crate) mod limits;
 mod shells;
 mod subagents;
 mod tokens;

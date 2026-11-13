@@ -37,6 +37,15 @@ pub enum Purpose {
     Setting {
         setting: String,
     },
+    /// The secret setting with this dotted name: what's typed isn't shown.
+    Secret {
+        setting: String,
+    },
+    /// The label of the CLI Proxy's account of `provider` at `email`.
+    Label {
+        provider: String,
+        email: String,
+    },
     /// A new agent's command line.
     NewAgent,
     RestoreName {
@@ -158,10 +167,16 @@ impl App {
                 id,
                 name: Some(value),
             }),
+            Purpose::Label { provider, email } => Some(Op::SetProxyLabel {
+                provider,
+                email,
+                label: (!value.is_empty()).then_some(value),
+            }),
             Purpose::NewAgent if value.is_empty() => None,
             Purpose::NewAgent => Some(Op::AddAgent(value)),
-            // Empty is a value too: text back to its default, no keys.
-            Purpose::Setting { setting } => Some(Op::ChangeSetting {
+            // Empty is a value too: text back to its default, no keys, no
+            // secret.
+            Purpose::Setting { setting } | Purpose::Secret { setting } => Some(Op::ChangeSetting {
                 setting,
                 input: Some(value),
             }),

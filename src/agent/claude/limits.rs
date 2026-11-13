@@ -92,7 +92,22 @@ fn read_usage(answer: &Value, now: i64) -> Result<Option<Usage>> {
     if !limits.is_object() {
         bail!("Claude couldn't ask its usage service; roster asks again later");
     }
-    let windows: Vec<Window> = [("five_hour", 300), ("seven_day", 10_080)]
+    let windows = windows(limits);
+    Ok((!windows.is_empty()).then(|| Usage {
+        plan: usage["subscription_type"].as_str().map(String::from),
+        windows,
+        notes: Vec::new(),
+        at: now,
+    }))
+}
+
+/// The windows Claude's usage service gives (its `five_hour` and `seven_day`,
+/// each used 0 to 100, and when it resets), those with a figure: as Claude
+/// Code answers `get_usage` (its `rate_limits`), and as the service answers
+/// it (`/api/oauth/usage`, asked through a CLI Proxy). Its other limits (a
+/// model's own week, extra usage) aren't shown.
+pub(crate) fn windows(limits: &Value) -> Vec<Window> {
+    [("five_hour", 300), ("seven_day", 10_080)]
         .into_iter()
         .filter_map(|(key, minutes)| {
             let window = &limits[key];
@@ -102,13 +117,7 @@ fn read_usage(answer: &Value, now: i64) -> Result<Option<Usage>> {
                 resets_at: window["resets_at"].as_str().and_then(iso_ms),
             })
         })
-        .collect();
-    Ok((!windows.is_empty()).then(|| Usage {
-        plan: usage["subscription_type"].as_str().map(String::from),
-        windows,
-        notes: Vec::new(),
-        at: now,
-    }))
+        .collect()
 }
 
 #[cfg(test)]

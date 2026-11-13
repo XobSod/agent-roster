@@ -7,10 +7,10 @@ use super::*;
 pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64, summary: bool) {
     let width = area.width as usize;
     // At the bottom, what the agents' accounts have used, once known.
-    let usage = app
-        .sidebar_usage
-        .then(|| usage_line(app, width, now))
-        .flatten();
+    let usage = match app.sidebar_usage {
+        true => usage_lines(app, width, now),
+        false => Vec::new(),
+    };
     // Archived sessions too: what they left running.
     let over = (app.sessions.iter())
         .filter(|s| app.over_memory(s).is_some())
@@ -20,7 +20,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64, summa
         Constraint::Length(u16::from(over > 0)),
         Constraint::Length(1),
         Constraint::Min(0),
-        Constraint::Length(u16::from(usage.is_some())),
+        Constraint::Length(usage.len() as u16),
     ])
     .areas(area);
     if let (true, Some(limit)) = (over > 0, app.memory_limit) {
@@ -33,7 +33,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &App, area: Rect, now: i64, summa
         ));
         f.render_widget(Paragraph::new(line), warning);
     }
-    if let Some(usage) = usage {
+    if !usage.is_empty() {
         f.render_widget(Paragraph::new(usage), bottom);
     }
 

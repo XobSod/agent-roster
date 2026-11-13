@@ -22,6 +22,28 @@ fn render(app: &App, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn a_secret_typed_never_shows() {
+    let mut app = app();
+    app.dialog = Some(Dialog::Input {
+        prompt: "cli_proxy.key (not shown as it's typed; empty for none):".into(),
+        value: "made-up-key".into(),
+        purpose: crate::tui::app::Purpose::Secret {
+            setting: "cli_proxy.key".into(),
+        },
+        choices: Vec::new(),
+        typed: None,
+    });
+    let screen = render(&app, 100, 20);
+    assert!(screen.contains("cli_proxy.key (not shown"), "{screen}");
+    assert!(!screen.contains("made-up"), "{screen}");
+    // Nor how long it is.
+    assert!(
+        !screen.contains("> *") && !screen.contains("> •"),
+        "{screen}"
+    );
+}
+
+#[test]
 fn the_list_beside_an_attached_agent_is_the_tuis_a_row_up() {
     let mut app = app();
     still(&mut app);
@@ -29,6 +51,7 @@ fn the_list_beside_an_attached_agent_is_the_tuis_a_row_up() {
     // Limits known: the TUI's sidebar gives them its last row.
     app.limits.agents = vec![crate::tui::limits::Said {
         agent: "claude".into(),
+        account: None,
         usage: Some(crate::usage::Usage {
             plan: None,
             windows: vec![crate::usage::Window {
@@ -1711,6 +1734,7 @@ fn said(agent: &str, five_hour: f64, weekly: f64) -> crate::tui::limits::Said {
     };
     crate::tui::limits::Said {
         agent: agent.into(),
+        account: None,
         usage: Some(Usage {
             plan: Some("pro".into()),
             windows: vec![
@@ -2327,4 +2351,228 @@ fn whats_new_shows_the_notes_of_each_release_since_this_one() {
     let screen = render(&app, 120, 30);
     assert!(!screen.contains(&newest), "{screen}");
     assert!(screen.contains("Nothing heard yet"), "{screen}");
+}
+
+/// What the CLI Proxy said of `provider`'s account at `email`: as `said`.
+fn account_said(
+    provider: &str,
+    email: &str,
+    five_hour: f64,
+    weekly: f64,
+) -> crate::tui::limits::Said {
+    let mut s = said(provider, five_hour, weekly);
+    s.account = Some(crate::proxy::Account {
+        provider: provider.into(),
+        id: email.split('@').next().unwrap().into(),
+        email: Some(email.into()),
+        disabled: false,
+        sign_in: false,
+    });
+    s
+}
+
+fn label(provider: &str, email: &str, label: &str) -> crate::config::Label {
+    crate::config::Label {
+        provider: provider.into(),
+        email: email.into(),
+        label: label.into(),
+    }
+}
+
+#[test]
+fn the_proxys_accounts_are_two_to_a_line_in_the_sidebar() {
+    let mut app = app();
+    let now = now_ms();
+    let lines = |app: &App, width: usize| -> Vec<String> {
+        let lines: Vec<String> = usage_lines(app, width, now)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        for line in &lines {
+            assert!(line.width() <= width, "{line:?} in {width}");
+        }
+        lines
+    };
+    // In the order they show: by service, then by name.
+    app.limits.agents = vec![
+        account_said("codex", "jordan.lee@example.com", 3.0, 41.0),
+        account_said("claude", "sam@example.com", 1.0, 63.0),
+        account_said("claude", "alexandra@example.com", 80.0, 37.0),
+    ];
+    app.cli_proxy.icons = Some(true);
+    app.cli_proxy.labels = vec![
+        label("claude", "alexandra@example.com", "Max"),
+        label("claude", "SAM@example.com", "Pro"),
+        label("codex", "jordan.lee@example.com", "Plus"),
+    ];
+    assert_eq!(
+        lines(&app, 34),
+        [" ✱ Max 20%◆ 63%▼  ✱ Pro 99%▼ 37%▼", " ⌬ Plus 97%▼ 59%▼"]
+    );
+    // By their emails, as much as fits: at most 7 columns, `…` included.
+    app.cli_proxy.labels.clear();
+    assert_eq!(
+        lines(&app, 34),
+        [" ✱ ale… 20%◆ 63%▼ ✱ sam 99%▼ 37%▼", " ⌬ jor… 97%▼ 59%▼"]
+    );
+    assert_eq!(
+        lines(&app, 40),
+        [
+            " ✱ alexan… 20%◆ 63%▼ ✱ sam 99%▼ 37%▼",
+            " ⌬ jordan… 97%▼ 59%▼"
+        ]
+    );
+    app.cli_proxy.icons = None;
+    assert_eq!(
+        lines(&app, 34),
+        [" alexa… 20%◆ 63%▼ sam 99%▼ 37%▼", " jorda… 97%▼ 59%▼"]
+    );
+    // The widest figures: a name with fewer than 3 columns left, each the
+    // shortest window alone.
+    app.cli_proxy.icons = Some(true);
+    app.limits.agents = vec![
+        account_said("claude", "alexandra@example.com", 0.0, 0.0),
+        account_said("claude", "sam@example.com", 0.0, 0.0),
+    ];
+    assert_eq!(lines(&app, 34), [" ✱ alexan… 100%▼  ✱ sam 100%▼"]);
+    // Too narrow for two: one a line. Two icons alone fit where their names
+    // don't.
+    assert_eq!(lines(&app, 14), [" ✱ alex… 100%▼", " ✱ sam 100%▼"]);
+    assert_eq!(lines(&app, 16), [" ✱ 100%▼ ✱ 100%▼"]);
+    assert_eq!(lines(&app, 8), [" ✱ 100%▼", " ✱ 100%▼"]);
+    assert_eq!(lines(&app, 7), Vec::<String>::new());
+    // Whatever the width, no figure cut short.
+    for width in 0..60 {
+        for line in lines(&app, width) {
+            assert_eq!(
+                line.matches("100%▼").count(),
+                line.matches('%').count(),
+                "{line}"
+            );
+        }
+    }
+    // Disabled ones, and those that haven't said, aren't there; a sixth
+    // makes a third line; an agent asked of its own is there by its name.
+    let mut off = account_said("claude", "off@example.com", 0.0, 0.0);
+    off.account.as_mut().unwrap().disabled = true;
+    let mut unknown = account_said("gemini", "g@example.com", 0.0, 0.0);
+    unknown.usage = None;
+    app.limits.agents = vec![
+        account_said("claude", "a@example.com", 0.0, 0.0),
+        account_said("claude", "b@example.com", 0.0, 0.0),
+        off,
+        unknown,
+        account_said("codex", "c@example.com", 0.0, 0.0),
+        account_said("codex", "d@example.com", 0.0, 0.0),
+        said("pi", 0.0, 0.0),
+    ];
+    let shown = lines(&app, 40);
+    assert_eq!(shown.len(), 3, "{shown:#?}");
+    assert!(!shown.concat().contains("off"), "{shown:#?}");
+    assert!(shown[2].contains("pi"), "{shown:#?}");
+    // The same label twice: the second numbered.
+    app.limits.agents = vec![
+        account_said("claude", "a@example.com", 0.0, 0.0),
+        account_said("claude", "b@example.com", 0.0, 0.0),
+    ];
+    app.cli_proxy.labels = vec![
+        label("claude", "a@example.com", "Work"),
+        label("claude", "b@example.com", "Work"),
+    ];
+    assert_eq!(
+        lines(&app, 40),
+        [" ✱ Work 100%▼ 100%▼  ✱ Wo…#2 100%▼ 100%▼"]
+    );
+    assert_eq!(cut_name("Workshop#2", 6), "Wor…#2");
+    // A label that's a number already: never two names alike, and a name
+    // with `#` of its own isn't taken for one numbered.
+    app.limits
+        .agents
+        .push(account_said("claude", "c@example.com", 0.0, 0.0));
+    app.cli_proxy
+        .labels
+        .push(label("claude", "c@example.com", "Work#2"));
+    let names: Vec<String> = lines(&app, 80)
+        .concat()
+        .split_whitespace()
+        .filter(|w| w.starts_with("Work"))
+        .map(String::from)
+        .collect();
+    assert_eq!(names, ["Work", "Work#3", "Work#2"]);
+    app.limits.agents.truncate(2);
+    app.cli_proxy.labels = vec![
+        label("claude", "a@example.com", "Team#1"),
+        label("claude", "b@example.com", "Team"),
+    ];
+    assert!(!lines(&app, 80).concat().contains("Team#2"));
+}
+
+#[test]
+fn without_the_proxys_accounts_the_sidebar_has_its_one_line() {
+    let mut app = app();
+    let now = now_ms();
+    app.limits.agents = vec![said("claude", 90.0, 85.0), said("codex", 7.0, 13.0)];
+    for width in [20, 34, 40, 100] {
+        let one: Vec<String> = usage_line(&app, width, now)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        let lines: Vec<String> = usage_lines(&app, width, now)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(lines, one);
+    }
+}
+
+#[test]
+fn the_usage_view_shows_the_proxys_accounts_under_their_service() {
+    let mut app = app();
+    app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    let mut max = account_said("claude", "alexandra@example.com", 31.0, 52.0);
+    max.usage.as_mut().unwrap().plan = Some("max 5x".into());
+    let mut wait = account_said("claude", "sam@example.com", 1.0, 2.0);
+    wait.error = Some("Claude's usage service: it asked to wait (429)".into());
+    let mut off = account_said("codex", "jordan.lee@example.com", 0.0, 0.0);
+    off.account.as_mut().unwrap().disabled = true;
+    off.usage = None;
+    let mut unknown = account_said("gemini", "g@example.com", 0.0, 0.0);
+    unknown.usage = None;
+    app.limits.agents = vec![unknown, off, wait, max];
+    app.limits.via = Some(crate::usage::Via::Proxy("http://127.0.0.1:8317".into()));
+    app.cli_proxy.labels = vec![label("claude", "alexandra@example.com", "Max")];
+    let screen = render(&app, 100, 40);
+    for shown in [
+        "via CLI Proxy http://127.0.0.1:8317",
+        "✱ Claude",
+        "  Max (alexandra@example.com)  max 5x",
+        "    5 hours  ",
+        "  sam@example.com  pro",
+        "    can't tell now: Claude's usage service: it asked to wait (429)",
+        "⌬ Codex",
+        "  jordan.lee@example.com",
+        "disabled",
+        "◇ Gemini",
+        "    usage unknown: roster can't ask its service",
+    ] {
+        assert!(screen.contains(shown), "{shown:?} in\n{screen}");
+    }
+    // In the order they show: Claude's, by name, Codex's, then the others.
+    let at = |text: &str| screen.find(text).unwrap();
+    assert!(
+        at("Max (") < at("sam@") && at("sam@") < at("⌬ Codex") && at("⌬ Codex") < at("◇ Gemini")
+    );
+    // Not asked through it: why.
+    app.limits.via = Some(crate::usage::Via::FellBack {
+        url: "http://127.0.0.1:8317".into(),
+        why: "can't reach it: connection refused".into(),
+    });
+    let screen = render(&app, 120, 40);
+    assert!(
+        screen.contains(
+            "CLI Proxy http://127.0.0.1:8317 not asked, the agents instead: can't reach it"
+        ),
+        "{screen}"
+    );
 }

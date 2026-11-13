@@ -1,6 +1,7 @@
 //! Asking agents what roster can't know itself: their models, their accounts' limits.
 
 use super::*;
+use crate::usage::{Answer, Asked, Known, Via};
 
 impl Roster {
     /// What lists each agent's models (`Adapter::models`), to run anywhere,
@@ -11,59 +12,53 @@ impl Roster {
         move |name: &str| agent::adapter(name).models(&config, &|q| asker.run(name, q, None))
     }
 
-    /// What asks every agent that can be started what its account has used
-    /// of its limits (`Adapter::usage`), all at once, to run anywhere, a
-    /// thread included (see `asker`): those that say, in the order agents are
-    /// offered (the default first). The env file is sourced once for all of
-    /// them, as the first asks: they're asked every few minutes, and an env
-    /// file may ask a password manager.
-    pub fn usage_reader(
-        &self,
-    ) -> impl Fn() -> Vec<(String, Result<crate::usage::Usage>)> + Send + 'static {
+    /// What asks what the accounts have used of their limits, all at once, to
+    /// run anywhere, a thread included (see `asker`). With a CLI Proxy
+    /// enabled, it's asked for every account it holds; the agents of the
+    /// services it holds none of are asked themselves (`Adapter::usage`), as
+    /// they all are without one, in the order agents are offered. The proxy
+    /// can't be asked: the agents are instead, unless it has answered before
+    /// (`known`), when what it said stands. The env file is sourced once for
+    /// all the agents, as the first asks: they're asked every few minutes,
+    /// and an env file may ask a password manager.
+    pub fn usage_reader(&self, known: Known) -> impl Fn() -> Asked + Send + 'static {
         let config = self.agents_config();
         let agents = agent::available(&self.config);
         let asker = self.asker();
         // Nothing is asked with account_limits off, whoever calls this.
         let allowed = self.config.account_limits();
+        let proxy = self.config.cli_proxy().map(String::from);
+        let secrets = self.paths.secrets_file();
         move || {
             if !allowed {
-                return Vec::new();
+                return Asked {
+                    via: Via::Agents,
+                    answers: Vec::new(),
+                };
             }
-            // Sourced as the first agent asks; what it started ends with
-            // the round, as this goes.
-            let env: std::sync::OnceLock<std::result::Result<launch::Environment, String>> =
-                std::sync::OnceLock::new();
-            let ask = |name: &str, question: agent::Question<'_>| match env
-                .get_or_init(|| asker.environment().map_err(|e| format!("{e:#}")))
-            {
-                Ok(env) => asker.run(name, question, Some(env)),
-                Err(e) => Err(anyhow::anyhow!("{e}")),
-            };
-            std::thread::scope(|scope| {
-                let asking: Vec<_> = agents
-                    .iter()
-                    .map(|name| {
-                        let (config, ask) = (&config, &ask);
-                        let said = scope
-                            .spawn(move || agent::adapter(name).usage(config, &|q| ask(name, q)));
-                        (name, said)
-                    })
-                    .collect();
-                let mut answers: Vec<_> = asking
-                    .into_iter()
-                    .filter_map(|(name, said)| asked(name, said.join()))
-                    .collect();
-                // The env file failing is said as that, not as what each
-                // agent couldn't do for it.
-                if let Some(Err(e)) = env.get() {
-                    for (_, said) in &mut answers {
-                        if said.is_err() {
-                            *said = Err(anyhow::anyhow!("{e}"));
+            let (via, mut answers, held) = match &proxy {
+                None => (Via::Agents, Vec::new(), Vec::new()),
+                Some(url) => match ask_proxy(url, &secrets, &known.plans) {
+                    Ok(answers) => {
+                        let mut held: Vec<String> =
+                            answers.iter().map(|a| a.agent.clone()).collect();
+                        held.sort();
+                        held.dedup();
+                        (Via::Proxy(url.clone()), answers, held)
+                    }
+                    Err(e) => {
+                        let (url, why) = (url.clone(), format!("{e:#}"));
+                        if known.answered {
+                            (Via::Failed { url, why }, Vec::new(), known.held.clone())
+                        } else {
+                            (Via::FellBack { url, why }, Vec::new(), Vec::new())
                         }
                     }
-                }
-                answers
-            })
+                },
+            };
+            let agents: Vec<&String> = agents.iter().filter(|a| !held.contains(a)).collect();
+            answers.extend(ask_agents(&agents, &config, &asker));
+            Asked { via, answers }
         }
     }
 
@@ -83,6 +78,114 @@ impl Roster {
             dir: self.paths.state_dir.clone(),
         }
     }
+}
+
+/// Every account the CLI Proxy at `url` holds, and what each has used: its
+/// key read from `secrets` now, so one set since counts. Each account is
+/// asked at once, Claude's for its plan too unless `plans` has it; one that
+/// fails doesn't fail the others.
+fn ask_proxy(
+    url: &str,
+    secrets: &Path,
+    plans: &std::collections::HashMap<String, String>,
+) -> Result<Vec<Answer>> {
+    let key = crate::secrets::proxy_key(secrets)?
+        .context("its key isn't set (roster config set cli_proxy.key)")?;
+    let proxy = crate::proxy::Proxy::new(url, key);
+    let accounts = proxy.accounts()?;
+    let answers = std::thread::scope(|scope| {
+        let asking: Vec<_> = accounts
+            .into_iter()
+            .map(|account| {
+                let proxy = &proxy;
+                let asked = account.clone();
+                let said = scope.spawn(move || -> Result<Option<crate::usage::Usage>> {
+                    let account = &asked;
+                    if account.disabled || !account.asked() {
+                        return Ok(None);
+                    }
+                    if account.sign_in {
+                        bail!("the CLI Proxy says it needs signing in again");
+                    }
+                    // Its plan once its usage has answered: not asked of
+                    // one that can't say (a round later, again).
+                    let usage = proxy.usage(account)?;
+                    Ok(usage.map(|mut u| {
+                        if u.plan.is_none() && account.provider == "claude" {
+                            u.plan = (plans.get(&account.id).cloned())
+                                .or_else(|| proxy.claude_plan(account).ok().flatten());
+                        }
+                        u
+                    }))
+                });
+                (account, said)
+            })
+            .collect();
+        asking
+            .into_iter()
+            .map(|(account, said)| Answer {
+                agent: account.provider.clone(),
+                said: said.join().unwrap_or_else(|panic| {
+                    Err(anyhow::anyhow!(
+                        "roster failed asking it: {}",
+                        util::panic_message(&*panic)
+                    ))
+                }),
+                account: Some(account),
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(answers)
+}
+
+/// What `agents` say their own accounts have used, each asked at once, in
+/// their order: those that have such an account.
+fn ask_agents(agents: &[&String], config: &Config, asker: &Asker) -> Vec<Answer> {
+    if agents.is_empty() {
+        return Vec::new();
+    }
+    // Sourced as the first agent asks; what it started ends with the round,
+    // as this goes.
+    let env: std::sync::OnceLock<std::result::Result<launch::Environment, String>> =
+        std::sync::OnceLock::new();
+    let ask = |name: &str, question: agent::Question<'_>| match env
+        .get_or_init(|| asker.environment().map_err(|e| format!("{e:#}")))
+    {
+        Ok(env) => asker.run(name, question, Some(env)),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    };
+    std::thread::scope(|scope| {
+        let asking: Vec<_> = agents
+            .iter()
+            .map(|name| {
+                let ask = &ask;
+                let said =
+                    scope.spawn(move || agent::adapter(name).usage(config, &|q| ask(name, q)));
+                (name, said)
+            })
+            .collect();
+        let mut answers: Vec<_> = asking
+            .into_iter()
+            .filter_map(|(name, said)| asked(name, said.join()))
+            .collect();
+        // The env file failing is said as that, not as what each agent
+        // couldn't do for it.
+        if let Some(Err(e)) = env.get() {
+            for (_, said) in &mut answers {
+                if said.is_err() {
+                    *said = Err(anyhow::anyhow!("{e}"));
+                }
+            }
+        }
+        answers
+            .into_iter()
+            .map(|(agent, said)| Answer {
+                agent,
+                account: None,
+                said: said.map(Some),
+            })
+            .collect()
+    })
 }
 
 /// What runs an agent's commands (`agent::Ask`) as its sessions would, to

@@ -15,7 +15,7 @@ mod place;
 mod settings;
 mod texts;
 
-use dialog::Purpose;
+pub use dialog::Purpose;
 pub use dialog::{Dialog, completions};
 pub use texts::screen_tail;
 
@@ -121,6 +121,10 @@ pub struct View {
     usage: Option<Vec<super::limits::Said>>,
 }
 
+/// Which CLI Proxy is asked (its URL, if one is), and when its key was
+/// last written (and how long the file was).
+pub type ProxySeen = (Option<String>, Option<(std::time::SystemTime, u64)>);
+
 pub struct App {
     pub keymap: Keymap,
     pub mode: Mode,
@@ -212,6 +216,13 @@ pub struct App {
     /// Whether the accounts are asked at all (`account_limits`).
     pub account_limits: bool,
     pub sidebar_usage: bool,
+    /// The CLI Proxy's settings (config.toml), its labels and icons among
+    /// them, and where it's asked, if it is.
+    pub cli_proxy: crate::config::CliProxy,
+    pub proxy_url: Option<String>,
+    /// Which CLI Proxy, and which key of it, was last asked of: another,
+    /// and what it said is forgotten.
+    pub proxy_seen: Option<ProxySeen>,
     /// What cards say of their sessions' subagents and shells at work
     /// (config.toml), the cards unfolded to show them (`l`), by session, and
     /// what's read of each subagent, by its agent's id for it.
@@ -326,6 +337,9 @@ impl App {
             limits: Default::default(),
             account_limits: true,
             sidebar_usage: true,
+            cli_proxy: Default::default(),
+            proxy_url: None,
+            proxy_seen: None,
             card_subagents: Default::default(),
             stopped_cards: false,
             worktrees: Default::default(),
@@ -651,10 +665,14 @@ impl App {
             {
                 self.project_row = self.projects.iter().position(|q| q.id == p.id).unwrap_or(0);
             }
-            // The usage view asks again, unless it just did.
+            // The usage view asks again, unless it just did, as the
+            // settings do for the CLI Proxy's accounts.
             if mode == Mode::Usage {
                 self.limits.want(false);
                 self.usage_scroll = 0;
+            }
+            if mode == Mode::Settings && self.proxy_url.is_some() {
+                self.limits.want(false);
             }
             self.mode = mode;
             self.report_scroll.set(0);

@@ -85,6 +85,177 @@ pub(super) fn usage_line(app: &App, width: usize, now: i64) -> Option<Line<'stat
     .map(Line::from)
 }
 
+/// The sidebar's last lines: the agents' one line (`usage_line`) unless the
+/// CLI Proxy's accounts are known; then an entry for each account (and each
+/// agent asked of its own), two to a line, each in half the width, as many
+/// lines as that takes: its provider's icon if set (`cli_proxy.icons`), its
+/// name (`account_short`, numbered if another has it), and what's left of
+/// its windows. Where a name would get fewer than 3 columns, every entry has
+/// its shortest window alone; an entry still too wide, its icon (or first
+/// letter) and that window; a half too narrow for even that, an entry a
+/// line. Disabled accounts, and those that haven't said, aren't there. Never
+/// a figure cut short.
+pub(super) fn usage_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
+    if !app.limits.agents.iter().any(|s| s.account.is_some()) {
+        return usage_line(app, width, now).into_iter().collect();
+    }
+    let icons = app.cli_proxy.icons.unwrap_or(false);
+    let said: Vec<(&crate::tui::limits::Said, &Usage)> = ordered(app)
+        .into_iter()
+        .filter(|s| !s.account.as_ref().is_some_and(|a| a.disabled))
+        .filter_map(|s| Some((s, s.usage.as_ref()?)))
+        .collect();
+    // Each one's name; one already shown numbered (`Max#2`), by a number
+    // no other name has.
+    let given: Vec<String> = said
+        .iter()
+        .map(|(s, _)| match &s.account {
+            Some(a) => {
+                let label = app.cli_proxy.label(&a.provider, a.email.as_deref());
+                crate::usage::account_short(a, label)
+            }
+            None => s.agent.clone(),
+        })
+        .collect();
+    let mut names: Vec<String> = Vec::new();
+    for name in &given {
+        let taken = |n: &String| names.contains(n) || (n != name && given.contains(n));
+        let name = match names.contains(name) {
+            false => name.clone(),
+            true => (2..)
+                .map(|n| format!("{name}#{n}"))
+                .find(|n| !taken(n))
+                .unwrap_or_default(),
+        };
+        names.push(name);
+    }
+    let entries: Vec<_> = said.iter().zip(&names).collect();
+    // Each entry in `cell` columns with its first `windows`, its name cut as
+    // need be; None if it doesn't fit, or `named` and its name would get
+    // fewer than 3 columns.
+    let entry = |(s, u): &(&crate::tui::limits::Said, &Usage),
+                 name: &str,
+                 cell: usize,
+                 windows: usize,
+                 named: bool|
+     -> Option<Vec<Span<'static>>> {
+        let dim = stale(u, now);
+        let figures = window_spans(u, windows, dim, now);
+        let icon = icons.then(|| glyph(&s.agent));
+        // A space, the icon and a space after it if there's one, the name,
+        // the figures: the name gets what's left.
+        let around = 1 + icon.as_ref().map_or(0, |i| i.width() + 1) + spans_width(&figures);
+        let room = cell.saturating_sub(around).min(NAME_MAX);
+        let whole = name.width() <= room;
+        if named && !whole && room < 3 {
+            return None;
+        }
+        let shown = match () {
+            _ if whole => name.to_string(),
+            _ if room >= 2 => cut_name(name, room),
+            // The icon alone stands for it; else its first letter.
+            _ if icons => String::new(),
+            _ if room >= 1 => name.chars().take(1).collect(),
+            _ => return None,
+        };
+        let mut spans = vec![Span::raw(" ")];
+        if let Some(icon) = icon {
+            spans.push(icon);
+            if !shown.is_empty() {
+                spans.push(Span::raw(" "));
+            }
+        }
+        spans.push(Span::styled(shown, Style::new().fg(FAINT)));
+        spans.extend(figures);
+        (spans_width(&spans) <= cell).then_some(spans)
+    };
+    let all = usize::MAX;
+    let layouts = [(2, width / 2), (1, width)];
+    for (per_line, cell) in layouts {
+        let tries = [(all, true), (1, false)];
+        let found = tries.into_iter().find_map(|(windows, named)| {
+            entries
+                .iter()
+                .map(|(said, name)| entry(said, name, cell, windows, named))
+                .collect::<Option<Vec<_>>>()
+        });
+        let Some(found) = found else {
+            continue;
+        };
+        return found
+            .chunks(per_line)
+            .map(|line| {
+                let mut spans = Vec::new();
+                for (i, entry) in line.iter().enumerate() {
+                    let w = spans_width(entry);
+                    spans.extend(entry.iter().cloned());
+                    if i + 1 < line.len() {
+                        spans.push(Span::raw(" ".repeat(cell - w)));
+                    }
+                }
+                Line::from(spans)
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The most of a name the sidebar shows, `…` included.
+const NAME_MAX: usize = 7;
+
+/// `name` in `room` columns: as much of it as fits before `…`, keeping a
+/// number it was given (`Max#2`).
+pub(super) fn cut_name(name: &str, room: usize) -> String {
+    let (base, number) = match name.rsplit_once('#') {
+        Some((base, n)) if !base.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            (base, format!("#{n}"))
+        }
+        _ => (name, String::new()),
+    };
+    let keep = room.saturating_sub(1 + number.width());
+    if keep == 0 {
+        return format!(
+            "{}…",
+            name.chars()
+                .take(room.saturating_sub(1))
+                .collect::<String>()
+        );
+    }
+    let mut out = String::new();
+    for c in base.chars() {
+        if out.width() + c.to_string().width() > keep {
+            break;
+        }
+        out.push(c);
+    }
+    format!("{out}…{number}")
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+/// What's left of `usage`'s first `windows`, each with its pace's mark in its
+/// colour (` 69%▲`); `–` for one started over; dim if old.
+fn window_spans(usage: &Usage, windows: usize, dim: bool, now: i64) -> Vec<Span<'static>> {
+    usage
+        .windows
+        .iter()
+        .take(windows)
+        .map(|w| {
+            let pace = paced(w, dim, now);
+            let color = if dim { FAINT } else { pace_color(pace, MUTED) };
+            let left = if w.over(now) {
+                "–".into()
+            } else {
+                w.percent()
+            };
+            let mark = pace.map_or("", Pace::mark);
+            Span::styled(format!(" {left}{mark}"), Style::new().fg(color))
+        })
+        .collect()
+}
+
 /// What's left of a window as a bar `width` long, full when none of it is
 /// used, in eighths, with a mark where as much of its time is left: a bar
 /// ending short of the mark is used faster than its time goes. Known long ago
@@ -228,19 +399,50 @@ fn limits_state(app: &App, now: i64) -> Span<'static> {
     }
 }
 
-/// Every agent that says what its account has used: its plan, then each
-/// window as a bar with its use, and when it starts over; what else it says;
-/// and why it couldn't be asked last time, if it couldn't.
+/// What the TUI knows of the accounts, in the order they show: by service,
+/// then by name, with the CLI Proxy's accounts; the agents alone, in the
+/// order they answered (as they're offered).
+pub(super) fn ordered(app: &App) -> Vec<&crate::tui::limits::Said> {
+    let mut said: Vec<_> = app.limits.agents.iter().collect();
+    if said.iter().any(|s| s.account.is_some()) {
+        said.sort_by_cached_key(|s| {
+            let rank = crate::usage::rank(&s.agent);
+            let name = s.account.as_ref().map(|a| {
+                let label = app.cli_proxy.label(&a.provider, a.email.as_deref());
+                crate::usage::account_short(a, label).to_lowercase()
+            });
+            ((rank.0, rank.1.to_string()), name)
+        });
+    }
+    said
+}
+
+/// Every agent that says what its account has used, or each account the
+/// CLI Proxy holds, under its service: its plan, then each window as a bar
+/// with its use, and when it starts over; what else it says; and why it
+/// couldn't be asked last time, if it couldn't. Above them, whether they
+/// were asked through the CLI Proxy, or why not.
 fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     if !app.account_limits {
         lines.push(Line::styled(crate::usage::OFF, Style::new().fg(MUTED)));
-    } else if app.limits.agents.is_empty() {
+        return lines;
+    }
+    if let Some(via) = &app.limits.via
+        && let Some(said) = via.said()
+    {
+        let color = if via.why().is_some() { ERROR } else { MUTED };
+        lines.push(Line::styled(said, Style::new().fg(color)));
+    }
+    if app.limits.agents.is_empty() {
         let text = if app.limits.asking() || app.limits.asked().is_none() {
             "Asking the agents…"
         } else {
             "No agent here says what its account has used: Claude and codex do, logged in to a subscription."
         };
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
         lines.push(Line::styled(text, Style::new().fg(MUTED)));
     }
     let windows = app.limits.agents.iter().filter_map(|s| s.usage.as_ref());
@@ -248,39 +450,94 @@ fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
         .flat_map(|u| u.windows.iter().map(|w| w.label().width()))
         .max()
         .unwrap_or(0);
+    // An account's lines are under its service's heading, two further in.
+    let deeper = if app.limits.agents.iter().any(|s| s.account.is_some()) {
+        2
+    } else {
+        0
+    };
     // Indent, label, a space, the bar, what's left and its pace.
     let bar_w = width
-        .saturating_sub(2 + label_w + 2 + 10 + 11)
+        .saturating_sub(2 + deeper + label_w + 2 + 10 + 11)
         .clamp(10, 50);
-    let indent = " ".repeat(2 + label_w + 2);
-    for said in &app.limits.agents {
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        let mut heading = vec![
-            glyph(&said.agent),
-            Span::raw(" "),
-            Span::styled(
-                crate::util::capitalize(&said.agent),
-                Style::new().add_modifier(Modifier::BOLD),
-            ),
-        ];
-        if let Some(plan) = said.usage.as_ref().and_then(|u| u.plan.as_ref()) {
-            heading.push(Span::styled(format!("  {plan}"), Style::new().fg(MUTED)));
-        }
-        let mut right = Vec::new();
-        if let Some(usage) = &said.usage
-            && stale(usage, now)
-        {
-            let at = crate::util::local_when(usage.at, now);
-            right.push(Span::styled(format!("as of {at}"), Style::new().fg(FAINT)));
-        }
-        lines.push(Line::from(fit(width, heading, right)));
+    let mut service: Option<&str> = None;
+    for said in ordered(app) {
+        let heading = |name: String| {
+            vec![
+                glyph(&said.agent),
+                Span::raw(" "),
+                Span::styled(name, Style::new().add_modifier(Modifier::BOLD)),
+            ]
+        };
+        let plan = said.usage.as_ref().and_then(|u| u.plan.as_ref());
+        let stale_at = said
+            .usage
+            .as_ref()
+            .filter(|u| stale(u, now))
+            .map(|u| crate::util::local_when(u.at, now));
+        let as_of = |right: &mut Vec<Span<'static>>| {
+            if let Some(at) = &stale_at {
+                right.push(Span::styled(format!("as of {at}"), Style::new().fg(FAINT)));
+            }
+        };
+        let indent = match &said.account {
+            // A service's heading, once, then the account's name under it.
+            Some(account) => {
+                if service != Some(said.agent.as_str()) {
+                    if !lines.is_empty() {
+                        lines.push(Line::default());
+                    }
+                    lines.push(Line::from(heading(crate::util::capitalize(&said.agent))));
+                    service = Some(said.agent.as_str());
+                }
+                let label = app
+                    .cli_proxy
+                    .label(&account.provider, account.email.as_deref());
+                let dim = account.disabled;
+                let mut name = vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        crate::usage::account_title(account, label),
+                        if dim {
+                            Style::new().fg(FAINT)
+                        } else {
+                            Style::new()
+                        },
+                    ),
+                ];
+                if let Some(plan) = plan {
+                    name.push(Span::styled(format!("  {plan}"), Style::new().fg(MUTED)));
+                }
+                let mut right = Vec::new();
+                if dim {
+                    right.push(Span::styled("disabled", Style::new().fg(FAINT)));
+                } else {
+                    as_of(&mut right);
+                }
+                lines.push(Line::from(fit(width, name, right)));
+                "    ".to_string()
+            }
+            None => {
+                service = None;
+                if !lines.is_empty() {
+                    lines.push(Line::default());
+                }
+                let mut name = heading(crate::util::capitalize(&said.agent));
+                if let Some(plan) = plan {
+                    name.push(Span::styled(format!("  {plan}"), Style::new().fg(MUTED)));
+                }
+                let mut right = Vec::new();
+                as_of(&mut right);
+                lines.push(Line::from(fit(width, name, right)));
+                "  ".to_string()
+            }
+        };
+        let under = format!("{indent}{}", " ".repeat(label_w + 2));
         if let Some(usage) = &said.usage {
             let dim = stale(usage, now);
             for w in &usage.windows {
                 let mut spans = vec![Span::styled(
-                    format!("  {}  ", pad(&w.label(), label_w)),
+                    format!("{indent}{}  ", pad(&w.label(), label_w)),
                     Style::new().fg(MUTED),
                 )];
                 spans.extend(bar(w, bar_w, dim, now));
@@ -299,21 +556,34 @@ fn limits_lines(app: &App, width: usize, now: i64) -> Vec<Line<'static>> {
                 lines.push(Line::from(spans));
                 if let Some(when) = w.resets(now) {
                     lines.push(Line::styled(
-                        format!("{indent}{when}"),
+                        format!("{under}{when}"),
                         Style::new().fg(FAINT),
                     ));
                 }
             }
             for note in &usage.notes {
                 lines.push(Line::styled(
-                    format!("{indent}{note}"),
+                    format!("{under}{note}"),
                     Style::new().fg(FAINT),
                 ));
             }
+        } else if let Some(account) = &said.account
+            && said.error.is_none()
+            && !account.disabled
+        {
+            let why = if account.asked() {
+                "no plan's limits"
+            } else {
+                "usage unknown: roster can't ask its service"
+            };
+            lines.push(Line::styled(
+                format!("{indent}{why}"),
+                Style::new().fg(FAINT),
+            ));
         }
         if let Some(error) = &said.error {
             lines.push(Line::styled(
-                format!("  can't tell now: {error}"),
+                format!("{indent}can't tell now: {error}"),
                 Style::new().fg(ERROR),
             ));
         }

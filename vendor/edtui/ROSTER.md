@@ -100,6 +100,8 @@ upstream.
   before the cursor, or what was typed before it in this insert (all
   before it if nothing was), not yanked, stopping once where the insert
   began.
+- What a newer Rust's clippy refuses is written as it asks, doing the same
+  (`Selection::contains_row`'s test of a row, Rust 1.100).
 
 ## Not done
 What vim has and roster's copy still hasn't: `;` and `,`; `~`, `gu`,

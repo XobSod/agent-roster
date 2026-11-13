@@ -16,6 +16,8 @@ pub fn run_sidebar(roster: &mut Roster, id: &str) -> Result<()> {
     app.set_memory_limit(roster.config.memory_warning());
     app.set_grouped(roster.config.grouped());
     app.set_stopped_cards(roster.config.stopped_cards());
+    // Its accounts' labels and icons.
+    app.cli_proxy = roster.config.cli_proxy.clone();
     // The TUI's list as it was, its accounts' limits as it last knew them
     // (not asked here); from the CLI, none.
     app.sidebar_usage = false;

@@ -6,8 +6,24 @@ use crate::*;
 pub fn config(r: &mut Roster, change: Option<ConfigCmd>, defaults: bool, edit: bool) -> Result<()> {
     match change {
         Some(ConfigCmd::Set { setting, value }) => {
+            let secret = setting == secrets::PROXY_KEY;
+            let value = match value {
+                Some(value) => value,
+                // Not on the command line, so not in the shell's history.
+                None if secret => read_secret("The CLI Proxy's management key: ")?,
+                None => bail!("{setting}: what to set it to?"),
+            };
+            if secret && value.trim().is_empty() {
+                bail!("no key given; roster config unset {setting} takes it out");
+            }
             r.change_setting(&setting, Some(&value))?;
-            println!("Set {setting}");
+            match secret {
+                true => println!(
+                    "Set {setting}, kept in {}",
+                    r.paths.secrets_file().display()
+                ),
+                false => println!("Set {setting}"),
+            }
         }
         Some(ConfigCmd::AddAgent { command }) => {
             // Each word as it was given, the settings view's line.
@@ -28,6 +44,7 @@ pub fn config(r: &mut Roster, change: Option<ConfigCmd>, defaults: bool, edit: b
             r.change_setting(&setting, None)?;
             match question {
                 Some(_) => println!("Took [{setting}] out of config.toml"),
+                None if setting == secrets::PROXY_KEY => println!("{setting} is taken out"),
                 None => println!("{setting} is back to its default"),
             }
         }
@@ -51,6 +68,50 @@ pub fn config(r: &mut Roster, change: Option<ConfigCmd>, defaults: bool, edit: b
         None => print::settings(r),
     }
     Ok(())
+}
+
+/// A line read from stdin, its end taken off: on a terminal, after `prompt`,
+/// not shown as it's typed (Esc or C-c leaving it unset).
+fn read_secret(prompt: &str) -> Result<String> {
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use ratatui::crossterm::terminal;
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\n', '\r']).to_string());
+    }
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    // Keys one by one, none shown: C-c among them, so the terminal is
+    // always put back.
+    terminal::enable_raw_mode()?;
+    let typed = (|| -> Result<Option<String>> {
+        let mut line = String::new();
+        loop {
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Enter => return Ok(Some(line)),
+                KeyCode::Esc => return Ok(None),
+                KeyCode::Char('c' | 'd') if ctrl => return Ok(None),
+                KeyCode::Char('u') if ctrl => line.clear(),
+                KeyCode::Backspace => {
+                    line.pop();
+                }
+                KeyCode::Char(c) if !ctrl => line.push(c),
+                _ => {}
+            }
+        }
+    })();
+    terminal::disable_raw_mode().ok();
+    eprintln!();
+    typed?.context("not set")
 }
 
 /// `roster config --edit` when roster couldn't open (`why`): if config.toml

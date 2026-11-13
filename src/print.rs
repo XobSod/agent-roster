@@ -222,54 +222,106 @@ pub fn list_projects(r: &Roster) -> Result<()> {
     Ok(())
 }
 
-/// What each agent's account has used of its limits, asked now: what's left
-/// of each window, whether it's used slower or faster than its time goes,
-/// and when it starts over. An error if an agent's couldn't be read.
+/// What each account has used of its limits, asked now: through a CLI Proxy,
+/// every account it holds, and of each agent of the services it holds none
+/// of (of every agent, without one): what's left of each window, whether
+/// it's used slower or faster than its time goes, and when it starts over.
+/// Why the proxy wasn't asked goes to stderr. An error if one that should
+/// have said couldn't.
 pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
-    use crate::usage::Pace;
+    use crate::usage::{Pace, account_short, account_title};
     if !r.config.account_limits() {
         anyhow::bail!("{}", crate::usage::OFF);
     }
-    let said = r.usage_reader()();
+    let asked = r.usage_reader(Default::default())();
     let now = util::now_ms();
-    let failed = said.iter().filter(|(_, u)| u.is_err()).count();
+    let proxy = &r.config.cli_proxy;
+    let label = |a: &crate::proxy::Account| proxy.label(&a.provider, a.email.as_deref());
+    let mut answers = asked.answers;
+    // By service, then by name; the agents alone, in the order they're offered.
+    if answers.iter().any(|a| a.account.is_some()) {
+        answers.sort_by_cached_key(|a| {
+            let rank = crate::usage::rank(&a.agent);
+            let name = a
+                .account
+                .as_ref()
+                .map(|acc| account_short(acc, label(acc)).to_lowercase());
+            ((rank.0, rank.1.to_string()), name)
+        });
+    }
+    if let Some(why) = asked.via.why() {
+        eprintln!("roster: the CLI Proxy wasn't asked, the agents were: {why}");
+    }
+    let failed = answers.iter().filter(|a| a.said.is_err()).count();
     if json {
-        let items: Vec<_> = said
+        let items: Vec<_> = answers
             .iter()
-            .map(|(agent, usage)| match usage {
-                Ok(u) => json!({
-                    "agent": agent, "plan": u.plan, "at": u.at, "notes": u.notes,
-                    "windows": u.windows.iter().map(|w| json!({
-                        "label": w.label(), "minutes": w.minutes, "used": w.used, "left": w.left(),
-                        "resets_at": w.resets_at, "started_over": w.over(now),
-                        "pace": w.pace(now).map(|p| match p {
-                            Pace::Slow => "slow", Pace::Even => "even", Pace::Fast => "fast", Pace::Out => "out",
-                        }),
-                    })).collect::<Vec<_>>(),
-                }),
-                Err(e) => json!({"agent": agent, "error": format!("{e:#}")}),
+            .map(|answer| {
+                let mut item = match &answer.account {
+                    None => json!({"source": "agent", "agent": answer.agent}),
+                    Some(a) => json!({
+                        "source": "cli_proxy", "provider": a.provider,
+                        "account": {"id": a.id, "email": a.email, "label": label(a),
+                            "disabled": a.disabled},
+                    }),
+                };
+                let said = match &answer.said {
+                    Ok(Some(u)) => json!({
+                        "plan": u.plan, "at": u.at, "notes": u.notes,
+                        "windows": u.windows.iter().map(|w| json!({
+                            "label": w.label(), "minutes": w.minutes, "used": w.used, "left": w.left(),
+                            "resets_at": w.resets_at, "started_over": w.over(now),
+                            "pace": w.pace(now).map(|p| match p {
+                                Pace::Slow => "slow", Pace::Even => "even", Pace::Fast => "fast", Pace::Out => "out",
+                            }),
+                        })).collect::<Vec<_>>(),
+                    }),
+                    Ok(None) => json!({"plan": null, "windows": []}),
+                    Err(e) => json!({"error": format!("{e:#}")}),
+                };
+                if let (Some(item), Some(said)) = (item.as_object_mut(), said.as_object()) {
+                    item.extend(said.clone());
+                }
+                item
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
-    } else if said.is_empty() {
+    } else if answers.is_empty() {
         println!(
             "No agent here says what its account has used: Claude and codex do, logged in to a subscription."
         );
     } else {
-        for (i, (agent, usage)) in said.iter().enumerate() {
+        if let crate::usage::Via::Proxy(url) = &asked.via {
+            println!("via CLI Proxy {url}\n");
+        }
+        for (i, answer) in answers.iter().enumerate() {
             if i > 0 {
                 println!();
             }
-            let u = match usage {
-                Ok(u) => u,
+            // An account by its service and name, an agent by its own.
+            let name = match &answer.account {
+                Some(a) => format!("{} · {}", a.provider, account_title(a, label(a))),
+                None => answer.agent.clone(),
+            };
+            let u = match &answer.said {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    let why = match &answer.account {
+                        Some(a) if a.disabled => "disabled in the CLI Proxy",
+                        Some(a) if !a.asked() => "usage unknown: roster can't ask its service",
+                        _ => "no plan's limits",
+                    };
+                    println!("{name}  {why}");
+                    continue;
+                }
                 Err(e) => {
-                    println!("{agent}  can't tell: {e:#}");
+                    println!("{name}  can't tell: {e:#}");
                     continue;
                 }
             };
             match &u.plan {
-                Some(plan) => println!("{agent}  {plan}"),
-                None => println!("{agent}"),
+                Some(plan) => println!("{name}  {plan}"),
+                None => println!("{name}"),
             }
             let label_w = u.windows.iter().map(|w| w.label().len()).max().unwrap_or(0);
             let paced = u.windows.iter().any(|w| w.pace(now).is_some());
@@ -296,7 +348,7 @@ pub fn print_usage(r: &Roster, json: bool) -> Result<()> {
         }
     }
     if failed > 0 {
-        bail!("{failed} agent(s) couldn't say");
+        bail!("{failed} couldn't say");
     }
     Ok(())
 }
